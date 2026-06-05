@@ -1,4 +1,4 @@
-const CACHE = 'commanddeck-v2';
+const CACHE = 'commanddeck-v3';
 
 const SHELL = [
   '/',
@@ -12,7 +12,7 @@ const SHELL = [
   '/vendor/react.min.js',
   '/vendor/react-dom.min.js',
   '/vendor/babel.min.js',
-  'https://cdn.tailwindcss.com',
+  '/vendor/tailwind.min.js',
 ];
 
 self.addEventListener('install', (event) => {
