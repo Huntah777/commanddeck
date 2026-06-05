@@ -1,4 +1,4 @@
-const CACHE = 'commanddeck-v3';
+const CACHE = 'commanddeck-v4';
 
 const SHELL = [
   '/',
@@ -78,6 +78,34 @@ self.addEventListener('fetch', (event) => {
         })
     )
   );
+});
+
+// Notification scheduler — page posts SCHEDULE_NOTIFICATIONS with a timetable;
+// the SW uses setTimeout to fire each one at the right moment.
+const pendingTimers = new Map();
+
+self.addEventListener('message', (event) => {
+  if (event.data?.type !== 'SCHEDULE_NOTIFICATIONS') return;
+
+  pendingTimers.forEach(t => clearTimeout(t));
+  pendingTimers.clear();
+
+  const now = Date.now();
+  (event.data.notifications || []).forEach(({ id, title, body, fireAt }) => {
+    const delay = fireAt - now;
+    if (delay <= 0 || delay > 12 * 60 * 60 * 1000) return;
+    const timer = setTimeout(() => {
+      self.registration.showNotification(title, {
+        body,
+        icon:    '/icons/icon-192.png',
+        badge:   '/icons/icon-192.png',
+        tag:     id,
+        renotify: false,
+      });
+      pendingTimers.delete(id);
+    }, delay);
+    pendingTimers.set(id, timer);
+  });
 });
 
 // Push notifications

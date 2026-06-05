@@ -412,8 +412,63 @@ const SEED = () => ({
   ],
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
-  ui: { view: 'today', selectedDate: todayKey() },
+  ui: { view: 'today', selectedDate: todayKey(), notif: false },
 });
+
+/* ------------------------------------------------------------------
+   NOTIFICATION SCHEDULER
+   Posts a timetable to the SW which uses setTimeout to fire alerts.
+   Only runs when the user has granted permission AND enabled notif.
+------------------------------------------------------------------- */
+function notifEnabled() {
+  return typeof Notification !== 'undefined' && Notification.permission === 'granted';
+}
+
+function todayAtMins(mins) {
+  const d = new Date();
+  d.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+  return d.getTime();
+}
+
+function scheduleNotifications(state) {
+  if (!notifEnabled() || !state?.ui?.notif) return;
+  if (!navigator.serviceWorker?.controller) return;
+
+  const dow = new Date().getDay();
+  const now = Date.now();
+  const H24 = 86400000;
+  const notifications = [];
+
+  const push = (id, title, body, fireAt) => {
+    if (fireAt > now && fireAt < now + H24)
+      notifications.push({ id, title, body, fireAt });
+  };
+
+  /* Calendar blocks */
+  (state.blocks || []).forEach(b => {
+    if (!b.every.includes(dow) || b.notify === false) return;
+    const s = todayAtMins(b.start), e = todayAtMins(b.end);
+    push(`b-${b.id}-15`,  'Starting in 15 min', b.title, s - 15 * 60000);
+    push(`b-${b.id}-5`,   'Starting in 5 min',  b.title, s -  5 * 60000);
+    push(`b-${b.id}-end`, 'Ending in 5 min',    b.title, e -  5 * 60000);
+  });
+
+  /* Habit reminders */
+  (state.habits || []).forEach(h => {
+    if (!h.reminder || !h.days.includes(dow)) return;
+    const [hr, mn] = h.reminder.split(':').map(Number);
+    const d = new Date(); d.setHours(hr, mn, 0, 0);
+    push(`h-${h.id}`, 'Habit reminder', h.name, d.getTime());
+  });
+
+  /* Task reminders */
+  (state.tasks || []).forEach(t => {
+    if (!t.reminder || t.done) return;
+    push(`t-${t.id}`, 'Task reminder', t.title, new Date(t.reminder).getTime());
+  });
+
+  navigator.serviceWorker.controller.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
+}
 
 /* ------------------------------------------------------------------
    APP
@@ -431,7 +486,15 @@ function App() {
 
   /* Merge helper so we never lose new SEED keys when DB shape evolves */
   const hydrate = (data) => {
-    const merged = { ...SEED(), ...data, ui: { ...SEED().ui, ...(data?.ui || {}) }, pomodoro: { ...SEED().pomodoro, ...(data?.pomodoro || {}) }, pomodoroLogs: data?.pomodoroLogs || [] };
+    const merged = {
+      ...SEED(), ...data,
+      ui:          { ...SEED().ui,       ...(data?.ui       || {}) },
+      pomodoro:    { ...SEED().pomodoro, ...(data?.pomodoro || {}) },
+      pomodoroLogs: data?.pomodoroLogs || [],
+      habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, ...h })),
+      tasks:  (data?.tasks  || []).map(t => ({ reminder: null, ...t })),
+      blocks: (data?.blocks || SEED().blocks).map(b => ({ notify: true, ...b })),
+    };
     if (startView) merged.ui = { ...merged.ui, view: startView };
     return merged;
   };
@@ -479,6 +542,16 @@ function App() {
     }
     setLoaded(true);
   })(); }, []);
+
+  /* Schedule notifications whenever state is ready or changes */
+  useEffect(() => {
+    if (!state) return;
+    scheduleNotifications(state);
+    /* Also reschedule when SW gains control (first install) */
+    const onCtrl = () => scheduleNotifications(state);
+    navigator.serviceWorker?.addEventListener('controllerchange', onCtrl);
+    return () => navigator.serviceWorker?.removeEventListener('controllerchange', onCtrl);
+  }, [state]);
 
   /* Persist on change: localStorage immediately, API debounced */
   const skipFirst = useRef(true);
@@ -962,6 +1035,7 @@ function BlockModal({ block, adding, onClose, onSave, onDelete, currentDow }) {
   const [start, setStart] = useState(toHM(block?.start ?? adding?.start ?? 540));
   const [end,   setEnd]   = useState(toHM(block?.end   ?? adding?.end   ?? 600));
   const [days,  setDays]  = useState(block?.every || [currentDow]);
+  const [notify, setNotify] = useState(block?.notify !== false);
 
   const toggleDay = (d) => setDays(ds => ds.includes(d) ? ds.filter(x=>x!==d) : [...ds, d].sort());
 
@@ -974,6 +1048,7 @@ function BlockModal({ block, adding, onClose, onSave, onDelete, currentDow }) {
       title: title.trim(), pillar,
       start: startM, end: endM,
       every: days.length ? days : [0,1,2,3,4,5,6],
+      notify,
     });
   };
 
@@ -1014,6 +1089,13 @@ function BlockModal({ block, adding, onClose, onSave, onDelete, currentDow }) {
             </button>
           ))}
         </div>
+      </Field>
+      <Field label="Notifications">
+        <label className="flex items-center gap-2.5 cursor-pointer select-none">
+          <input type="checkbox" checked={notify} onChange={e=>setNotify(e.target.checked)}
+            className="w-4 h-4 rounded accent-strategy"/>
+          <span className="text-sm text-bone-300">Alert 15 min before · 5 min before · 5 min before end</span>
+        </label>
       </Field>
       <div className="flex justify-between gap-2 pt-2">
         {!isNew && <button onClick={()=>onDelete(block.id)} className="btn px-3 py-2 rounded-lg text-combat border border-combat/30 hover:bg-combat/10 text-sm flex items-center gap-1.5"><I.trash className="w-4 h-4"/>Delete</button>}
@@ -1134,9 +1216,10 @@ function TaskEditModal({ t, state, setState, onClose }) {
   const [due,   setDue]   = useState(t.due || '');
   const [quadrant, setQuadrant] = useState(t.quadrant || 'plan');
   const [listId, setListId] = useState(t.listId || 'l-inbox');
+  const [reminder, setReminder] = useState(t.reminder || '');
 
   const save = () => {
-    setState(s => ({ ...s, tasks: s.tasks.map(x => x.id === t.id ? { ...x, title: title.trim(), notes, due: due||null, quadrant, listId } : x) }));
+    setState(s => ({ ...s, tasks: s.tasks.map(x => x.id === t.id ? { ...x, title: title.trim(), notes, due: due||null, quadrant, listId, reminder: reminder||null } : x) }));
     onClose();
   };
   return (
@@ -1167,6 +1250,13 @@ function TaskEditModal({ t, state, setState, onClose }) {
           </select>
         </Field>
       </div>
+      <Field label="Remind me (optional)">
+        <div className="flex items-center gap-2">
+          <input type="datetime-local" value={reminder} onChange={e=>setReminder(e.target.value)}
+            className="flex-1 bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 font-mono text-sm"/>
+          {reminder && <button onClick={()=>setReminder('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat flex-shrink-0">CLEAR</button>}
+        </div>
+      </Field>
       <div className="flex justify-end gap-2 pt-2">
         <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Cancel</button>
         <button onClick={save} className="btn px-4 py-2 rounded-lg bg-bone-100 text-ink-950 font-semibold text-sm">Save</button>
@@ -1353,12 +1443,13 @@ function HabitModal({ habit, onClose, onSave, onDelete }) {
   const [name, setName] = useState(habit?.name || '');
   const [pillar, setPillar] = useState(habit?.pillar || 'deen');
   const [days, setDays] = useState(habit?.days || [0,1,2,3,4,5,6]);
+  const [reminder, setReminder] = useState(habit?.reminder || '');
 
   const toggleDay = (d) => setDays(ds => ds.includes(d) ? ds.filter(x=>x!==d) : [...ds, d].sort());
 
   const save = () => {
     if (!name.trim() || !days.length) return;
-    onSave({ id: habit?.id || `h-${Date.now()}`, name: name.trim(), pillar, days, created: habit?.created || Date.now() });
+    onSave({ id: habit?.id || `h-${Date.now()}`, name: name.trim(), pillar, days, created: habit?.created || Date.now(), reminder: reminder || null });
   };
 
   return (
@@ -1392,6 +1483,14 @@ function HabitModal({ habit, onClose, onSave, onDelete }) {
           <button onClick={()=>setDays([0,1,2,3,4,5,6])} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-bone-100">DAILY</button>
           <button onClick={()=>setDays([1,2,3,4,5])} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-bone-100">WEEKDAYS</button>
           <button onClick={()=>setDays([1,4])} className="text-[10px] font-mono tracking-wider text-deen hover:text-bone-100">MON/THU (FAST)</button>
+        </div>
+      </Field>
+      <Field label="Daily reminder (optional)">
+        <div className="flex items-center gap-2">
+          <input type="time" value={reminder} onChange={e=>setReminder(e.target.value)}
+            className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono"/>
+          {reminder && <button onClick={()=>setReminder('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat">CLEAR</button>}
+          {!reminder && <span className="text-[10px] font-mono text-bone-400">Off</span>}
         </div>
       </Field>
       <div className="flex justify-between gap-2 pt-2">
@@ -1660,8 +1759,50 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
         </div>
       </div>
 
+      <NotificationsCard state={state} setState={setState}/>
       <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect}/>
       <DangerZone state={state} setState={setState}/>
+    </div>
+  );
+}
+
+function NotificationsCard({ state, setState }) {
+  const supported = typeof Notification !== 'undefined';
+  const [perm, setPerm] = useState(supported ? Notification.permission : 'denied');
+  const enabled = state.ui?.notif && perm === 'granted';
+
+  const toggle = async () => {
+    if (enabled) {
+      setState(s => ({ ...s, ui: { ...s.ui, notif: false } }));
+      return;
+    }
+    if (perm !== 'granted') {
+      const result = await Notification.requestPermission();
+      setPerm(result);
+      if (result !== 'granted') return;
+    }
+    setState(s => ({ ...s, ui: { ...s.ui, notif: true } }));
+  };
+
+  const statusLine = !supported
+    ? 'Not supported in this browser.'
+    : perm === 'denied'
+    ? 'Blocked — enable in your browser site settings.'
+    : enabled
+    ? 'Active · calendar alerts, habit & task reminders on.'
+    : 'Enable to get calendar alerts, habit & task reminders.';
+
+  return (
+    <div className="card p-5">
+      <div className="text-[10px] font-mono tracking-widest text-bone-400">NOTIFICATIONS</div>
+      <div className="font-display text-xl text-bone-100 mt-1 mb-1">Alerts & reminders</div>
+      <div className="text-sm text-bone-400 mb-3">{statusLine}</div>
+      {supported && perm !== 'denied' && (
+        <button onClick={toggle}
+          className={`btn px-3 py-2 rounded-lg text-sm ${enabled ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>
+          {enabled ? 'Disable notifications' : 'Enable notifications'}
+        </button>
+      )}
     </div>
   );
 }
@@ -1785,6 +1926,9 @@ function PomodoroView({ state, setState }) {
     } catch(e) {}
   };
 
+  const notifRef = useRef(false);
+  notifRef.current = state?.ui?.notif;
+
   /* Called when a phase naturally completes */
   const doComplete = () => {
     const ph    = phaseRef.current;
@@ -1793,6 +1937,17 @@ function PomodoroView({ state, setState }) {
     const c     = cfgRef.current;
     const tasks = tasksRef.current;
     beep();
+    if (notifEnabled() && notifRef.current) {
+      const isWork = PHASES[ph].id === 'work';
+      const task   = tasks.find(t => t.id === tid);
+      try {
+        new Notification(isWork ? 'Focus session complete' : `${PHASES[ph].label} over — back to work`, {
+          body: task?.title || '',
+          icon: '/icons/icon-192.png',
+          tag:  'pomodoro',
+        });
+      } catch(e) {}
+    }
     if (PHASES[ph].id === 'work') {
       const task = tasks.find(t => t.id === tid);
       setState(s => ({
