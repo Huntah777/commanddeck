@@ -436,12 +436,10 @@ function scheduleNotifications(state) {
 
   const dow = new Date().getDay();
   const now = Date.now();
-  const H24 = 86400000;
   const notifications = [];
 
   const push = (id, title, body, fireAt) => {
-    if (fireAt > now && fireAt < now + H24)
-      notifications.push({ id, title, body, fireAt });
+    if (fireAt > now) notifications.push({ id, title, body, fireAt });
   };
 
   /* Calendar blocks */
