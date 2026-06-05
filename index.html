@@ -6,6 +6,17 @@
 <title>Madinah · Command Deck</title>
 <link rel="icon" type="image/svg+xml" href="command-deck-icon.svg" />
 
+<!-- PWA -->
+<link rel="manifest" href="/manifest.json" />
+<meta name="theme-color" content="#0a0a0b" />
+<meta name="format-detection" content="telephone=no" />
+
+<!-- iOS home screen -->
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Command Deck" />
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500;9..144,600;9..144,700&family=Manrope:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -117,9 +128,9 @@ tailwind.config = {
 <body class="bg-tess min-h-screen">
 <div id="root"></div>
 
-<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="/vendor/react.min.js"></script>
+<script src="/vendor/react-dom.min.js"></script>
+<script src="/vendor/babel.min.js"></script>
 
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo, useRef, useCallback } = React;
@@ -400,15 +411,25 @@ function App() {
   const [syncStatus, setSyncStatus] = useState('idle'); /* idle | saving | synced | offline | unauth | local */
   const [setupOpen, setSetupOpen]   = useState(false);
 
+  /* Respect ?view= param from manifest shortcuts */
+  const VALID_VIEWS = ['today','habits','tasks','matrix','stats','focus'];
+  const urlView = new URLSearchParams(location.search).get('view');
+  const startView = VALID_VIEWS.includes(urlView) ? urlView : null;
+
   /* Merge helper so we never lose new SEED keys when DB shape evolves */
-  const hydrate = (data) => ({ ...SEED(), ...data, ui: { ...SEED().ui, ...(data?.ui || {}) }, pomodoro: { ...SEED().pomodoro, ...(data?.pomodoro || {}) }, pomodoroLogs: data?.pomodoroLogs || [] });
+  const hydrate = (data) => {
+    const merged = { ...SEED(), ...data, ui: { ...SEED().ui, ...(data?.ui || {}) }, pomodoro: { ...SEED().pomodoro, ...(data?.pomodoro || {}) }, pomodoroLogs: data?.pomodoroLogs || [] };
+    if (startView) merged.ui = { ...merged.ui, view: startView };
+    return merged;
+  };
 
   /* Initial load */
   useEffect(() => { (async () => {
     const cache = Cache.read();
 
     if (!Sync.configured()) {
-      const initial = cache && cache.habits ? hydrate(cache) : SEED();
+      const base = cache && cache.habits ? hydrate(cache) : SEED();
+      const initial = startView ? { ...base, ui: { ...base.ui, view: startView } } : base;
       setState(initial);
       setSyncStatus('local');
       setLoaded(true);
@@ -522,6 +543,54 @@ function App() {
 }
 
 /* ------------------------------------------------------------------
+   INSTALL BANNER  ─ Android "Add to Home Screen" prompt
+------------------------------------------------------------------- */
+function InstallBanner() {
+  const [prompt, setPrompt] = useState(window._installPrompt || null);
+
+  useEffect(() => {
+    const onReady = () => setPrompt(window._installPrompt);
+    const onDone  = () => setPrompt(null);
+    window.addEventListener('installpromptready', onReady);
+    window.addEventListener('appinstalled_done', onDone);
+    return () => {
+      window.removeEventListener('installpromptready', onReady);
+      window.removeEventListener('appinstalled_done', onDone);
+    };
+  }, []);
+
+  if (!prompt) return null;
+
+  const install = async () => {
+    prompt.prompt();
+    const { outcome } = await prompt.userChoice;
+    if (outcome === 'accepted') setPrompt(null);
+  };
+
+  return (
+    <div className="border-t border-ink-700 px-4 sm:px-6 lg:px-8 py-2 flex items-center justify-between gap-3 bg-ink-900/60">
+      <div className="flex items-center gap-2.5 min-w-0">
+        <img src="/command-deck-icon.svg" alt="" className="w-7 h-7 rounded-lg flex-shrink-0"/>
+        <div className="min-w-0">
+          <div className="text-xs font-semibold text-bone-100 leading-tight">Add to Home Screen</div>
+          <div className="text-[10px] text-bone-400 font-mono tracking-wide">Install Command Deck for offline access</div>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0">
+        <button onClick={()=>setPrompt(null)}
+          className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-bone-100 px-2 py-1">
+          NOT NOW
+        </button>
+        <button onClick={install}
+          className="btn px-3 py-1.5 rounded-lg bg-strategy text-ink-950 text-xs font-bold tracking-wide">
+          INSTALL
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
    HEADER  ─ date, view tabs, quick add
 ------------------------------------------------------------------- */
 function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync }) {
@@ -621,6 +690,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
           </div>
         </div>
       </div>
+      <InstallBanner />
     </header>
   );
 }
@@ -2058,6 +2128,28 @@ function TokenSetupModal({ current, onClose, onSubmit }) {
 
 /* ------------------------------------------------------------------ */
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+
+<script>
+  /* Capture Android install prompt before React mounts */
+  window._installPrompt = null;
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    window._installPrompt = e;
+    window.dispatchEvent(new Event('installpromptready'));
+  });
+  window.addEventListener('appinstalled', () => {
+    window._installPrompt = null;
+    window.dispatchEvent(new Event('appinstalled_done'));
+  });
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js').catch((err) => {
+        console.warn('SW registration failed:', err);
+      });
+    });
+  }
 </script>
 </body>
 </html>
