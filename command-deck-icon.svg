@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img">
+  <title>Command Deck</title>
+  <desc>Islamic 8-pointed star in teal and amber on a near-black rounded square background</desc>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="112" fill="#111111"/>
+  <rect width="512" height="512" rx="112" fill="none" stroke="#1f1f1f" stroke-width="3"/>
+
+  <!-- Outer hex ring -->
+  <polygon points="256,96 336,142 336,234 256,280 176,234 176,142"
+    fill="none" stroke="#5eead4" stroke-width="3" opacity="0.5"/>
+
+  <!-- Inner hex ring -->
+  <polygon points="256,114 318,149 318,219 256,254 194,219 194,149"
+    fill="none" stroke="#5eead4" stroke-width="1.5" opacity="0.2"/>
+
+  <!-- 8-pointed star: axis-aligned square -->
+  <rect x="156" y="136" width="200" height="116"
+    fill="none" stroke="#5eead4" stroke-width="3" opacity="0.95"
+    transform="rotate(0 256 188)"/>
+
+  <!-- 8-pointed star: 45° rotated square -->
+  <rect x="156" y="136" width="116" height="116"
+    fill="none" stroke="#f59e0b" stroke-width="3" opacity="0.9"
+    transform="rotate(45 256 194)"/>
+
+  <!-- Cardinal star points (teal) -->
+  <polygon points="256,88 244,118 268,118" fill="#5eead4" opacity="0.95"/>
+  <polygon points="256,300 244,270 268,270" fill="#5eead4" opacity="0.95"/>
+  <polygon points="164,194 194,182 194,206" fill="#5eead4" opacity="0.95"/>
+  <polygon points="348,194 318,182 318,206" fill="#5eead4" opacity="0.95"/>
+
+  <!-- Diagonal star points (amber) -->
+  <polygon points="174,110 188,142 160,142" fill="#f59e0b" opacity="0.85"/>
+  <polygon points="338,110 324,142 352,142" fill="#f59e0b" opacity="0.85"/>
+  <polygon points="174,278 188,246 160,246" fill="#f59e0b" opacity="0.85"/>
+  <polygon points="338,278 324,246 352,246" fill="#f59e0b" opacity="0.85"/>
+
+  <!-- Centre -->
+  <circle cx="256" cy="194" r="22" fill="#1a2e2e" stroke="#5eead4" stroke-width="2.5"/>
+  <circle cx="256" cy="194" r="11" fill="#5eead4"/>
+  <circle cx="256" cy="194" r="5" fill="#f59e0b"/>
+
+  <!-- Subtle Arabic text at bottom -->
+  <text x="256" y="448" text-anchor="middle"
+    font-family="'Traditional Arabic','Scheherazade New',serif"
+    font-size="36" fill="#5eead4" opacity="0.35">بسم الله</text>
+</svg>
