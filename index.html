@@ -424,11 +424,6 @@ function notifEnabled() {
   return typeof Notification !== 'undefined' && Notification.permission === 'granted';
 }
 
-function showNotificationViaSW(title, body, tag) {
-  if (!navigator.serviceWorker?.controller) return;
-  navigator.serviceWorker.controller.postMessage({ type: 'SHOW_NOTIFICATION', title, body: body || '', tag: tag || 'commanddeck' });
-}
-
 function todayAtMins(mins) {
   const d = new Date();
   d.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
@@ -582,29 +577,6 @@ function App() {
   const setView = (view) => setState(s => ({ ...s, ui: { ...s.ui, view }}));
   const setDate = (k)    => setState(s => ({ ...s, ui: { ...s.ui, selectedDate: k }}));
 
-  const pullFromD1 = async () => {
-    if (!Sync.configured()) return;
-    setSyncStatus('saving');
-    try {
-      const remote = await Sync.load();
-      if (remote) setState(s => hydrate({ ...remote, ui: s.ui }));
-      setSyncStatus('synced');
-    } catch (e) {
-      if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
-      else { setSyncStatus('offline'); }
-    }
-  };
-
-  /* Auto-pull from D1 whenever the app comes back into view */
-  useEffect(() => {
-    if (!loaded) return;
-    const onVisible = () => {
-      if (document.visibilityState === 'visible' && Sync.configured()) pullFromD1();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, [loaded]);
-
   const connectWithToken = async (token) => {
     Sync.setToken(token);
     setSyncStatus('saving');
@@ -643,7 +615,7 @@ function App() {
         {state.ui.view === 'tasks'  && <TasksView state={state} setState={setState} />}
         {state.ui.view === 'matrix' && <MatrixView state={state} setState={setState} />}
         {state.ui.view === 'stats'  && <StatsView state={state} setState={setState}
-            syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect} onPull={pullFromD1}/>}
+            syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}/>}
         {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState}/>}
       </main>
       <footer className="text-center pb-8 text-xs text-ink-500 font-mono tracking-wide">
@@ -776,12 +748,6 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
             </div>
           </div>
 
-          {/* Mobile: sync badge in top row — never clipped by tab overflow */}
-          <div className="flex sm:hidden items-center">
-            <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
-          </div>
-
-          {/* Desktop: sync badge + stats */}
           <div className="hidden sm:flex items-center gap-3">
             <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
             <div className="h-10 w-px bg-ink-700"/>
@@ -814,6 +780,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
             })}
           </nav>
           <div className="flex items-center gap-2">
+            <span className="sm:hidden"><SyncBadge status={syncStatus} onClick={onConfigureSync}/></span>
             <button onClick={()=>setDate(fmtKey(addDays(sel,-1)))}
               className="btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-300">‹</button>
             <button onClick={()=>setDate(todayKey())}
@@ -1671,7 +1638,7 @@ function MatrixView({ state, setState }) {
 /* ------------------------------------------------------------------
    STATS VIEW
 ------------------------------------------------------------------- */
-function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect, onPull }) {
+function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect }) {
   /* 90-day pillar performance */
   const pillarStats = useMemo(() => {
     const today = new Date();
@@ -1791,7 +1758,7 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect,
       </div>
 
       <NotificationsCard state={state} setState={setState}/>
-      <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect} onPull={onPull}/>
+      <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect}/>
       <DangerZone state={state} setState={setState}/>
     </div>
   );
@@ -1838,11 +1805,11 @@ function NotificationsCard({ state, setState }) {
   );
 }
 
-function SyncCard({ status, onConfigure, onDisconnect, onPull }) {
+function SyncCard({ status, onConfigure, onDisconnect }) {
   const connected = status === 'synced' || status === 'saving' || status === 'offline';
   const label = {
     idle:'…', local:'Local only',
-    saving:'Syncing…',
+    saving:'Saving to D1…',
     synced:'In sync with Cloudflare D1',
     offline:'Connected, but currently offline',
     unauth:'Token rejected',
@@ -1854,7 +1821,6 @@ function SyncCard({ status, onConfigure, onDisconnect, onPull }) {
       <div className="text-sm text-bone-400 mb-3">{label}</div>
       <div className="flex flex-wrap gap-2">
         <button onClick={onConfigure} className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm">{connected || status === 'unauth' ? 'Change token' : 'Connect'}</button>
-        {connected && onPull && <button onClick={onPull} disabled={status === 'saving'} className="btn px-3 py-2 rounded-lg border border-tech/40 text-tech hover:bg-tech/10 text-sm disabled:opacity-40">Sync now</button>}
         {connected && <button onClick={onDisconnect} className="btn px-3 py-2 rounded-lg border border-combat/40 text-combat hover:bg-combat/10 text-sm">Disconnect on this device</button>}
       </div>
     </div>
@@ -1972,11 +1938,13 @@ function PomodoroView({ state, setState }) {
     if (notifEnabled() && notifRef.current) {
       const isWork = PHASES[ph].id === 'work';
       const task   = tasks.find(t => t.id === tid);
-      showNotificationViaSW(
-        isWork ? 'Focus session complete' : `${PHASES[ph].label} over — back to work`,
-        task?.title || '',
-        'pomodoro'
-      );
+      try {
+        new Notification(isWork ? 'Focus session complete' : `${PHASES[ph].label} over — back to work`, {
+          body: task?.title || '',
+          icon: '/icons/icon-192.png',
+          tag:  'pomodoro',
+        });
+      } catch(e) {}
     }
     if (PHASES[ph].id === 'work') {
       const task = tasks.find(t => t.id === tid);

@@ -1,4 +1,4 @@
-const CACHE = 'commanddeck-v5';
+const CACHE = 'commanddeck-v4';
 
 const SHELL = [
   '/',
@@ -82,26 +82,9 @@ self.addEventListener('fetch', (event) => {
 
 // Notification scheduler — page posts SCHEDULE_NOTIFICATIONS with a timetable;
 // the SW uses setTimeout to fire each one at the right moment.
-// Page can also post SHOW_NOTIFICATION for immediate display (e.g. Pomodoro).
 const pendingTimers = new Map();
 
-function showNote(title, body, tag, renotify) {
-  return self.registration.showNotification(title, {
-    body:    body || '',
-    icon:    '/icons/icon-192.png',
-    badge:   '/icons/icon-192.png',
-    tag:     tag || 'commanddeck',
-    renotify: renotify !== false,
-    vibrate: [200, 100, 200],
-  });
-}
-
 self.addEventListener('message', (event) => {
-  if (event.data?.type === 'SHOW_NOTIFICATION') {
-    showNote(event.data.title, event.data.body, event.data.tag, true);
-    return;
-  }
-
   if (event.data?.type !== 'SCHEDULE_NOTIFICATIONS') return;
 
   pendingTimers.forEach(t => clearTimeout(t));
@@ -112,7 +95,13 @@ self.addEventListener('message', (event) => {
     const delay = fireAt - now;
     if (delay <= 0) return;
     const timer = setTimeout(() => {
-      showNote(title, body, id, false);
+      self.registration.showNotification(title, {
+        body,
+        icon:    '/icons/icon-192.png',
+        badge:   '/icons/icon-192.png',
+        tag:     id,
+        renotify: false,
+      });
       pendingTimers.delete(id);
     }, delay);
     pendingTimers.set(id, timer);
