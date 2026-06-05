@@ -1792,6 +1792,7 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect,
 
       <NotificationsCard state={state} setState={setState}/>
       <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect} onPull={onPull}/>
+      <AppZone />
       <DangerZone state={state} setState={setState}/>
     </div>
   );
@@ -1857,6 +1858,27 @@ function SyncCard({ status, onConfigure, onDisconnect, onPull }) {
         {connected && onPull && <button onClick={onPull} disabled={status === 'saving'} className="btn px-3 py-2 rounded-lg border border-tech/40 text-tech hover:bg-tech/10 text-sm disabled:opacity-40">Sync now</button>}
         {connected && <button onClick={onDisconnect} className="btn px-3 py-2 rounded-lg border border-combat/40 text-combat hover:bg-combat/10 text-sm">Disconnect on this device</button>}
       </div>
+    </div>
+  );
+}
+
+function AppZone() {
+  const clearCache = async () => {
+    if (!confirm('Clear the app cache and reload? The app will re-download on next load.')) return;
+    try {
+      const regs = await navigator.serviceWorker?.getRegistrations() || [];
+      await Promise.all(regs.map(r => r.unregister()));
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    } catch(e) {}
+    window.location.reload();
+  };
+  return (
+    <div className="card p-5">
+      <div className="text-[10px] font-mono tracking-widest text-bone-400">APP</div>
+      <div className="font-display text-xl text-bone-100 mt-1 mb-1">Cache &amp; updates</div>
+      <div className="text-sm text-bone-400 mb-3">If the app feels stale after an update, clear the cache and reload.</div>
+      <button onClick={clearCache} className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm">Clear cache &amp; reload</button>
     </div>
   );
 }
