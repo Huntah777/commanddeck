@@ -424,6 +424,12 @@ function notifEnabled() {
   return typeof Notification !== 'undefined' && Notification.permission === 'granted';
 }
 
+/* In PWA standalone mode new Notification() is blocked — always go through the SW */
+function showNotificationViaSW(title, body, tag) {
+  if (!navigator.serviceWorker?.controller) return;
+  navigator.serviceWorker.controller.postMessage({ type: 'SHOW_NOTIFICATION', title, body: body || '', tag: tag || 'commanddeck' });
+}
+
 function todayAtMins(mins) {
   const d = new Date();
   d.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
@@ -1960,13 +1966,11 @@ function PomodoroView({ state, setState }) {
     if (notifEnabled() && notifRef.current) {
       const isWork = PHASES[ph].id === 'work';
       const task   = tasks.find(t => t.id === tid);
-      try {
-        new Notification(isWork ? 'Focus session complete' : `${PHASES[ph].label} over — back to work`, {
-          body: task?.title || '',
-          icon: '/icons/icon-192.png',
-          tag:  'pomodoro',
-        });
-      } catch(e) {}
+      showNotificationViaSW(
+        isWork ? 'Focus session complete' : `${PHASES[ph].label} over — back to work`,
+        task?.title || '',
+        'pomodoro'
+      );
     }
     if (PHASES[ph].id === 'work') {
       const task = tasks.find(t => t.id === tid);

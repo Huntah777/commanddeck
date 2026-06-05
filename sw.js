@@ -1,4 +1,4 @@
-const CACHE = 'commanddeck-v4';
+const CACHE = 'commanddeck-v5';
 
 const SHELL = [
   '/',
@@ -84,7 +84,24 @@ self.addEventListener('fetch', (event) => {
 // the SW uses setTimeout to fire each one at the right moment.
 const pendingTimers = new Map();
 
+function swNotify(title, body, tag, renotify) {
+  return self.registration.showNotification(title, {
+    body:     body || '',
+    icon:     '/icons/icon-192.png',
+    badge:    '/icons/icon-192.png',
+    tag:      tag || 'commanddeck',
+    renotify: !!renotify,
+    vibrate:  [200, 100, 200],
+  });
+}
+
 self.addEventListener('message', (event) => {
+  /* Immediate notification from the page (e.g. Pomodoro complete) */
+  if (event.data?.type === 'SHOW_NOTIFICATION') {
+    swNotify(event.data.title, event.data.body, event.data.tag, true);
+    return;
+  }
+
   if (event.data?.type !== 'SCHEDULE_NOTIFICATIONS') return;
 
   pendingTimers.forEach(t => clearTimeout(t));
@@ -95,13 +112,7 @@ self.addEventListener('message', (event) => {
     const delay = fireAt - now;
     if (delay <= 0) return;
     const timer = setTimeout(() => {
-      self.registration.showNotification(title, {
-        body,
-        icon:    '/icons/icon-192.png',
-        badge:   '/icons/icon-192.png',
-        tag:     id,
-        renotify: false,
-      });
+      swNotify(title, body, id, false);
       pendingTimers.delete(id);
     }, delay);
     pendingTimers.set(id, timer);
