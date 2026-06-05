@@ -868,7 +868,7 @@ function EmptyHint({ text }) {
 ------------------------------------------------------------------- */
 function Timeline({ state, setState, dow, dKey, sel }) {
   const HOUR_PX = 56;
-  const startHour = 4, endHour = 24;
+  const startHour = 1, endHour = 24;
   const hours = endHour - startHour;
 
   const blocks = useMemo(() => state.blocks.filter(b => b.every.includes(dow)), [state.blocks, dow]);
