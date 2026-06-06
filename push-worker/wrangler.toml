@@ -28,7 +28,7 @@ database_id  = "9f4a0846-4833-48d5-976c-44bb18045457"  # ← replace with your a
 # 3. Set the VAPID private key as a Worker secret:
 #       cd push-worker
 #       npx wrangler secret put VAPID_PRIVATE_KEY
-#       (paste when prompted): REDACTED
+#       (paste when prompted): 
 #
 # 4. Deploy:
 #       npx wrangler deploy
