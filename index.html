@@ -824,25 +824,27 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
         </div>
 
         {/* Tabs + date picker */}
-        <div className="flex items-center justify-between gap-3 pb-3 overflow-x-auto scrollbar">
-          <nav className="flex gap-1">
-            {tabs.map(t => {
-              const Icon = t.icon;
-              const active = state.ui.view === t.id;
-              return (
-                <button key={t.id} onClick={()=>setView(t.id)}
-                  className={`btn px-3.5 py-2 rounded-lg flex items-center gap-2 text-sm whitespace-nowrap ${active ? 'bg-bone-100 text-ink-950 font-semibold' : 'text-bone-300 hover:bg-ink-800'}`}>
-                  <Icon className="w-4 h-4"/>{t.label}
-                </button>
-              );
-            })}
-          </nav>
-          <div className="flex items-center gap-2">
-            <span className="sm:hidden flex items-center gap-1.5">
+        <div className="flex items-center gap-2 pb-3">
+          <div className="flex-1 min-w-0 overflow-x-auto scrollbar">
+            <nav className="flex gap-1">
+              {tabs.map(t => {
+                const Icon = t.icon;
+                const active = state.ui.view === t.id;
+                return (
+                  <button key={t.id} onClick={()=>setView(t.id)}
+                    className={`btn px-3.5 py-2 rounded-lg flex items-center gap-2 text-sm whitespace-nowrap ${active ? 'bg-bone-100 text-ink-950 font-semibold' : 'text-bone-300 hover:bg-ink-800'}`}>
+                    <Icon className="w-4 h-4"/>{t.label}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="sm:hidden flex items-center gap-1">
               <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
               {syncStatus !== 'local' && (
                 <button onClick={onSyncNow} title="Sync now"
-                  className={`btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-400 ${syncStatus === 'saving' ? 'animate-spin pointer-events-none' : ''}`}>
+                  className={`btn w-7 h-7 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-400 ${syncStatus === 'saving' ? 'animate-spin pointer-events-none' : ''}`}>
                   <I.refresh className="w-3.5 h-3.5"/>
                 </button>
               )}
@@ -850,7 +852,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
             <button onClick={()=>setDate(fmtKey(addDays(sel,-1)))}
               className="btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-300">‹</button>
             <button onClick={()=>setDate(todayKey())}
-              className="btn px-3 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 text-xs font-mono tracking-wider text-bone-300">TODAY</button>
+              className="btn px-2.5 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 text-xs font-mono tracking-wider text-bone-300">TODAY</button>
             <button onClick={()=>setDate(fmtKey(addDays(sel,1)))}
               className="btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-300">›</button>
           </div>
@@ -1127,7 +1129,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
           placeholder="Deep work · Asbab al-Nuzul · etc."/>
       </Field>
       <Field label="Pillar">
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
           {resolvePillars(state).map(p => (
             <button key={p.id} onClick={()=>setPillar(p.id)}
               className={`btn px-2 py-2 rounded-lg text-xs font-medium ${pillar===p.id ? `glow-${p.tw}` : 'border border-ink-700'}`}
@@ -1160,8 +1162,8 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
       <Field label="Notifications">
         <label className="flex items-center gap-2.5 cursor-pointer select-none">
           <input type="checkbox" checked={notify} onChange={e=>setNotify(e.target.checked)}
-            className="w-4 h-4 rounded accent-strategy"/>
-          <span className="text-sm text-bone-300">Alert 15 min before · 5 min before · 5 min before end</span>
+            className="w-4 h-4 rounded accent-strategy flex-shrink-0"/>
+          <span className="text-sm text-bone-300 min-w-0 leading-snug">Alert 15 min before · 5 min before · 5 min before end</span>
         </label>
       </Field>
       <div className="flex justify-between gap-2 pt-2">
@@ -1211,15 +1213,15 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
       </div>
       {open && (
         <div className="border-t border-ink-700 p-2.5 space-y-2 fadeUp">
-          <div className="flex gap-2 items-center text-xs">
+          <div className="flex gap-2 items-center text-xs flex-wrap">
             <input type="date" value={due} onChange={e=>setDue(e.target.value)}
-              className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100 font-mono"/>
+              className="min-w-[120px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100 font-mono"/>
             <select value={quadrant} onChange={e=>setQuadrant(e.target.value)}
-              className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
+              className="flex-1 min-w-[90px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
               {resolveQuads(state).map(q => <option key={q.id} value={q.id}>{q.title}</option>)}
             </select>
             <select value={listId} onChange={e=>setListId(e.target.value)}
-              className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
+              className="flex-1 min-w-[90px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
               {state.lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
             </select>
           </div>
@@ -1258,14 +1260,14 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart }) {
             {t.title}
           </div>
           {!compact && (
-            <div className="flex items-center gap-2 mt-1 text-[10px] font-mono tracking-wider text-bone-400">
+            <div className="flex items-center gap-2 mt-1 text-[10px] font-mono tracking-wider text-bone-400 flex-wrap">
               {t.due && <span className={t.due < todayKey() && !t.done ? 'text-combat' : ''}>{t.due}</span>}
               {q && <span className="px-1.5 rounded-sm border border-ink-700">{q.title.toUpperCase()}</span>}
               {list && <span style={{ color: list.color }}>· {list.name}</span>}
             </div>
           )}
         </div>
-        <button onClick={remove} className="opacity-0 group-hover:opacity-100 text-bone-400 hover:text-combat transition-opacity">
+        <button onClick={remove} className="sm:opacity-0 group-hover:opacity-100 text-bone-400 hover:text-combat transition-opacity shrink-0">
           <I.x className="w-4 h-4"/>
         </button>
       </div>
@@ -1299,7 +1301,7 @@ function TaskEditModal({ t, state, setState, onClose }) {
         <textarea rows={3} value={notes} onChange={e=>setNotes(e.target.value)}
           className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 text-sm scrollbar"/>
       </Field>
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <Field label="Due">
           <input type="date" value={due} onChange={e=>setDue(e.target.value)}
             className="w-full bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 font-mono text-sm"/>
@@ -1392,9 +1394,9 @@ function HabitsView({ state, setState }) {
 
   return (
     <div className="pt-6 fadeUp">
-      <div className="flex items-end justify-between mb-4">
+      <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
         <SectionHeading kicker="Discipline" title="Habits across the five pillars" sub="Deen · Tech · Combat · Strategy · Character"/>
-        <button onClick={()=>setAdding(true)} className="btn px-4 py-2 rounded-lg bg-strategy text-ink-950 font-semibold text-sm flex items-center gap-1.5"><I.plus className="w-4 h-4"/>New habit</button>
+        <button onClick={()=>setAdding(true)} className="btn px-4 py-2 rounded-lg bg-strategy text-ink-950 font-semibold text-sm flex items-center gap-1.5 shrink-0"><I.plus className="w-4 h-4"/>New habit</button>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -1492,7 +1494,7 @@ function HabitCard({ h, state, setState, onEdit }) {
             let cls = 'heat-0';
             if (d.done) cls = 'heat-4';
             else if (d.scheduled) cls = 'heat-1';
-            return <div key={i} className={`w-2 h-3.5 rounded-[2px] ${cls}`} title={`${d.k}${d.done?' · done':''}`} style={d.done ? { background: p.color } : (d.scheduled ? { background: `${p.color}26` } : {})}/>;
+            return <div key={i} className={`w-1.5 h-3 sm:w-2 sm:h-3.5 rounded-[2px] ${cls}`} title={`${d.k}${d.done?' · done':''}`} style={d.done ? { background: p.color } : (d.scheduled ? { background: `${p.color}26` } : {})}/>;
           })}
         </div>
         {streak > 0 && (
@@ -1527,7 +1529,7 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
           className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100"/>
       </Field>
       <Field label="Pillar">
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
           {resolvePillars(state).map(p => (
             <button key={p.id} onClick={()=>setPillar(p.id)}
               className={`btn px-2 py-2 rounded-lg text-xs font-medium ${pillar===p.id ? `glow-${p.tw}` : 'border border-ink-700'}`}
@@ -1553,10 +1555,10 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
         </div>
       </Field>
       <Field label="Daily reminder (optional)">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <input type="time" value={reminder} onChange={e=>setReminder(e.target.value)}
-            className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono"/>
-          {reminder && <button onClick={()=>setReminder('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat">CLEAR</button>}
+            className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono min-w-0"/>
+          {reminder && <button onClick={()=>setReminder('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat shrink-0">CLEAR</button>}
           {!reminder && <span className="text-[10px] font-mono text-bone-400">Off</span>}
         </div>
       </Field>
@@ -2399,18 +2401,17 @@ function PomodoroView({ state, setState }) {
         <div className="lg:col-span-3 space-y-4">
 
           {/* Phase pills */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {PHASES.map((p, i) => (
               <button key={p.id} onClick={() => { if (!running) setPhase(i); }}
-                className="btn px-4 py-1.5 rounded-full text-xs font-mono tracking-wider"
+                className="btn px-3 sm:px-4 py-1.5 rounded-full text-xs font-mono tracking-wider"
                 style={phase === i
                   ? { background: `${p.color}20`, color: p.color, border: `1px solid ${p.color}55` }
                   : { color: '#9a9788', border: '1px solid #1f1f24' }}>
                 {p.label.toUpperCase()}
               </button>
             ))}
-            <div className="flex-1"/>
-            <span className="font-mono text-[10px] text-bone-400">SESSION #{doneCount + 1}</span>
+            <span className="font-mono text-[10px] text-bone-400 ml-auto">SESSION #{doneCount + 1}</span>
           </div>
 
           {/* Ring + clock */}
