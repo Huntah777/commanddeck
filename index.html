@@ -269,6 +269,18 @@ const fromHM = (s) => { const [h,m] = s.split(':').map(Number); return (h||0)*60
 const SALAH_LOC_KEY   = 'madinah_salah_loc';
 const SALAH_CACHE_PFX = 'madinah_salah_';
 const SALAH_DURATION  = 20; /* minutes of timeline space per prayer */
+const SALAH_METHODS = [
+  { id:  2, label: 'ISNA — North America' },
+  { id:  3, label: 'Muslim World League' },
+  { id:  4, label: 'Umm Al-Qura — Makkah' },
+  { id:  5, label: 'Egyptian General Authority' },
+  { id:  1, label: 'Univ. of Islamic Sciences, Karachi' },
+  { id:  9, label: 'Kuwait' },
+  { id: 10, label: 'Qatar' },
+  { id: 12, label: 'UOIF — France' },
+  { id: 13, label: 'Diyanet — Turkey' },
+  { id: 15, label: 'Moonsighting Committee Worldwide' },
+];
 const SALAH_NAMES = {
   Fajr:    { en:'Fajr',    ar:'الفجر'  },
   Dhuhr:   { en:'Dhuhr',   ar:'الظهر'  },
@@ -277,7 +289,7 @@ const SALAH_NAMES = {
   Isha:    { en:'Isha',    ar:'العشاء' },
 };
 
-function useSalahTimes(dKey) {
+function useSalahTimes(dKey, method, school) {
   const [salahTimes, setSalahTimes] = useState(null);
   const [location, setLocation]     = useState(() => {
     try { return JSON.parse(localStorage.getItem(SALAH_LOC_KEY)); } catch { return null; }
@@ -285,17 +297,17 @@ function useSalahTimes(dKey) {
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState(null);
 
-  const fetchTimes = useCallback(async (lat, lon, dk) => {
-    const cacheKey = `${SALAH_CACHE_PFX}${dk}_${lat.toFixed(3)}_${lon.toFixed(3)}`;
+  const fetchTimes = useCallback(async (lat, lon, dk, m, s) => {
+    const cacheKey = `${SALAH_CACHE_PFX}${dk}_${lat.toFixed(3)}_${lon.toFixed(3)}_m${m}_s${s}`;
     try {
       const cached = localStorage.getItem(cacheKey);
       if (cached) { setSalahTimes(JSON.parse(cached)); return; }
     } catch {}
     setLoading(true); setError(null);
     try {
-      const [y, m, d] = dk.split('-');
+      const [y, mo, d] = dk.split('-');
       const r = await fetch(
-        `https://api.aladhan.com/v1/timings/${d}-${m}-${y}?latitude=${lat}&longitude=${lon}&method=3`
+        `https://api.aladhan.com/v1/timings/${d}-${mo}-${y}?latitude=${lat}&longitude=${lon}&method=${m}&school=${s}`
       );
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const json = await r.json();
@@ -314,23 +326,23 @@ function useSalahTimes(dKey) {
         const loc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
         setLocation(loc);
         try { localStorage.setItem(SALAH_LOC_KEY, JSON.stringify(loc)); } catch {}
-        fetchTimes(loc.lat, loc.lon, dKey);
+        fetchTimes(loc.lat, loc.lon, dKey, method, school);
       },
       () => { setError('Location access denied'); setLoading(false); },
       { timeout: 10000 }
     );
-  }, [dKey, fetchTimes]);
+  }, [dKey, method, school, fetchTimes]);
 
   useEffect(() => {
-    if (location) fetchTimes(location.lat, location.lon, dKey);
-  }, [location, dKey, fetchTimes]);
+    if (location) fetchTimes(location.lat, location.lon, dKey, method, school);
+  }, [location, dKey, method, school, fetchTimes]);
 
   const salahBlocks = useMemo(() => {
     if (!salahTimes) return [];
     return Object.entries(SALAH_NAMES).map(([key, names]) => {
       const raw = salahTimes[key];
       if (!raw) return null;
-      const timeOnly = raw.split(' ')[0]; /* strip "(+1)" suffix if present */
+      const timeOnly = raw.split(' ')[0];
       const start = fromHM(timeOnly);
       return { id:`salah-${key}`, title:names.en, subtitle:names.ar, pillar:'deen', start, end: start + SALAH_DURATION, isSalah:true };
     }).filter(Boolean);
@@ -412,7 +424,7 @@ const SEED = () => ({
   ],
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
-  ui: { view: 'today', selectedDate: todayKey(), notif: false },
+  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0 },
 });
 
 /* ------------------------------------------------------------------
@@ -881,7 +893,9 @@ function Timeline({ state, setState, dow, dKey, sel }) {
   const [editing, setEditing] = useState(null);
   const [adding,  setAdding]  = useState(null);
 
-  const { salahBlocks, location, loading: salahLoading, error: salahError, resyncLocation } = useSalahTimes(dKey);
+  const salahMethod = state.ui.salahMethod ?? 3;
+  const salahSchool = state.ui.salahSchool ?? 0;
+  const { salahBlocks, location, loading: salahLoading, error: salahError, resyncLocation } = useSalahTimes(dKey, salahMethod, salahSchool);
 
   const layouts = useMemo(() => layoutBlocks([...blocks, ...salahBlocks]), [blocks, salahBlocks]);
 
@@ -1763,10 +1777,52 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
         </div>
       </div>
 
+      <SalahCard state={state} setState={setState}/>
       <NotificationsCard state={state} setState={setState}/>
       <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect}/>
       <AppZone />
       <DangerZone state={state} setState={setState}/>
+    </div>
+  );
+}
+
+function SalahCard({ state, setState }) {
+  const method = state.ui.salahMethod ?? 3;
+  const school = state.ui.salahSchool ?? 0;
+  const setMethod = (v) => setState(s => ({ ...s, ui: { ...s.ui, salahMethod: Number(v) } }));
+  const setSchool = (v) => setState(s => ({ ...s, ui: { ...s.ui, salahSchool: Number(v) } }));
+  return (
+    <div className="card p-5">
+      <div className="text-[10px] font-mono tracking-widest text-bone-400">PRAYER TIMES</div>
+      <div className="font-display text-xl text-bone-100 mt-1 mb-4">Salah calculation</div>
+      <div className="space-y-4">
+        <div>
+          <div className="text-xs font-mono tracking-widest text-bone-400 mb-2">CALCULATION METHOD</div>
+          <select
+            value={method}
+            onChange={e => setMethod(e.target.value)}
+            className="w-full bg-ink-800 border border-ink-600 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-deen/60"
+          >
+            {SALAH_METHODS.map(m => (
+              <option key={m.id} value={m.id}>{m.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <div className="text-xs font-mono tracking-widest text-bone-400 mb-2">ASR JURISTIC METHOD</div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setSchool(0)}
+              className={`btn flex-1 py-2 rounded-lg border text-sm ${school === 0 ? 'bg-deen/20 border-deen/50 text-deen' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}
+            >Shafi / Standard</button>
+            <button
+              onClick={() => setSchool(1)}
+              className={`btn flex-1 py-2 rounded-lg border text-sm ${school === 1 ? 'bg-deen/20 border-deen/50 text-deen' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}
+            >Hanafi</button>
+          </div>
+          <div className="text-xs text-bone-400 mt-2">Hanafi Asr begins when a shadow is twice the object's height; standard is once.</div>
+        </div>
+      </div>
     </div>
   );
 }
