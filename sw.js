@@ -1,4 +1,4 @@
-const CACHE = 'commanddeck-v5';
+const CACHE = 'commanddeck-v6';
 
 const SHELL = [
   '/',
@@ -113,6 +113,11 @@ self.addEventListener('message', (event) => {
     if (delay <= 0) return;
     const timer = setTimeout(() => {
       swNotify(title, body, id, false);
+      /* For salah notifications: also signal open pages to play adhan tone */
+      if (id.startsWith('salah-')) {
+        self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+          .then(list => list.forEach(c => c.postMessage({ type: 'PLAY_ADHAN' })));
+      }
       pendingTimers.delete(id);
     }, delay);
     pendingTimers.set(id, timer);

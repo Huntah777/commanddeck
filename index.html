@@ -310,7 +310,11 @@ function useSalahTimes(dKey, method, school) {
     const cacheKey = `${SALAH_CACHE_PFX}${dk}_${lat.toFixed(3)}_${lon.toFixed(3)}_m${m}_s${s}`;
     try {
       const cached = localStorage.getItem(cacheKey);
-      if (cached) { setSalahTimes(JSON.parse(cached)); return; }
+      if (cached) {
+        setSalahTimes(JSON.parse(cached));
+        if (dk === todayKey()) { try { localStorage.setItem('madinah_today_salah', cached); } catch {} }
+        return;
+      }
     } catch {}
     setLoading(true); setError(null);
     try {
@@ -322,6 +326,7 @@ function useSalahTimes(dKey, method, school) {
       const json = await r.json();
       const t = json.data.timings;
       try { localStorage.setItem(cacheKey, JSON.stringify(t)); } catch {}
+      if (dk === todayKey()) { try { localStorage.setItem('madinah_today_salah', JSON.stringify(t)); } catch {} }
       setSalahTimes(t);
     } catch(e) { setError('Salah times unavailable'); }
     setLoading(false);
@@ -474,6 +479,20 @@ function scheduleNotifications(state) {
     if (fireAt > now) notifications.push({ id, title, body, fireAt });
   };
 
+  /* Salah (prayer) times — read from today's cached API response */
+  try {
+    const todaySalah = JSON.parse(localStorage.getItem('madinah_today_salah') || 'null');
+    if (todaySalah) {
+      Object.entries(SALAH_NAMES).forEach(([key, names]) => {
+        const raw = todaySalah[key];
+        if (!raw) return;
+        const [h, m] = raw.split(' ')[0].split(':').map(Number);
+        const d = new Date(); d.setHours(h, m, 0, 0);
+        push(`salah-${key}`, names.en, `${names.ar} · Time to pray`, d.getTime());
+      });
+    }
+  } catch(e) {}
+
   /* Calendar blocks */
   (state.blocks || []).forEach(b => {
     if (!b.every.includes(dow) || b.notify === false) return;
@@ -498,6 +517,35 @@ function scheduleNotifications(state) {
   });
 
   navigator.serviceWorker.controller.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
+}
+
+/* Synthesised adhan tone — plays when the page is open at prayer time */
+function playAdhan() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    /* A short rising call pattern loosely based on common adhan melodic contour */
+    const seq = [
+      { f: 293.66, t: 0.00, d: 0.55 },  // D4
+      { f: 440.00, t: 0.65, d: 0.65 },  // A4
+      { f: 587.33, t: 1.40, d: 0.90 },  // D5
+      { f: 440.00, t: 2.40, d: 0.55 },  // A4
+      { f: 392.00, t: 3.05, d: 0.45 },  // G4
+      { f: 349.23, t: 3.60, d: 0.80 },  // F4
+    ];
+    seq.forEach(({ f, t, d }) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = f;
+      gain.gain.setValueAtTime(0, ctx.currentTime + t);
+      gain.gain.linearRampToValueAtTime(0.3, ctx.currentTime + t + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t + d);
+      osc.start(ctx.currentTime + t);
+      osc.stop(ctx.currentTime + t + d + 0.05);
+    });
+    setTimeout(() => { try { ctx.close(); } catch(e) {} }, 5000);
+  } catch(e) {}
 }
 
 /* ------------------------------------------------------------------
@@ -581,11 +629,24 @@ function App() {
   useEffect(() => {
     if (!state) return;
     scheduleNotifications(state);
-    /* Also reschedule when SW gains control (first install) */
+    /* Reschedule when SW gains control (first install) */
     const onCtrl = () => scheduleNotifications(state);
     navigator.serviceWorker?.addEventListener('controllerchange', onCtrl);
-    return () => navigator.serviceWorker?.removeEventListener('controllerchange', onCtrl);
+    /* Reschedule whenever the page becomes visible (Android/iPad kill SWs in background) */
+    const onVisible = () => { if (document.visibilityState === 'visible') scheduleNotifications(state); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      navigator.serviceWorker?.removeEventListener('controllerchange', onCtrl);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [state]);
+
+  /* Play adhan when SW signals prayer time and page is open */
+  useEffect(() => {
+    const onMsg = (e) => { if (e.data?.type === 'PLAY_ADHAN') playAdhan(); };
+    navigator.serviceWorker?.addEventListener('message', onMsg);
+    return () => navigator.serviceWorker?.removeEventListener('message', onMsg);
+  }, []);
 
   /* Persist on change: localStorage immediately, API debounced */
   const skipFirst = useRef(true);
