@@ -124,17 +124,29 @@ self.addEventListener('message', (event) => {
   });
 });
 
-// Push notifications
+// Push notifications — content arrives encrypted (RFC 8291), decrypted automatically by the browser
 self.addEventListener('push', (event) => {
-  const data = event.data ? event.data.json() : {};
-  const title = data.title || 'Command Deck';
-  const options = {
-    body: data.body || '',
-    icon: '/icons/icon-192.png',
-    badge: '/icons/icon-192.png',
-    data: data.url || '/',
-  };
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil((async () => {
+    let data = {};
+    try { data = event.data?.json() || {}; } catch {}
+
+    const title = data.title || 'Command Deck';
+    await self.registration.showNotification(title, {
+      body:     data.body || '',
+      icon:     '/icons/icon-192.png',
+      badge:    '/icons/icon-192.png',
+      tag:      data.tag || 'commanddeck',
+      renotify: true,
+      vibrate:  [200, 100, 200],
+      data:     { isSalah: !!data.isSalah },
+    });
+
+    /* If this is a prayer-time push, also play the adhan in any open page */
+    if (data.isSalah) {
+      const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+      clients.forEach(c => c.postMessage({ type: 'PLAY_ADHAN' }));
+    }
+  })());
 });
 
 self.addEventListener('notificationclick', (event) => {

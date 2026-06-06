@@ -447,12 +447,70 @@ const SEED = () => ({
 });
 
 /* ------------------------------------------------------------------
-   NOTIFICATION SCHEDULER
-   Posts a timetable to the SW which uses setTimeout to fire alerts.
-   Only runs when the user has granted permission AND enabled notif.
+   NOTIFICATION SCHEDULER  +  WEB PUSH (background)
+   SW setTimeout fires while the app is open.
+   Web Push (via Cloudflare Cron Worker) fires even when app is closed.
 ------------------------------------------------------------------- */
+
+/* VAPID public key — must match the private key stored in the Cron Worker */
+const VAPID_PUBLIC_KEY = 'BMg79Dc4KgbVAa253omi5oER5VpB3ErcDnjaR5lgmIinGMVlUpe4-LUgfuQrTb9a3urAaLnDZgQ_vtE4OvVLcPA';
+
+function urlB64ToUint8Array(b64) {
+  const pad = '='.repeat((4 - b64.length % 4) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
 function notifEnabled() {
   return typeof Notification !== 'undefined' && Notification.permission === 'granted';
+}
+
+/* Subscribe this device to Web Push and send the schedule to the server.
+   No-ops silently if push is unsupported or sync is not configured. */
+async function syncPushSchedule(notifications) {
+  if (!Sync.configured() || !notifEnabled()) return;
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    if (!reg?.pushManager) return;
+
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly:    true,
+        applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY),
+      });
+    }
+
+    const subJson = sub.toJSON();
+    const id      = sub.endpoint.slice(-32); /* stable device identifier */
+
+    await fetch('/api/push', {
+      method:  'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${Sync.getToken()}`,
+      },
+      body: JSON.stringify({ id, subscription: subJson, schedule: notifications }),
+    });
+  } catch(e) { /* no-op — background push is best-effort */ }
+}
+
+/* Unsubscribe this device from Web Push */
+async function removePushSubscription() {
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    const sub = await reg?.pushManager?.getSubscription();
+    if (!sub) return;
+    const id = sub.endpoint.slice(-32);
+    await sub.unsubscribe();
+    if (Sync.configured()) {
+      await fetch('/api/push', {
+        method:  'DELETE',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${Sync.getToken()}` },
+        body: JSON.stringify({ id }),
+      });
+    }
+  } catch(e) {}
 }
 
 /* In PWA standalone mode new Notification() is blocked — always go through the SW */
@@ -517,6 +575,10 @@ function scheduleNotifications(state) {
   });
 
   navigator.serviceWorker.controller.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
+
+  /* Also push the schedule to the server so the Cron Worker can fire
+     background notifications when the app is closed */
+  syncPushSchedule(notifications);
 }
 
 /* Synthesised adhan tone — plays when the page is open at prayer time */
@@ -2028,12 +2090,27 @@ function SalahCard({ state, setState }) {
 
 function NotificationsCard({ state, setState }) {
   const supported = typeof Notification !== 'undefined';
-  const [perm, setPerm] = useState(supported ? Notification.permission : 'denied');
+  const [perm, setPerm]     = useState(supported ? Notification.permission : 'denied');
+  const [pushOk, setPushOk] = useState(false);
   const enabled = state.ui?.notif && perm === 'granted';
+  const syncOk  = Sync.configured();
+
+  /* Check if a push subscription already exists */
+  useEffect(() => {
+    (async () => {
+      try {
+        const reg = await navigator.serviceWorker?.ready;
+        const sub = await reg?.pushManager?.getSubscription();
+        setPushOk(!!sub);
+      } catch {}
+    })();
+  }, [enabled]);
 
   const toggle = async () => {
     if (enabled) {
       setState(s => ({ ...s, ui: { ...s.ui, notif: false } }));
+      await removePushSubscription();
+      setPushOk(false);
       return;
     }
     if (perm !== 'granted') {
@@ -2042,21 +2119,33 @@ function NotificationsCard({ state, setState }) {
       if (result !== 'granted') return;
     }
     setState(s => ({ ...s, ui: { ...s.ui, notif: true } }));
+    /* Push subscription will be created by syncPushSchedule on next scheduleNotifications call */
   };
+
+  const pushStatus = !syncOk
+    ? 'Connect Cloudflare D1 sync to enable background push.'
+    : pushOk
+    ? 'Background push active — fires even when the app is closed.'
+    : 'Background push pending — will activate after first sync.';
 
   const statusLine = !supported
     ? 'Not supported in this browser.'
     : perm === 'denied'
     ? 'Blocked — enable in your browser site settings.'
     : enabled
-    ? 'Active · calendar alerts, habit & task reminders on.'
-    : 'Enable to get calendar alerts, habit & task reminders.';
+    ? 'Active · prayer times, calendar, habits & tasks.'
+    : 'Enable to get prayer time alerts and reminders.';
 
   return (
     <div className="card p-5">
       <div className="text-[10px] font-mono tracking-widest text-bone-400">NOTIFICATIONS</div>
       <div className="font-display text-xl text-bone-100 mt-1 mb-1">Alerts & reminders</div>
       <div className="text-sm text-bone-400 mb-3">{statusLine}</div>
+      {enabled && (
+        <div className={`text-xs font-mono mb-3 px-2 py-1.5 rounded-md border ${pushOk ? 'border-deen/30 text-deen bg-deen/10' : 'border-ink-700 text-bone-500'}`}>
+          {pushStatus}
+        </div>
+      )}
       {supported && perm !== 'denied' && (
         <button onClick={toggle}
           className={`btn px-3 py-2 rounded-lg text-sm ${enabled ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>

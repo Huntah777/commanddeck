@@ -1,0 +1,36 @@
+name              = "commanddeck-push"
+main              = "index.js"
+compatibility_date = "2024-09-23"
+
+# Fires every 2 minutes — checks D1 for due notifications and sends Web Push
+[triggers]
+crons = ["*/2 * * * *"]
+
+# Bind the same D1 database as your Cloudflare Pages project
+# Find the database_id in: Cloudflare dashboard → Storage & Databases → D1 → your DB
+[[d1_databases]]
+binding      = "DB"
+database_name = "madinah-deck"        # the name you gave the DB when you created it
+database_id  = "9f4a0846-4833-48d5-976c-44bb18045457"  # ← replace with your actual D1 database ID
+
+# ─── Deployment steps ────────────────────────────────────────────────────────
+#
+# 1. Replace YOUR_DATABASE_ID_HERE with your D1 database ID from the dashboard.
+#
+# 2. Add the push_subs table to your D1 database (run in Cloudflare D1 console):
+#       CREATE TABLE IF NOT EXISTS push_subs (
+#         id          TEXT PRIMARY KEY,
+#         subscription TEXT NOT NULL,
+#         schedule    TEXT NOT NULL DEFAULT '[]',
+#         updated_at  INTEGER NOT NULL
+#       );
+#
+# 3. Set the VAPID private key as a Worker secret:
+#       cd push-worker
+#       npx wrangler secret put VAPID_PRIVATE_KEY
+#       (paste when prompted): REDACTED
+#
+# 4. Deploy:
+#       npx wrangler deploy
+#
+# ─────────────────────────────────────────────────────────────────────────────
