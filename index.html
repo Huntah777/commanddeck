@@ -234,6 +234,14 @@ const PILLARS = [
 ];
 const pillarById = (id) => PILLARS.find(p => p.id === id) || PILLARS[0];
 
+/* State-aware helpers — merge admin overrides on top of the defaults */
+const resolvePillars = (state) =>
+  PILLARS.map(p => ({ ...p, ...(state?.admin?.pillars?.[p.id] || {}) }));
+const resolveQuads = (state) =>
+  QUADS.map(q => ({ ...q, ...(state?.admin?.quads?.[q.id] || {}) }));
+const pillarByIdFromState = (id, state) =>
+  resolvePillars(state).find(p => p.id === id) || PILLARS[0];
+
 /* ------------------------------------------------------------------
    QUADRANTS  ─ Eisenhower
 ------------------------------------------------------------------- */
@@ -426,6 +434,11 @@ const SEED = () => ({
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
   ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0 },
+  admin: {
+    pillars: {},          /* { [id]: { name?, color? } } */
+    quads: {},            /* { [id]: { title?, sub?, hint? } } */
+    fastingDays: [1, 4],  /* Mon=1, Thu=4 */
+  },
 });
 
 /* ------------------------------------------------------------------
@@ -507,6 +520,10 @@ function App() {
       ...SEED(), ...data,
       ui:          { ...SEED().ui,       ...(data?.ui       || {}) },
       pomodoro:    { ...SEED().pomodoro, ...(data?.pomodoro || {}) },
+      admin:       { ...SEED().admin,    ...(data?.admin    || {}),
+                     pillars: { ...(data?.admin?.pillars || {}) },
+                     quads:   { ...(data?.admin?.quads   || {}) },
+                   },
       pomodoroLogs: data?.pomodoroLogs || [],
       habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, ...h })),
       tasks:  (data?.tasks  || []).map(t => ({ reminder: null, ...t })),
@@ -731,7 +748,8 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
   const today = new Date();
   const sel = parseKey(state.ui.selectedDate || todayKey());
   const dayName = DAY_NAMES[sel.getDay()];
-  const isFastingDay = sel.getDay() === 1 || sel.getDay() === 4;
+  const fastingDays = state.admin?.fastingDays ?? [1, 4];
+  const isFastingDay = fastingDays.includes(sel.getDay());
 
   /* compute a "today's pillar completion" summary */
   const dayKey = state.ui.selectedDate;
@@ -1054,6 +1072,7 @@ function Timeline({ state, setState, dow, dKey, sel }) {
         <BlockModal
           block={editing}
           adding={adding}
+          state={state}
           onClose={()=>{ setEditing(null); setAdding(null); }}
           onSave={(b)=>{
             setState(s => {
@@ -1076,7 +1095,7 @@ function Timeline({ state, setState, dow, dKey, sel }) {
 /* ------------------------------------------------------------------
    BLOCK MODAL
 ------------------------------------------------------------------- */
-function BlockModal({ block, adding, onClose, onSave, onDelete, currentDow }) {
+function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDow }) {
   const isNew = !block;
   const [title, setTitle] = useState(block?.title || '');
   const [pillar, setPillar] = useState(block?.pillar || 'tech');
@@ -1109,7 +1128,7 @@ function BlockModal({ block, adding, onClose, onSave, onDelete, currentDow }) {
       </Field>
       <Field label="Pillar">
         <div className="grid grid-cols-5 gap-2">
-          {PILLARS.map(p => (
+          {resolvePillars(state).map(p => (
             <button key={p.id} onClick={()=>setPillar(p.id)}
               className={`btn px-2 py-2 rounded-lg text-xs font-medium ${pillar===p.id ? `glow-${p.tw}` : 'border border-ink-700'}`}
               style={pillar===p.id ? { background: `${p.color}22`, color: p.color } : { color:'#9a9788' }}>
@@ -1197,7 +1216,7 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
               className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100 font-mono"/>
             <select value={quadrant} onChange={e=>setQuadrant(e.target.value)}
               className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
-              {QUADS.map(q => <option key={q.id} value={q.id}>{q.title}</option>)}
+              {resolveQuads(state).map(q => <option key={q.id} value={q.id}>{q.title}</option>)}
             </select>
             <select value={listId} onChange={e=>setListId(e.target.value)}
               className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
@@ -1216,7 +1235,7 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
 function TaskRow({ t, state, setState, compact, draggable, onDragStart }) {
   const [editing, setEditing] = useState(false);
   const list = state.lists.find(l => l.id === t.listId);
-  const q = QUADS.find(x => x.id === t.quadrant);
+  const q = resolveQuads(state).find(x => x.id === t.quadrant);
 
   const toggle = () => setState(s => ({
     ...s,
@@ -1288,7 +1307,7 @@ function TaskEditModal({ t, state, setState, onClose }) {
         <Field label="Quadrant">
           <select value={quadrant} onChange={e=>setQuadrant(e.target.value)}
             className="w-full bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 text-sm">
-            {QUADS.map(q => <option key={q.id} value={q.id}>{q.title}</option>)}
+            {resolveQuads(state).map(q => <option key={q.id} value={q.id}>{q.title}</option>)}
           </select>
         </Field>
         <Field label="List">
@@ -1318,7 +1337,7 @@ function TaskEditModal({ t, state, setState, onClose }) {
 ------------------------------------------------------------------- */
 function HabitChecklist({ habits, log, toggle, state }) {
   if (!habits.length) return <EmptyHint text="No habits scheduled for this day."/>;
-  const grouped = PILLARS.map(p => ({ pillar: p, items: habits.filter(h => h.pillar === p.id) })).filter(g => g.items.length);
+  const grouped = resolvePillars(state).map(p => ({ pillar: p, items: habits.filter(h => h.pillar === p.id) })).filter(g => g.items.length);
 
   /* compute streak per habit */
   const streakFor = (habitId, days) => {
@@ -1369,7 +1388,7 @@ function HabitsView({ state, setState }) {
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
 
-  const grouped = PILLARS.map(p => ({ pillar: p, items: state.habits.filter(h => h.pillar === p.id) }));
+  const grouped = resolvePillars(state).map(p => ({ pillar: p, items: state.habits.filter(h => h.pillar === p.id) }));
 
   return (
     <div className="pt-6 fadeUp">
@@ -1401,7 +1420,7 @@ function HabitsView({ state, setState }) {
       </div>
 
       {(adding || editing) && (
-        <HabitModal habit={editing} onClose={()=>{ setAdding(false); setEditing(null); }}
+        <HabitModal habit={editing} state={state} onClose={()=>{ setAdding(false); setEditing(null); }}
           onSave={(h)=>{
             setState(s => {
               const exists = s.habits.find(x => x.id === h.id);
@@ -1416,7 +1435,7 @@ function HabitsView({ state, setState }) {
 }
 
 function HabitCard({ h, state, setState, onEdit }) {
-  const p = pillarById(h.pillar);
+  const p = pillarByIdFromState(h.pillar, state);
   /* compute 30-day mini heatmap */
   const days = useMemo(() => {
     const out = [];
@@ -1486,7 +1505,7 @@ function HabitCard({ h, state, setState, onEdit }) {
   );
 }
 
-function HabitModal({ habit, onClose, onSave, onDelete }) {
+function HabitModal({ habit, state, onClose, onSave, onDelete }) {
   const isNew = !habit;
   const [name, setName] = useState(habit?.name || '');
   const [pillar, setPillar] = useState(habit?.pillar || 'deen');
@@ -1509,7 +1528,7 @@ function HabitModal({ habit, onClose, onSave, onDelete }) {
       </Field>
       <Field label="Pillar">
         <div className="grid grid-cols-5 gap-2">
-          {PILLARS.map(p => (
+          {resolvePillars(state).map(p => (
             <button key={p.id} onClick={()=>setPillar(p.id)}
               className={`btn px-2 py-2 rounded-lg text-xs font-medium ${pillar===p.id ? `glow-${p.tw}` : 'border border-ink-700'}`}
               style={pillar===p.id ? { background: `${p.color}22`, color: p.color } : { color:'#9a9788' }}>
@@ -1655,7 +1674,7 @@ function MatrixView({ state, setState }) {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {QUADS.map(q => {
+        {resolveQuads(state).map(q => {
           const items = open.filter(t => (t.quadrant || 'plan') === q.id);
           return (
             <div key={q.id}
@@ -1702,7 +1721,7 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
   /* Pillar performance over selected range */
   const pillarStats = useMemo(() => {
     const today = new Date();
-    return PILLARS.map(p => {
+    return resolvePillars(state).map(p => {
       const hs = state.habits.filter(h => h.pillar === p.id);
       let scheduled = 0, done = 0;
       for (let i = 0; i < statsRange; i++) {
@@ -1867,7 +1886,7 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
           <div className="font-display text-xl text-bone-100 mb-4">Per-habit completion</div>
           <div className="space-y-3">
             {habitStats.map(({ habit, scheduled, done, pct }) => {
-              const pillar = PILLARS.find(p => p.id === habit.pillar);
+              const pillar = resolvePillars(state).find(p => p.id === habit.pillar);
               return (
                 <div key={habit.id} className="flex items-center gap-3">
                   <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: pillar?.color ?? '#9a9788' }}/>
@@ -1892,6 +1911,7 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
       <NotificationsCard state={state} setState={setState}/>
       <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect}/>
       <AppZone />
+      <AdminCard state={state} setState={setState}/>
       <DangerZone state={state} setState={setState}/>
     </div>
   );
@@ -2018,6 +2038,163 @@ function AppZone() {
       <div className="font-display text-xl text-bone-100 mt-1 mb-1">Cache &amp; updates</div>
       <div className="text-sm text-bone-400 mb-3">If the app feels stale after an update, clear the cache and reload.</div>
       <button onClick={clearCache} className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm">Clear cache &amp; reload</button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+   ADMIN CARD  — configure pillars, quadrants, lists, fasting days
+------------------------------------------------------------------- */
+function AdminCard({ state, setState }) {
+  const [tab, setTab] = useState('pillars');
+  const admin = state.admin || {};
+
+  /* ── Pillar helpers ── */
+  const setPillarProp = (id, key, val) =>
+    setState(s => ({ ...s, admin: { ...s.admin, pillars: { ...s.admin.pillars, [id]: { ...(s.admin.pillars?.[id] || {}), [key]: val } } } }));
+  const resetPillar = (id) =>
+    setState(s => { const p = { ...(s.admin.pillars || {}) }; delete p[id]; return { ...s, admin: { ...s.admin, pillars: p } }; });
+
+  /* ── Quad helpers ── */
+  const setQuadProp = (id, key, val) =>
+    setState(s => ({ ...s, admin: { ...s.admin, quads: { ...s.admin.quads, [id]: { ...(s.admin.quads?.[id] || {}), [key]: val } } } }));
+  const resetQuad = (id) =>
+    setState(s => { const q = { ...(s.admin.quads || {}) }; delete q[id]; return { ...s, admin: { ...s.admin, quads: q } }; });
+
+  /* ── List helpers ── */
+  const updateList = (id, patch) =>
+    setState(s => ({ ...s, lists: s.lists.map(l => l.id === id ? { ...l, ...patch } : l) }));
+  const deleteList = (id) => {
+    if (!confirm('Delete this list? Tasks will move to Inbox.')) return;
+    setState(s => ({
+      ...s,
+      lists: s.lists.filter(l => l.id !== id),
+      tasks: s.tasks.map(t => t.listId === id ? { ...t, listId: 'l-inbox' } : t),
+    }));
+  };
+  const addList = () => {
+    const name = prompt('List name:'); if (!name?.trim()) return;
+    setState(s => ({ ...s, lists: [...s.lists, { id: `l-${Date.now()}`, name: name.trim(), color: '#9a9788' }] }));
+  };
+
+  /* ── Fasting days ── */
+  const fastingDays = admin.fastingDays ?? [1, 4];
+  const toggleFasting = (d) =>
+    setState(s => {
+      const cur = s.admin?.fastingDays ?? [1, 4];
+      const next = cur.includes(d) ? cur.filter(x => x !== d) : [...cur, d].sort();
+      return { ...s, admin: { ...s.admin, fastingDays: next } };
+    });
+
+  const TAB_CLS = (t) => `btn px-3 py-1.5 rounded-lg text-xs font-mono tracking-wider ${tab === t ? 'bg-bone-100 text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400 hover:bg-ink-800'}`;
+
+  return (
+    <div className="card p-5">
+      <div className="text-[10px] font-mono tracking-widest text-bone-400">ADMIN</div>
+      <div className="font-display text-xl text-bone-100 mt-1 mb-4">Configuration</div>
+
+      {/* Tab bar */}
+      <div className="flex gap-1.5 flex-wrap mb-5">
+        {[['pillars','Pillars'],['quads','Quadrants'],['lists','Task lists'],['fasting','Fasting days']].map(([id,label]) => (
+          <button key={id} onClick={()=>setTab(id)} className={TAB_CLS(id)}>{label}</button>
+        ))}
+      </div>
+
+      {/* ── PILLARS ── */}
+      {tab === 'pillars' && (
+        <div className="space-y-3">
+          <p className="text-xs text-bone-400">Rename pillars or change their colour. Resets to default if cleared.</p>
+          {resolvePillars(state).map(p => {
+            const hasOverride = !!(admin.pillars?.[p.id]);
+            return (
+              <div key={p.id} className="flex items-center gap-3">
+                <input type="color" value={p.color}
+                  onChange={e => setPillarProp(p.id, 'color', e.target.value)}
+                  className="w-8 h-8 rounded cursor-pointer border-0 bg-transparent p-0"/>
+                <input value={p.name}
+                  onChange={e => setPillarProp(p.id, 'name', e.target.value)}
+                  className="flex-1 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-strategy/50"/>
+                {hasOverride && (
+                  <button onClick={() => resetPillar(p.id)} title="Reset to default"
+                    className="btn px-2.5 py-2 rounded-lg border border-ink-700 text-bone-400 hover:text-combat text-xs">↺</button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── QUADRANTS ── */}
+      {tab === 'quads' && (
+        <div className="space-y-4">
+          <p className="text-xs text-bone-400">Rename the Eisenhower quadrant labels and hints.</p>
+          {resolveQuads(state).map(q => {
+            const hasOverride = !!(admin.quads?.[q.id]);
+            return (
+              <div key={q.id} className="p-3 rounded-lg border border-ink-700 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-mono tracking-widest text-bone-500">{q.id.toUpperCase()}</span>
+                  {hasOverride && (
+                    <button onClick={() => resetQuad(q.id)} title="Reset to default"
+                      className="btn px-2 py-1 rounded border border-ink-700 text-bone-400 hover:text-combat text-xs">↺ reset</button>
+                  )}
+                </div>
+                <input value={q.title} placeholder="Title"
+                  onChange={e => setQuadProp(q.id, 'title', e.target.value)}
+                  className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-strategy/50"/>
+                <input value={q.sub} placeholder="Sub-label"
+                  onChange={e => setQuadProp(q.id, 'sub', e.target.value)}
+                  className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-xs text-bone-300 focus:outline-none focus:border-strategy/50"/>
+                <input value={q.hint} placeholder="Hint text"
+                  onChange={e => setQuadProp(q.id, 'hint', e.target.value)}
+                  className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-xs text-bone-300 focus:outline-none focus:border-strategy/50"/>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── LISTS ── */}
+      {tab === 'lists' && (
+        <div className="space-y-2">
+          <p className="text-xs text-bone-400 mb-3">Rename, recolour or delete task lists. Deleting moves tasks to Inbox.</p>
+          {state.lists.map(l => (
+            <div key={l.id} className="flex items-center gap-2">
+              <input type="color" value={l.color}
+                onChange={e => updateList(l.id, { color: e.target.value })}
+                className="w-8 h-8 rounded cursor-pointer border-0 bg-transparent p-0"/>
+              <input value={l.name}
+                onChange={e => updateList(l.id, { name: e.target.value })}
+                className="flex-1 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-strategy/50"/>
+              {l.id !== 'l-inbox' && (
+                <button onClick={() => deleteList(l.id)}
+                  className="btn w-8 h-8 flex items-center justify-center rounded-lg border border-combat/40 text-combat hover:bg-combat/10">
+                  <I.trash className="w-3.5 h-3.5"/>
+                </button>
+              )}
+            </div>
+          ))}
+          <button onClick={addList}
+            className="btn mt-2 px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm flex items-center gap-1.5">
+            <I.plus className="w-4 h-4"/>New list
+          </button>
+        </div>
+      )}
+
+      {/* ── FASTING DAYS ── */}
+      {tab === 'fasting' && (
+        <div>
+          <p className="text-xs text-bone-400 mb-4">Choose which days show the "FASTING DAY" badge in the header.</p>
+          <div className="flex gap-2 flex-wrap">
+            {DAY_NAMES.map((name, i) => (
+              <button key={i} onClick={() => toggleFasting(i)}
+                className={`btn px-4 py-2 rounded-lg border text-sm ${fastingDays.includes(i) ? 'bg-deen/20 border-deen/50 text-deen' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
+                {name.slice(0,3)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
