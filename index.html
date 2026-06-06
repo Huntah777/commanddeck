@@ -219,6 +219,7 @@ const I = {
   moon:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.8A8.5 8.5 0 0 1 11.2 3a8.5 8.5 0 1 0 9.8 9.8Z"/></svg>,
   drag:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><circle cx="9" cy="6" r="1.2"/><circle cx="9" cy="12" r="1.2"/><circle cx="9" cy="18" r="1.2"/><circle cx="15" cy="6" r="1.2"/><circle cx="15" cy="12" r="1.2"/><circle cx="15" cy="18" r="1.2"/></svg>,
   timer:   (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5"/><path d="M9.5 2.5h5"/><path d="M12 2.5v2"/></svg>,
+  refresh: (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>,
 };
 
 /* ------------------------------------------------------------------
@@ -623,10 +624,25 @@ function App() {
     setSyncStatus('local');
   };
 
+  const syncNow = async () => {
+    if (!Sync.configured()) return;
+    clearTimeout(saveTimer.current);
+    setSyncStatus('saving');
+    try {
+      await Sync.save(state);
+      const remote = await Sync.load();
+      if (remote?.habits) setState(hydrate(remote));
+      setSyncStatus('synced');
+    } catch (e) {
+      if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
+      else setSyncStatus('offline');
+    }
+  };
+
   return (
     <div className="min-h-screen">
       <Header state={state} setState={setState} setView={setView} setDate={setDate}
-        syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} />
+        syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onSyncNow={syncNow} />
       <main className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 pb-24">
         {state.ui.view === 'today'  && <TodayView state={state} setState={setState} />}
         {state.ui.view === 'habits' && <HabitsView state={state} setState={setState} />}
@@ -711,7 +727,7 @@ function InstallBanner() {
 /* ------------------------------------------------------------------
    HEADER  ─ date, view tabs, quick add
 ------------------------------------------------------------------- */
-function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync }) {
+function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync, onSyncNow }) {
   const today = new Date();
   const sel = parseKey(state.ui.selectedDate || todayKey());
   const dayName = DAY_NAMES[sel.getDay()];
@@ -768,6 +784,12 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
 
           <div className="hidden sm:flex items-center gap-3">
             <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
+            {syncStatus !== 'local' && (
+              <button onClick={onSyncNow} title="Sync now"
+                className={`btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-400 hover:text-bone-100 ${syncStatus === 'saving' ? 'animate-spin pointer-events-none' : ''}`}>
+                <I.refresh className="w-4 h-4"/>
+              </button>
+            )}
             <div className="h-10 w-px bg-ink-700"/>
             <div className="text-right">
               <div className="text-[10px] text-bone-400 font-mono tracking-widest">DAY STREAK</div>
@@ -798,7 +820,15 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
             })}
           </nav>
           <div className="flex items-center gap-2">
-            <span className="sm:hidden"><SyncBadge status={syncStatus} onClick={onConfigureSync}/></span>
+            <span className="sm:hidden flex items-center gap-1.5">
+              <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
+              {syncStatus !== 'local' && (
+                <button onClick={onSyncNow} title="Sync now"
+                  className={`btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-400 ${syncStatus === 'saving' ? 'animate-spin pointer-events-none' : ''}`}>
+                  <I.refresh className="w-3.5 h-3.5"/>
+                </button>
+              )}
+            </span>
             <button onClick={()=>setDate(fmtKey(addDays(sel,-1)))}
               className="btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-300">‹</button>
             <button onClick={()=>setDate(todayKey())}
