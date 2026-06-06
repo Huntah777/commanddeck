@@ -1688,36 +1688,77 @@ function MatrixView({ state, setState }) {
 /* ------------------------------------------------------------------
    STATS VIEW
 ------------------------------------------------------------------- */
+const STAT_RANGES = [
+  { value: 30,  label: '30d' },
+  { value: 60,  label: '60d' },
+  { value: 120, label: '120d' },
+  { value: 365, label: '1yr' },
+  { value: 730, label: '2yr' },
+];
+
 function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect }) {
-  /* 90-day pillar performance */
+  const [statsRange, setStatsRange] = useState(30);
+
+  /* Pillar performance over selected range */
   const pillarStats = useMemo(() => {
     const today = new Date();
-    const days = 90;
     return PILLARS.map(p => {
       const hs = state.habits.filter(h => h.pillar === p.id);
       let scheduled = 0, done = 0;
-      for (let i = 0; i < days; i++) {
+      for (let i = 0; i < statsRange; i++) {
         const d = addDays(today, -i); const k = fmtKey(d);
         const log = state.logs[k] || {};
         hs.forEach(h => { if (h.days.includes(d.getDay())) { scheduled++; if (log[h.id]) done++; } });
       }
       return { pillar: p, scheduled, done, pct: scheduled ? Math.round(done/scheduled*100) : 0 };
     });
-  }, [state.logs, state.habits]);
+  }, [state.logs, state.habits, statsRange]);
 
-  /* 30-day completion bar chart */
-  const last30 = useMemo(() => {
+  /* Habit completion chart: daily bars for ≤60 days, weekly buckets above that */
+  const habitHistory = useMemo(() => {
     const today = new Date();
+    if (statsRange <= 60) {
+      const out = [];
+      for (let i = statsRange - 1; i >= 0; i--) {
+        const d = addDays(today, -i); const k = fmtKey(d);
+        const hs = state.habits.filter(h => h.days.includes(d.getDay()));
+        const log = state.logs[k] || {};
+        out.push({ k, pct: hs.length ? hs.filter(h => log[h.id]).length / hs.length : 0 });
+      }
+      return out;
+    }
+    /* Weekly buckets */
+    const weeks = Math.ceil(statsRange / 7);
     const out = [];
-    for (let i = 29; i >= 0; i--) {
-      const d = addDays(today, -i); const k = fmtKey(d);
-      const hs = state.habits.filter(h => h.days.includes(d.getDay()));
-      const log = state.logs[k] || {};
-      const done = hs.filter(h => log[h.id]).length;
-      out.push({ k, day: DAY_SHORT[d.getDay()], date: d.getDate(), pct: hs.length ? done/hs.length : 0 });
+    for (let w = weeks - 1; w >= 0; w--) {
+      let sum = 0, count = 0;
+      for (let d = 0; d < 7; d++) {
+        const offset = w * 7 + d;
+        if (offset >= statsRange) continue;
+        const date = addDays(today, -offset);
+        const hs = state.habits.filter(h => h.days.includes(date.getDay()));
+        const log = state.logs[fmtKey(date)] || {};
+        if (hs.length) { sum += hs.filter(h => log[h.id]).length / hs.length; count++; }
+      }
+      out.push({ k: fmtKey(addDays(today, -(w * 7))), pct: count ? sum / count : 0 });
     }
     return out;
-  }, [state.logs, state.habits]);
+  }, [state.logs, state.habits, statsRange]);
+
+  /* Per-habit completion over selected range */
+  const habitStats = useMemo(() => {
+    const today = new Date();
+    return state.habits.map(h => {
+      let scheduled = 0, done = 0;
+      for (let i = 0; i < statsRange; i++) {
+        const d = addDays(today, -i);
+        if (!h.days.includes(d.getDay())) continue;
+        scheduled++;
+        if ((state.logs[fmtKey(d)] || {})[h.id]) done++;
+      }
+      return { habit: h, scheduled, done, pct: scheduled ? Math.round(done / scheduled * 100) : 0 };
+    }).filter(s => s.scheduled > 0).sort((a, b) => b.pct - a.pct);
+  }, [state.logs, state.habits, statsRange]);
 
   /* tasks done by day for 14 days */
   const tasksByDay = useMemo(() => {
@@ -1735,9 +1776,21 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
   const totalDone = state.tasks.filter(t=>t.done).length;
   const totalOpen = state.tasks.filter(t=>!t.done).length;
 
+  const rangeLabel = STAT_RANGES.find(r => r.value === statsRange)?.label ?? `${statsRange}d`;
+
   return (
     <div className="pt-6 fadeUp space-y-6">
-      <SectionHeading kicker="Stats" title="The numbers don't lie" sub="90-day view across the five pillars"/>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <SectionHeading kicker="Stats" title="The numbers don't lie" sub={`${rangeLabel} view across the five pillars`}/>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {STAT_RANGES.map(r => (
+            <button key={r.value} onClick={() => setStatsRange(r.value)}
+              className={`btn px-3 py-1.5 rounded-lg border text-xs font-mono tracking-wider ${statsRange === r.value ? 'bg-bone-100 text-ink-950 font-semibold border-transparent' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
+              {r.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         {pillarStats.map(({ pillar, scheduled, done, pct }) => (
@@ -1759,16 +1812,16 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
         <div className="card p-5">
           <div className="flex items-end justify-between mb-4">
             <div>
-              <div className="text-[10px] font-mono tracking-widest text-strategy">LAST 30 DAYS</div>
+              <div className="text-[10px] font-mono tracking-widest text-strategy">{rangeLabel.toUpperCase()} · {statsRange > 60 ? 'WEEKLY' : 'DAILY'}</div>
               <div className="font-display text-xl text-bone-100 mt-1">Habit completion</div>
             </div>
             <div className="font-mono text-xs text-bone-400">
-              avg {Math.round(last30.reduce((a,b)=>a+b.pct,0)/last30.length*100)}%
+              avg {Math.round(habitHistory.reduce((a,b)=>a+b.pct,0)/habitHistory.length*100)}%
             </div>
           </div>
-          <div className="flex items-end gap-1 h-32">
-            {last30.map(d => (
-              <div key={d.k} className="flex-1 flex flex-col items-center gap-1 group" title={`${d.k}: ${Math.round(d.pct*100)}%`}>
+          <div className="flex items-end gap-px h-32">
+            {habitHistory.map(d => (
+              <div key={d.k} className="flex-1 min-w-0" title={`${d.k}: ${Math.round(d.pct*100)}%`}>
                 <div className="w-full rounded-t-sm transition-all"
                   style={{ height: `${Math.max(2, d.pct*100)}%`,
                   background: d.pct >= .8 ? '#10b981' : d.pct >= .5 ? '#f59e0b' : '#3a3a44' }}/>
@@ -1776,8 +1829,8 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
             ))}
           </div>
           <div className="flex justify-between mt-2 font-mono text-[10px] text-bone-400">
-            <span>{last30[0]?.k.slice(5)}</span>
-            <span>{last30[last30.length-1]?.k.slice(5)}</span>
+            <span>{habitHistory[0]?.k.slice(5)}</span>
+            <span>{habitHistory[habitHistory.length-1]?.k.slice(5)}</span>
           </div>
         </div>
 
@@ -1806,6 +1859,34 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
           </div>
         </div>
       </div>
+
+      {/* Per-habit breakdown */}
+      {habitStats.length > 0 && (
+        <div className="card p-5">
+          <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1">HABITS</div>
+          <div className="font-display text-xl text-bone-100 mb-4">Per-habit completion</div>
+          <div className="space-y-3">
+            {habitStats.map(({ habit, scheduled, done, pct }) => {
+              const pillar = PILLARS.find(p => p.id === habit.pillar);
+              return (
+                <div key={habit.id} className="flex items-center gap-3">
+                  <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: pillar?.color ?? '#9a9788' }}/>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-sm text-bone-200 truncate">{habit.name}</span>
+                      <span className="font-mono text-xs text-bone-400 ml-3 flex-shrink-0">{pct}% <span className="text-bone-500">({done}/{scheduled})</span></span>
+                    </div>
+                    <div className="h-1 rounded-full bg-ink-700 overflow-hidden">
+                      <div className="h-full rounded-full transition-all"
+                        style={{ width: `${pct}%`, background: pct >= 80 ? '#10b981' : pct >= 50 ? '#f59e0b' : '#ef4444' }}/>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <SalahCard state={state} setState={setState}/>
       <NotificationsCard state={state} setState={setState}/>
