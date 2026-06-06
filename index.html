@@ -825,8 +825,14 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
 
         {/* Tabs + date picker */}
         <div className="flex items-center gap-2 pb-3">
-          <div className="flex-1 min-w-0 overflow-x-auto scrollbar">
-            <nav className="flex gap-1">
+          <div className="flex-1 min-w-0">
+            {/* Mobile: dropdown select */}
+            <select value={state.ui.view} onChange={e => setView(e.target.value)}
+              className="sm:hidden w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 font-mono tracking-wider appearance-none cursor-pointer">
+              {tabs.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+            </select>
+            {/* sm+: tab bar */}
+            <nav className="hidden sm:flex gap-1">
               {tabs.map(t => {
                 const Icon = t.icon;
                 const active = state.ui.view === t.id;
