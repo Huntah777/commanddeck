@@ -126,11 +126,12 @@ async function sendPush(subscription, payload, privateKeyB64u) {
 
 export default {
   async scheduled(_event, env, _ctx) {
-    const now    = Date.now();
-    const window = 10 * 60 * 1000; /* 10-min catch-up window (cron fires every 5 min) */
+    const now = Date.now();
+    /* 90-second look-back — wide enough to survive one missed cron run,
+       narrow enough that each notification lands in at most one window. */
+    const lookBack = 90_000;
 
-    /* Only load rows that have an upcoming notification in the current window.
-       next_fire_at = 0 means no upcoming notifications — skip entirely. */
+    /* Only load rows that have a notification due imminently */
     const rows = await env.DB.prepare(
       'SELECT id, subscription, schedule FROM push_subs WHERE next_fire_at > 0 AND next_fire_at <= ?'
     ).bind(now + 30_000).all();
@@ -140,7 +141,9 @@ export default {
         const sub      = JSON.parse(row.subscription);
         const schedule = JSON.parse(row.schedule || '[]');
 
-        const due = schedule.filter(n => n.fireAt >= now - window && n.fireAt <= now + 30_000);
+        const due    = schedule.filter(n => n.fireAt >= now - lookBack && n.fireAt <= now + 30_000);
+        const remain = schedule.filter(n => !due.some(d => d.id === n.id));
+
         if (!due.length) return;
 
         await Promise.all(due.map(async n => {
@@ -152,6 +155,13 @@ export default {
           }, env.VAPID_PRIVATE_KEY);
           console.log(`push → ${row.id} [${n.title}] → HTTP ${status}`);
         }));
+
+        /* Remove fired notifications so re-runs never send them again */
+        const nextFireAt = remain.length ? Math.min(...remain.map(n => n.fireAt)) : 0;
+        await env.DB.prepare(
+          'UPDATE push_subs SET schedule = ?, next_fire_at = ? WHERE id = ?'
+        ).bind(JSON.stringify(remain), nextFireAt, row.id).run();
+
       } catch (e) {
         console.error(`push error for ${row.id}:`, e.message);
       }
