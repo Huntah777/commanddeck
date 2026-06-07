@@ -17,48 +17,67 @@
      Authorization: Bearer <SYNC_TOKEN>
    ============================================================ */
 
+const MAX_BODY = 1_048_576; // 1 MB
+
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
     status,
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
   });
 
-/* constant-time-ish token compare so timing leaks don't help attackers */
-const tokenOk = (request, env) => {
+/* Constant-time token comparison via HMAC.
+   HMAC output is always 32 bytes regardless of input length, so the
+   final XOR loop never leaks the expected token's length via timing. */
+const tokenOk = async (request, env) => {
   const header = request.headers.get('Authorization') || '';
   const given  = header.replace(/^Bearer\s+/i, '').trim();
   const expect = env.SYNC_TOKEN || '';
-  if (!given || !expect || given.length !== expect.length) return false;
+  if (!given || !expect) return false;
+
+  const key = await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const enc = new TextEncoder();
+  const [a, b] = await Promise.all([
+    crypto.subtle.sign('HMAC', key, enc.encode(given)),
+    crypto.subtle.sign('HMAC', key, enc.encode(expect)),
+  ]);
+  const ua = new Uint8Array(a), ub = new Uint8Array(b);
   let diff = 0;
-  for (let i = 0; i < given.length; i++) diff |= given.charCodeAt(i) ^ expect.charCodeAt(i);
+  for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
   return diff === 0;
 };
 
 export async function onRequest({ request, env }) {
-  if (!tokenOk(request, env)) return json({ error: 'Unauthorized' }, 401);
+  if (!await tokenOk(request, env)) return json({ error: 'Unauthorized' }, 401);
 
   try {
     if (request.method === 'GET') {
       const row = await env.DB.prepare(
         'SELECT data FROM state WHERE id = 1'
       ).first();
-      if (!row || !row.data) return json({});           // first run
+      if (!row || !row.data) return json({});
       try { return json(JSON.parse(row.data)); }
-      catch { return json({}); }                         // corrupt row — start fresh
+      catch { return json({}); }
     }
 
     if (request.method === 'PUT') {
-      const body = await request.json();
-      const now  = Date.now();
+      const ct = Number(request.headers.get('Content-Length') || 0);
+      if (ct > MAX_BODY) return json({ error: 'Payload too large' }, 413);
+
+      const body       = await request.json();
+      const serialised = JSON.stringify(body);
+      if (serialised.length > MAX_BODY) return json({ error: 'Payload too large' }, 413);
+
+      const now = Date.now();
       await env.DB.prepare(
         `INSERT INTO state (id, data, updated_at) VALUES (1, ?, ?)
          ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`
-      ).bind(JSON.stringify(body), now).run();
+      ).bind(serialised, now).run();
       return json({ ok: true, updated_at: now });
     }
 
     return json({ error: 'Method not allowed' }, 405);
   } catch (err) {
-    return json({ error: String(err && err.message || err) }, 500);
+    console.error('state handler error:', err);
+    return json({ error: 'Internal server error' }, 500);
   }
 }

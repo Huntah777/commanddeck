@@ -1,19 +1,17 @@
 /**
  * Madinah Command Deck — Web Push Cron Worker
  *
- * Runs every 2 minutes. Reads push_subs from D1, finds notifications
+ * Runs every 1 minute. Reads push_subs from D1, finds notifications
  * due in the current window, sends RFC 8291 encrypted Web Push to each device.
  *
  * Required secrets (set via wrangler secret put):
  *   VAPID_PRIVATE_KEY  — base64url P-256 private scalar
+ *   VAPID_SUBJECT      — mailto: contact URI (e.g. mailto:you@example.com)
  *
  * Required D1 binding: DB (same database as the Pages project)
  */
 
-const VAPID_PUBLIC_KEY = 'BMg79Dc4KgbVAa253omi5oER5VpB3ErcDnjaR5lgmIinGMVlUpe4-LUgfuQrTb9a3urAaLnDZgQ_vtE4OvVLcPA';
-const VAPID_PUBLIC_X   = 'yDv0NzgqBtUBrbneiaLmgRHlWkHcStwOeNpHmWCYiKc';
-const VAPID_PUBLIC_Y   = 'GMVlUpe4-LUgfuQrTb9a3urAaLnDZgQ_vtE4OvVLcPA';
-const VAPID_SUBJECT    = 'mailto:abdul-malik@huntah.co.uk';
+const VAPID_PUBLIC_KEY = 'BFbFmnxVUcx5X_6pUxHKVv-n8aX78p73b8vbe8WCLqLPSmq9ydXMWdBtKjjDCceMju1CerMDVsRWkzJiM6jrvYo';
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
@@ -47,15 +45,25 @@ async function hkdf(salt, ikm, info, length) {
 
 /* ── VAPID JWT ────────────────────────────────────────────────── */
 
-async function makeVapidJWT(endpoint, privateKeyB64u) {
+async function makeVapidJWT(endpoint, privateKeyB64u, subject) {
   const audience = new URL(endpoint).origin;
-  const hdr = toB64u(te(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
-  const pay = toB64u(te(JSON.stringify({ aud: audience, exp: Math.floor(Date.now() / 1000) + 43200, sub: VAPID_SUBJECT })));
+  const claims   = { aud: audience, exp: Math.floor(Date.now() / 1000) + 43200 };
+  if (subject) claims.sub = subject;
+
+  const hdr      = toB64u(te(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const pay      = toB64u(te(JSON.stringify(claims)));
   const unsigned = `${hdr}.${pay}`;
+
+  /* Derive x/y from the raw public key — avoids hardcoded split values */
+  const pubKeyRaw = fromB64u(VAPID_PUBLIC_KEY);
+  const pubKeyObj = await crypto.subtle.importKey(
+    'raw', pubKeyRaw, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify'],
+  );
+  const { x, y } = await crypto.subtle.exportKey('jwk', pubKeyObj);
 
   const key = await crypto.subtle.importKey('jwk', {
     kty: 'EC', crv: 'P-256',
-    d: privateKeyB64u, x: VAPID_PUBLIC_X, y: VAPID_PUBLIC_Y,
+    d: privateKeyB64u, x, y,
     key_ops: ['sign'], ext: true,
   }, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
 
@@ -68,8 +76,8 @@ async function makeVapidJWT(endpoint, privateKeyB64u) {
 async function encryptWebPush(plaintext, subscription) {
   const { keys: { p256dh, auth } } = subscription;
 
-  const receiverPub = fromB64u(p256dh);   // 65-byte uncompressed P-256 point
-  const authSecret  = fromB64u(auth);     // 16-byte auth secret
+  const receiverPub = fromB64u(p256dh);
+  const authSecret  = fromB64u(auth);
 
   const receiverKey = await crypto.subtle.importKey(
     'raw', receiverPub, { name: 'ECDH', namedCurve: 'P-256' }, false, [],
@@ -86,7 +94,6 @@ async function encryptWebPush(plaintext, subscription) {
 
   const salt = crypto.getRandomValues(new Uint8Array(16));
 
-  /* IKM = HKDF(salt=auth, ikm=ecdh, info="WebPush: info\0" || receiverPub || senderPub, 32) */
   const ikm = await hkdf(authSecret, ecdhSecret,
     concat(te('WebPush: info\x00'), receiverPub, senderPub), 32);
 
@@ -94,18 +101,17 @@ async function encryptWebPush(plaintext, subscription) {
   const nonce = await hkdf(salt, ikm, te('Content-Encoding: nonce\x00'), 12);
 
   const cekKey = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
-  const msg    = concat(te(plaintext), new Uint8Array([0x02])); /* delimiter */
+  const msg    = concat(te(plaintext), new Uint8Array([0x02]));
   const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, cekKey, msg));
 
-  /* aes128gcm record header: salt(16) + rs(4,BE) + keyid_len(1) + senderPub(65) */
   const rs = new Uint8Array(4); new DataView(rs.buffer).setUint32(0, 4096, false);
   return concat(salt, rs, new Uint8Array([senderPub.length]), senderPub, cipher);
 }
 
 /* ── Send one Web Push ────────────────────────────────────────── */
 
-async function sendPush(subscription, payload, privateKeyB64u) {
-  const jwt  = await makeVapidJWT(subscription.endpoint, privateKeyB64u);
+async function sendPush(subscription, payload, privateKeyB64u, subject) {
+  const jwt  = await makeVapidJWT(subscription.endpoint, privateKeyB64u, subject);
   const body = await encryptWebPush(JSON.stringify(payload), subscription);
 
   const r = await fetch(subscription.endpoint, {
@@ -152,7 +158,7 @@ export default {
             body:    n.body || '',
             tag:     n.id,
             isSalah: n.id.startsWith('salah-'),
-          }, env.VAPID_PRIVATE_KEY);
+          }, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT);
           console.log(`push → ${row.id} [${n.title}] → HTTP ${status}`);
         }));
 
@@ -168,8 +174,7 @@ export default {
     }));
   },
 
-  /* HTTP handler — used only for health check */
   async fetch(_req, _env) {
-    return new Response('Command Deck Push Worker', { status: 200 });
+    return new Response('OK', { status: 200 });
   },
 };

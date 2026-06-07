@@ -13,18 +13,27 @@ const json = (data, status = 200) =>
     headers: { 'Content-Type': 'application/json; charset=utf-8' },
   });
 
-const tokenOk = (request, env) => {
+/* Constant-time token comparison via HMAC — see state.js for rationale */
+const tokenOk = async (request, env) => {
   const header = request.headers.get('Authorization') || '';
   const given  = header.replace(/^Bearer\s+/i, '').trim();
   const expect = env.SYNC_TOKEN || '';
-  if (!given || !expect || given.length !== expect.length) return false;
+  if (!given || !expect) return false;
+
+  const key = await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const enc = new TextEncoder();
+  const [a, b] = await Promise.all([
+    crypto.subtle.sign('HMAC', key, enc.encode(given)),
+    crypto.subtle.sign('HMAC', key, enc.encode(expect)),
+  ]);
+  const ua = new Uint8Array(a), ub = new Uint8Array(b);
   let diff = 0;
-  for (let i = 0; i < given.length; i++) diff |= given.charCodeAt(i) ^ expect.charCodeAt(i);
+  for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
   return diff === 0;
 };
 
 export async function onRequest({ request, env }) {
-  if (!tokenOk(request, env)) return json({ error: 'Unauthorized' }, 401);
+  if (!await tokenOk(request, env)) return json({ error: 'Unauthorized' }, 401);
 
   try {
     if (request.method === 'POST') {
@@ -55,6 +64,7 @@ export async function onRequest({ request, env }) {
 
     return json({ error: 'Method not allowed' }, 405);
   } catch (err) {
-    return json({ error: String(err?.message || err) }, 500);
+    console.error('push handler error:', err);
+    return json({ error: 'Internal server error' }, 500);
   }
 }

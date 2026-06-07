@@ -1,3 +1,4 @@
 .DS_Store
 wrangler.toml
-wrangler-account.jsonwrangler.toml
+wrangler-account.json
+push-worker/wrangler.toml
