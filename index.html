@@ -298,13 +298,23 @@ const SALAH_NAMES = {
   Isha:    { en:'Isha',    ar:'العشاء' },
 };
 
-function useSalahTimes(dKey, method, school) {
+function useSalahTimes(dKey, method, school, syncedLoc, onLocationChange) {
   const [salahTimes, setSalahTimes] = useState(null);
   const [location, setLocation]     = useState(() => {
+    if (syncedLoc) return syncedLoc;
     try { return JSON.parse(localStorage.getItem(SALAH_LOC_KEY)); } catch { return null; }
   });
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState(null);
+
+  /* Apply a location that arrived from remote sync after initial render */
+  useEffect(() => {
+    if (!syncedLoc) return;
+    setLocation(prev => {
+      if (prev?.lat === syncedLoc.lat && prev?.lon === syncedLoc.lon) return prev;
+      return syncedLoc;
+    });
+  }, [syncedLoc?.lat, syncedLoc?.lon]);
 
   const fetchTimes = useCallback(async (lat, lon, dk, m, s) => {
     const cacheKey = `${SALAH_CACHE_PFX}${dk}_${lat.toFixed(3)}_${lon.toFixed(3)}_m${m}_s${s}`;
@@ -340,6 +350,7 @@ function useSalahTimes(dKey, method, school) {
         const loc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
         setLocation(loc);
         try { localStorage.setItem(SALAH_LOC_KEY, JSON.stringify(loc)); } catch {}
+        onLocationChange?.(loc);
         fetchTimes(loc.lat, loc.lon, dKey, method, school);
       },
       err => {
@@ -348,15 +359,16 @@ function useSalahTimes(dKey, method, school) {
       },
       { timeout: 10000 }
     );
-  }, [dKey, method, school, fetchTimes]);
+  }, [dKey, method, school, fetchTimes, onLocationChange]);
 
   const setManualLocation = useCallback((lat, lon) => {
     const loc = { lat: parseFloat(lat), lon: parseFloat(lon) };
     setLocation(loc);
     setError(null);
     try { localStorage.setItem(SALAH_LOC_KEY, JSON.stringify(loc)); } catch {}
+    onLocationChange?.(loc);
     fetchTimes(loc.lat, loc.lon, dKey, method, school);
-  }, [dKey, method, school, fetchTimes]);
+  }, [dKey, method, school, fetchTimes, onLocationChange]);
 
   useEffect(() => {
     if (location) fetchTimes(location.lat, location.lon, dKey, method, school);
@@ -449,7 +461,7 @@ const SEED = () => ({
   ],
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
-  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0 },
+  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null },
   admin: {
     pillars: {},          /* { [id]: { name?, color? } } */
     quads: {},            /* { [id]: { title?, sub?, hint? } } */
@@ -1088,7 +1100,12 @@ function Timeline({ state, setState, dow, dKey, sel }) {
 
   const salahMethod = state.ui.salahMethod ?? 3;
   const salahSchool = state.ui.salahSchool ?? 0;
-  const { salahBlocks, location, loading: salahLoading, error: salahError, resyncLocation, setManualLocation } = useSalahTimes(dKey, salahMethod, salahSchool);
+  const salahLoc    = state.ui.salahLoc ?? null;
+  const onSalahLocChange = useCallback(
+    loc => setState(s => ({ ...s, ui: { ...s.ui, salahLoc: loc } })),
+    [setState]
+  );
+  const { salahBlocks, location, loading: salahLoading, error: salahError, resyncLocation, setManualLocation } = useSalahTimes(dKey, salahMethod, salahSchool, salahLoc, onSalahLocChange);
 
   const layouts = useMemo(() => layoutBlocks([...blocks, ...salahBlocks]), [blocks, salahBlocks]);
 
