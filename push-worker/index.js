@@ -127,32 +127,35 @@ async function sendPush(subscription, payload, privateKeyB64u) {
 export default {
   async scheduled(_event, env, _ctx) {
     const now    = Date.now();
-    const window = 2 * 60 * 1000; /* 2-minute look-back to match cron cadence */
+    const window = 10 * 60 * 1000; /* 10-min catch-up window (cron fires every 5 min) */
 
-    const rows = await env.DB.prepare('SELECT id, subscription, schedule FROM push_subs').all();
+    /* Only load rows that have an upcoming notification in the current window.
+       next_fire_at = 0 means no upcoming notifications — skip entirely. */
+    const rows = await env.DB.prepare(
+      'SELECT id, subscription, schedule FROM push_subs WHERE next_fire_at > 0 AND next_fire_at <= ?'
+    ).bind(now + 30_000).all();
 
-    for (const row of (rows.results || [])) {
+    await Promise.all((rows.results || []).map(async row => {
       try {
         const sub      = JSON.parse(row.subscription);
         const schedule = JSON.parse(row.schedule || '[]');
 
         const due = schedule.filter(n => n.fireAt >= now - window && n.fireAt <= now + 30_000);
-        if (!due.length) continue;
+        if (!due.length) return;
 
-        for (const n of due) {
+        await Promise.all(due.map(async n => {
           const status = await sendPush(sub, {
             title:   n.title,
             body:    n.body || '',
             tag:     n.id,
             isSalah: n.id.startsWith('salah-'),
           }, env.VAPID_PRIVATE_KEY);
-
           console.log(`push → ${row.id} [${n.title}] → HTTP ${status}`);
-        }
+        }));
       } catch (e) {
         console.error(`push error for ${row.id}:`, e.message);
       }
-    }
+    }));
   },
 
   /* HTTP handler — used only for health check */

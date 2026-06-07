@@ -504,8 +504,13 @@ async function syncPushSchedule(notifications) {
       });
     }
 
+    /* Skip the D1 write if schedule is identical to last sync */
+    const fp = notifications.map(n => `${n.id}:${n.fireAt}`).sort().join('|');
+    const subId = sub.endpoint.slice(-32);
+    const fpKey = `push_fp_${subId}`;
+    if (localStorage.getItem(fpKey) === fp) return;
+
     const subJson = sub.toJSON();
-    const id      = sub.endpoint.slice(-32); /* stable device identifier */
 
     await fetch('/api/push', {
       method:  'POST',
@@ -513,8 +518,9 @@ async function syncPushSchedule(notifications) {
         'Content-Type':  'application/json',
         'Authorization': `Bearer ${Sync.getToken()}`,
       },
-      body: JSON.stringify({ id, subscription: subJson, schedule: notifications }),
+      body: JSON.stringify({ id: subId, subscription: subJson, schedule: notifications }),
     });
+    localStorage.setItem(fpKey, fp);
   } catch(e) { /* no-op — background push is best-effort */ }
 }
 

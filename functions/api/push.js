@@ -31,13 +31,18 @@ export async function onRequest({ request, env }) {
       const { id, subscription, schedule } = await request.json();
       if (!id || !subscription) return json({ error: 'Missing id or subscription' }, 400);
 
+      const now        = Date.now();
+      const upcoming   = (schedule || []).map(n => n.fireAt).filter(t => t > now);
+      const nextFireAt = upcoming.length ? Math.min(...upcoming) : 0;
+
       await env.DB.prepare(
-        `INSERT INTO push_subs (id, subscription, schedule, updated_at) VALUES (?, ?, ?, ?)
+        `INSERT INTO push_subs (id, subscription, schedule, next_fire_at, updated_at) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE
            SET subscription = excluded.subscription,
                schedule     = excluded.schedule,
+               next_fire_at = excluded.next_fire_at,
                updated_at   = excluded.updated_at`,
-      ).bind(id, JSON.stringify(subscription), JSON.stringify(schedule || []), Date.now()).run();
+      ).bind(id, JSON.stringify(subscription), JSON.stringify(schedule || []), nextFireAt, now).run();
 
       return json({ ok: true });
     }

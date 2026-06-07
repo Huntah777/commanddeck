@@ -16,5 +16,9 @@ CREATE TABLE IF NOT EXISTS push_subs (
   id           TEXT PRIMARY KEY,   -- last 32 chars of the push endpoint (stable device ID)
   subscription TEXT NOT NULL,      -- JSON: { endpoint, keys: { p256dh, auth } }
   schedule     TEXT NOT NULL DEFAULT '[]', -- JSON: [{ id, title, body, fireAt }]
+  next_fire_at INTEGER NOT NULL DEFAULT 0, -- unix ms of next upcoming notification (0 = none)
   updated_at   INTEGER NOT NULL
 );
+
+-- Run once if the table already existed before this column was added:
+-- ALTER TABLE push_subs ADD COLUMN next_fire_at INTEGER NOT NULL DEFAULT 0;
