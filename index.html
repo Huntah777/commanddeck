@@ -702,6 +702,7 @@ function App() {
         setState(hydrate(remote));
       }
       setSyncStatus('synced');
+      lastPulledAt.current = Date.now();
     } catch (e) {
       if (e.message === 'UNAUTHORIZED') {
         Sync.setToken(null);
@@ -742,6 +743,7 @@ function App() {
   /* Persist on change: localStorage immediately, API debounced */
   const skipFirst = useRef(true);
   const saveTimer = useRef(null);
+  const lastPulledAt = useRef(0);
   useEffect(() => {
     if (!state) return;
     if (skipFirst.current) { skipFirst.current = false; return; }
@@ -757,6 +759,30 @@ function App() {
       }
     }, 800);
   }, [state]);
+
+  /* Re-pull from D1 when returning to the tab after ≥60 s away.
+     Skips if a local save is still pending to avoid clobbering unsaved changes. */
+  useEffect(() => {
+    if (!Sync.configured()) return;
+    const STALE_MS = 60_000;
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() - lastPulledAt.current < STALE_MS) return;
+      if (saveTimer.current) return;
+      try {
+        const remote = await Sync.load();
+        if (remote?.habits?.length) {
+          setState(hydrate(remote));
+          setSyncStatus('synced');
+          lastPulledAt.current = Date.now();
+        }
+      } catch (e) {
+        if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
 
   if (!loaded || !state) {
     return <div className="min-h-screen flex items-center justify-center text-bone-400 font-display italic">Loading the command deck…</div>;
