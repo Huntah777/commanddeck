@@ -2,7 +2,9 @@
    Command Deck — /api/mcp
    Remote MCP server (Streamable HTTP transport, MCP 2024-11-05).
    Add to claude.ai › Settings › Integrations as:
-     URL:  https://commanddeck.pages.dev/api/mcp?key=<YOUR_TOKEN>
+     URL:  https://commanddeck.huntah.co.uk/api/mcp
+   OAuth flow handled by /oauth/* endpoints.
+   Fallback (Claude Desktop): append ?key=<SYNC_TOKEN> to the URL.
    ============================================================ */
 
 const CORS = {
