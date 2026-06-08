@@ -169,7 +169,7 @@ const Sync = {
   async load() {
     const token = this.getToken();
     if (!token) throw new Error('NO_TOKEN');
-    const r = await fetch(ENDPOINT, { headers: { 'Authorization': `Bearer ${token}` } });
+    const r = await fetch(ENDPOINT, { cache: 'no-store', headers: { 'Authorization': `Bearer ${token}` } });
     if (r.status === 401) throw new Error('UNAUTHORIZED');
     if (!r.ok) throw new Error(`HTTP_${r.status}`);
     return await r.json();
@@ -752,6 +752,7 @@ function App() {
     setSyncStatus('saving');
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
+      saveTimer.current = null;
       try { await Sync.save(state); setSyncStatus('synced'); }
       catch (e) {
         if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
@@ -760,18 +761,21 @@ function App() {
     }, 800);
   }, [state]);
 
-  /* Re-pull from D1 when returning to the tab after ≥60 s away.
-     Skips if a local save is still pending to avoid clobbering unsaved changes. */
+  /* Mirror syncStatus into a ref so the pull effect can read it without a dep */
+  const syncStatusRef = useRef('idle');
+  useEffect(() => { syncStatusRef.current = syncStatus; }, [syncStatus]);
+
+  /* Re-pull from D1 when returning to the tab/PWA after >=60 s away.
+     pageshow covers iOS Safari bfcache restores that visibilitychange misses. */
   useEffect(() => {
     if (!Sync.configured()) return;
     const STALE_MS = 60_000;
-    const onVisible = async () => {
-      if (document.visibilityState !== 'visible') return;
+    const pull = async () => {
       if (Date.now() - lastPulledAt.current < STALE_MS) return;
-      if (saveTimer.current) return;
+      if (syncStatusRef.current === 'saving') return;
       try {
         const remote = await Sync.load();
-        if (remote?.habits?.length) {
+        if (remote && !remote.error) {
           setState(hydrate(remote));
           setSyncStatus('synced');
           lastPulledAt.current = Date.now();
@@ -780,8 +784,14 @@ function App() {
         if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
       }
     };
+    const onVisible  = () => { if (document.visibilityState === 'visible') pull(); };
+    const onPageShow = (e) => { if (e.persisted) pull(); };
     document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    window.addEventListener('pageshow', onPageShow);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('pageshow', onPageShow);
+    };
   }, []);
 
   if (!loaded || !state) {
@@ -822,12 +832,13 @@ function App() {
   const syncNow = async () => {
     if (!Sync.configured()) return;
     clearTimeout(saveTimer.current);
+    saveTimer.current = null;
     setSyncStatus('saving');
     try {
-      await Sync.save(state);
       const remote = await Sync.load();
-      if (remote?.habits) setState(hydrate(remote));
+      if (remote && !remote.error) { setState(hydrate(remote)); }
       setSyncStatus('synced');
+      lastPulledAt.current = Date.now();
     } catch (e) {
       if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
       else setSyncStatus('offline');
@@ -1709,8 +1720,8 @@ function HabitCard({ h, state, setState, onEdit }) {
       </div>
       <div className="flex items-center gap-3 mb-2">
         <div className="flex-1 h-1.5 rounded-full bg-ink-700 overflow-hidden">
-          <div className="h-full" style={{ width: `${completion}%`, background: p.color }}/>
         </div>
+        <div className="font-mono text-[10px] text-bone-400 w-16 text-right">{completion}% · 30D</div>
       </div>
       <div className="flex items-center justify-between">
         <div className="flex gap-[2px]">
