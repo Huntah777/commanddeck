@@ -1,6 +1,18 @@
 /* Authorization endpoint.
    GET  → renders a form asking for the CommandDeck sync token.
-   POST → validates the token, signs an auth code, redirects to redirect_uri. */
+   POST → validates the token, signs an auth code, redirects to redirect_uri.
+
+   Rate limit: 10 failed attempts per IP per 15-minute window (stored in D1). */
+
+const RATE_LIMIT   = 10;
+const WINDOW_MS    = 15 * 60 * 1000;
+
+const SECURITY_HEADERS = {
+  'Content-Security-Policy':   "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+  'X-Frame-Options':           'DENY',
+  'X-Content-Type-Options':    'nosniff',
+  'Referrer-Policy':           'no-referrer',
+};
 
 // ── Crypto helpers ────────────────────────────────────────────────────────────
 
@@ -32,7 +44,47 @@ async function timingSafeEqual(a, b) {
   return diff === 0;
 }
 
+// ── Rate limiting (D1) ────────────────────────────────────────────────────────
+
+async function checkRateLimit(ip, env) {
+  const now = Date.now();
+  const key = `auth:${ip}`;
+
+  await env.DB.prepare(
+    `CREATE TABLE IF NOT EXISTS rate_limits (
+       key TEXT PRIMARY KEY, attempts INTEGER NOT NULL DEFAULT 0, window_start INTEGER NOT NULL DEFAULT 0
+     )`
+  ).run();
+
+  const row = await env.DB.prepare(
+    'SELECT attempts, window_start FROM rate_limits WHERE key = ?'
+  ).bind(key).first();
+
+  // New IP or window has expired — reset
+  if (!row || now - row.window_start > WINDOW_MS) {
+    await env.DB.prepare(
+      'INSERT OR REPLACE INTO rate_limits (key, attempts, window_start) VALUES (?, 1, ?)'
+    ).bind(key, now).run();
+    return { blocked: false };
+  }
+
+  if (row.attempts >= RATE_LIMIT) {
+    const retryAfterSec = Math.ceil((row.window_start + WINDOW_MS - now) / 1000);
+    return { blocked: true, retryAfterSec };
+  }
+
+  await env.DB.prepare(
+    'UPDATE rate_limits SET attempts = attempts + 1 WHERE key = ?'
+  ).bind(key).run();
+
+  return { blocked: false };
+}
+
 // ── HTML ──────────────────────────────────────────────────────────────────────
+
+const escHtml = (s) => String(s ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 const page = (params, error = '') => `<!DOCTYPE html>
 <html lang="en">
@@ -46,7 +98,7 @@ const page = (params, error = '') => `<!DOCTYPE html>
     .card{background:#1a1d2e;border:1px solid #2d3148;border-radius:1rem;padding:2rem;width:100%;max-width:400px;display:flex;flex-direction:column;gap:1.25rem}
     .logo{display:flex;align-items:center;gap:.6rem;font-size:1.1rem;font-weight:700;color:#a78bfa}
     .logo svg{width:28px;height:28px}
-    h1{font-size:1rem;font-weight:600;color:#e2e8f0}
+    h1{font-size:1rem;font-weight:600}
     p{font-size:.85rem;color:#94a3b8;line-height:1.5}
     label{font-size:.8rem;color:#94a3b8;font-weight:500}
     input[type=password]{width:100%;background:#0f1117;border:1px solid #2d3148;border-radius:.5rem;padding:.65rem .85rem;color:#e2e8f0;font-size:.9rem;outline:none;transition:border-color .15s}
@@ -54,6 +106,7 @@ const page = (params, error = '') => `<!DOCTYPE html>
     .error{font-size:.8rem;color:#f87171;background:#2d1b1b;border:1px solid #7f1d1d;padding:.5rem .75rem;border-radius:.4rem}
     button{background:#7c3aed;color:#fff;border:none;border-radius:.5rem;padding:.7rem 1.25rem;font-size:.9rem;font-weight:600;cursor:pointer;width:100%;transition:background .15s}
     button:hover{background:#6d28d9}
+    button:disabled{background:#4c1d95;cursor:not-allowed;opacity:.6}
   </style>
 </head>
 <body>
@@ -77,10 +130,6 @@ const page = (params, error = '') => `<!DOCTYPE html>
 </body>
 </html>`;
 
-const escHtml = (s) => String(s ?? '')
-  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-
 // ── Handler ───────────────────────────────────────────────────────────────────
 
 export async function onRequest({ request, env }) {
@@ -95,10 +144,13 @@ export async function onRequest({ request, env }) {
       code_challenge:        url.searchParams.get('code_challenge') || '',
       code_challenge_method: url.searchParams.get('code_challenge_method') || '',
     };
-    return new Response(page(params), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+    return new Response(page(params), {
+      headers: { 'Content-Type': 'text/html; charset=utf-8', ...SECURITY_HEADERS },
+    });
   }
 
   if (request.method === 'POST') {
+    const ip          = request.headers.get('CF-Connecting-IP') || 'unknown';
     const fd          = await request.formData();
     const syncToken   = (fd.get('sync_token') || '').trim();
     const redirectUri = fd.get('redirect_uri') || '';
@@ -106,14 +158,29 @@ export async function onRequest({ request, env }) {
     const codeChallenge       = fd.get('code_challenge') || '';
     const codeChallengeMethod = fd.get('code_challenge_method') || '';
 
-    // Re-collect params for re-rendering the form on error
-    const params = { redirect_uri: redirectUri, state, client_id: fd.get('client_id') || '',
-                     response_type: 'code', code_challenge: codeChallenge,
-                     code_challenge_method: codeChallengeMethod };
+    const params = {
+      redirect_uri: redirectUri, state, client_id: fd.get('client_id') || '',
+      response_type: 'code', code_challenge: codeChallenge,
+      code_challenge_method: codeChallengeMethod,
+    };
 
     if (!redirectUri) {
       return new Response(page(params, 'Missing redirect_uri.'), {
-        status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        status: 400, headers: { 'Content-Type': 'text/html; charset=utf-8', ...SECURITY_HEADERS },
+      });
+    }
+
+    // Check rate limit before touching the token
+    const rl = await checkRateLimit(ip, env);
+    if (rl.blocked) {
+      const mins = Math.ceil(rl.retryAfterSec / 60);
+      return new Response(page(params, `Too many attempts. Try again in ${mins} minute${mins === 1 ? '' : 's'}.`), {
+        status: 429,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Retry-After': String(rl.retryAfterSec),
+          ...SECURITY_HEADERS,
+        },
       });
     }
 
@@ -121,18 +188,12 @@ export async function onRequest({ request, env }) {
     const valid = await timingSafeEqual(syncToken, env.SYNC_TOKEN || '');
     if (!valid || !syncToken) {
       return new Response(page(params, 'Invalid sync token. Check Settings › Sync in the app.'), {
-        status: 401, headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        status: 401, headers: { 'Content-Type': 'text/html; charset=utf-8', ...SECURITY_HEADERS },
       });
     }
 
     // Build a signed auth code (expires in 5 minutes)
-    const payload = JSON.stringify({
-      r: redirectUri,
-      s: state,
-      c: codeChallenge,
-      m: codeChallengeMethod,
-      e: Date.now() + 300_000,
-    });
+    const payload    = JSON.stringify({ r: redirectUri, s: state, c: codeChallenge, m: codeChallengeMethod, e: Date.now() + 300_000 });
     const payloadB64 = b64url(enc.encode(payload));
     const sig        = await hmacSign(payloadB64, env.SYNC_TOKEN);
     const code       = `${payloadB64}.${sig}`;

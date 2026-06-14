@@ -22,3 +22,10 @@ CREATE TABLE IF NOT EXISTS push_subs (
 
 -- Run once if the table already existed before this column was added:
 -- ALTER TABLE push_subs ADD COLUMN next_fire_at INTEGER NOT NULL DEFAULT 0;
+
+-- OAuth authorize rate-limiting (10 attempts per IP per 15-minute window)
+CREATE TABLE IF NOT EXISTS rate_limits (
+  key          TEXT    PRIMARY KEY,  -- 'auth:<CF-Connecting-IP>'
+  attempts     INTEGER NOT NULL DEFAULT 0,
+  window_start INTEGER NOT NULL DEFAULT 0
+);

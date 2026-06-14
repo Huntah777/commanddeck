@@ -3,9 +3,11 @@
    The issued access_token equals SYNC_TOKEN so the MCP endpoint accepts it as-is. */
 
 const CORS = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  'X-Content-Type-Options':       'nosniff',
+  'X-Frame-Options':              'DENY',
 };
 
 const enc = new TextEncoder();
