@@ -688,6 +688,9 @@ function App() {
     return merged;
   };
 
+  /* If landing directly on the Today tab, never show a stale persisted date */
+  const landToday = (s) => s.ui.view === 'today' ? { ...s, ui: { ...s.ui, selectedDate: todayKey() } } : s;
+
   /* Initial load */
   useEffect(() => { (async () => {
     const cache = Cache.read();
@@ -695,7 +698,7 @@ function App() {
     if (!Sync.configured()) {
       const base = cache && cache.habits ? hydrate(cache) : SEED();
       const initial = startView ? { ...base, ui: { ...base.ui, view: startView } } : base;
-      setState(initial);
+      setState(landToday(initial));
       setSyncStatus('local');
       setLoaded(true);
       return;
@@ -709,24 +712,24 @@ function App() {
       if (remoteEmpty && cacheHasData) {
         /* First-time sync: push local up so we don't lose it */
         await Sync.save(cache);
-        setState(hydrate(cache));
+        setState(landToday(hydrate(cache)));
       } else if (remoteEmpty) {
         const seed = SEED();
         await Sync.save(seed);
-        setState(seed);
+        setState(landToday(seed));
       } else {
-        setState(hydrate(remote));
+        setState(landToday(hydrate(remote)));
       }
       setSyncStatus('synced');
       lastPulledAt.current = Date.now();
     } catch (e) {
       if (e.message === 'UNAUTHORIZED') {
         Sync.setToken(null);
-        setState(cache && cache.habits ? hydrate(cache) : SEED());
+        setState(landToday(cache && cache.habits ? hydrate(cache) : SEED()));
         setSyncStatus('unauth');
         setSetupOpen(true);
       } else {
-        setState(cache && cache.habits ? hydrate(cache) : SEED());
+        setState(landToday(cache && cache.habits ? hydrate(cache) : SEED()));
         setSyncStatus('offline');
       }
     }
@@ -814,7 +817,10 @@ function App() {
     return <div className="min-h-screen flex items-center justify-center text-bone-400 font-display italic">Loading the command deck…</div>;
   }
 
-  const setView = (view) => setState(s => ({ ...s, ui: { ...s.ui, view }}));
+  const setView = (view) => setState(s => ({
+    ...s,
+    ui: { ...s.ui, view, selectedDate: view === 'today' ? todayKey() : s.ui.selectedDate },
+  }));
   const setDate = (k)    => setState(s => ({ ...s, ui: { ...s.ui, selectedDate: k }}));
 
   const connectWithToken = async (token) => {
@@ -1963,6 +1969,7 @@ function MatrixView({ state, setState }) {
    STATS VIEW
 ------------------------------------------------------------------- */
 const STAT_RANGES = [
+  { value: 7,   label: '7d' },
   { value: 30,  label: '30d' },
   { value: 60,  label: '60d' },
   { value: 120, label: '120d' },
