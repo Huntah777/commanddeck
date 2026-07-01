@@ -595,9 +595,9 @@ function scheduleNotifications(state) {
     }
   } catch(e) {}
 
-  /* Calendar blocks */
+  /* Calendar blocks — all blocks always fire 3 notifications */
   (state.blocks || []).forEach(b => {
-    if (!b.every.includes(dow) || b.notify === false) return;
+    if (!b.every.includes(dow)) return;
     const s = todayAtMins(b.start), e = todayAtMins(b.end);
     push(`b-${b.id}-15`,  'Starting in 15 min', b.title, s - 15 * 60000);
     push(`b-${b.id}-5`,   'Starting in 5 min',  b.title, s -  5 * 60000);
@@ -682,7 +682,7 @@ function App() {
       goals: data?.goals || [],
       habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, ...h })),
       tasks:  (data?.tasks  || []).map(t => ({ reminder: null, ...t })),
-      blocks: (data?.blocks || SEED().blocks).map(b => ({ notify: true, ...b })),
+      blocks: data?.blocks || SEED().blocks,
     };
     if (startView) merged.ui = { ...merged.ui, view: startView };
     return merged;
@@ -1364,7 +1364,6 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
   const [start, setStart] = useState(toHM(block?.start ?? adding?.start ?? 540));
   const [end,   setEnd]   = useState(toHM(block?.end   ?? adding?.end   ?? 600));
   const [days,  setDays]  = useState(block?.every || [currentDow]);
-  const [notify, setNotify] = useState(block?.notify !== false);
 
   const toggleDay = (d) => setDays(ds => ds.includes(d) ? ds.filter(x=>x!==d) : [...ds, d].sort());
 
@@ -1377,7 +1376,6 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
       title: title.trim(), pillar,
       start: startM, end: endM,
       every: days.length ? days : [0,1,2,3,4,5,6],
-      notify,
     });
   };
 
@@ -1420,11 +1418,10 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
         </div>
       </Field>
       <Field label="Notifications">
-        <label className="flex items-center gap-2.5 cursor-pointer select-none">
-          <input type="checkbox" checked={notify} onChange={e=>setNotify(e.target.checked)}
-            className="w-4 h-4 rounded accent-strategy flex-shrink-0"/>
-          <span className="text-sm text-bone-300 min-w-0 leading-snug">Alert 15 min before · 5 min before · 5 min before end</span>
-        </label>
+        <div className="text-sm text-bone-400 flex items-center gap-2">
+          <span className="text-strategy">✓</span>
+          15 min before start · 5 min before start · 5 min before end
+        </div>
       </Field>
       <div className="flex justify-between gap-2 pt-2">
         {!isNew && <button onClick={()=>onDelete(block.id)} className="btn px-3 py-2 rounded-lg text-combat border border-combat/30 hover:bg-combat/10 text-sm flex items-center gap-1.5"><I.trash className="w-4 h-4"/>Delete</button>}
