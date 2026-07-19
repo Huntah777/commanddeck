@@ -2223,6 +2223,21 @@ function NotificationsCard({ state, setState }) {
   const enabled = state.ui?.notif && perm === 'granted';
   const syncOk  = Sync.configured();
 
+  /* Browser permission can change outside the app (site settings, or a fresh
+     grant after reinstalling/re-syncing on this device) — re-read it whenever
+     the tab regains focus so a returning user sees the current state instead
+     of a stale "blocked" reading with no way to act on it. */
+  useEffect(() => {
+    if (!supported) return;
+    const refresh = () => setPerm(Notification.permission);
+    document.addEventListener('visibilitychange', refresh);
+    window.addEventListener('focus', refresh);
+    return () => {
+      document.removeEventListener('visibilitychange', refresh);
+      window.removeEventListener('focus', refresh);
+    };
+  }, [supported]);
+
   /* Check if a push subscription already exists */
   useEffect(() => {
     (async () => {
@@ -2239,6 +2254,13 @@ function NotificationsCard({ state, setState }) {
       setState(s => ({ ...s, ui: { ...s.ui, notif: false } }));
       await removePushSubscription();
       setPushOk(false);
+      return;
+    }
+    if (perm === 'denied') {
+      /* Once blocked, browsers refuse to re-show the permission prompt — the
+         only fix is the browser's own site settings. Re-read here in case it
+         was just changed there, instead of leaving the user with a dead end. */
+      setPerm(Notification.permission);
       return;
     }
     if (perm !== 'granted') {
@@ -2259,14 +2281,16 @@ function NotificationsCard({ state, setState }) {
   const statusLine = !supported
     ? 'Not supported in this browser.'
     : perm === 'denied'
-    ? 'Blocked — enable in your browser site settings.'
+    ? "Blocked — enable in your browser's site settings, then tap Recheck."
     : enabled
-    ? 'Active · prayer times, calendar, habits & tasks.'
-    : 'Enable to get prayer time alerts and reminders.';
+    ? 'Active · prayer times, calendar, habits & tasks — even when the app is closed.'
+    : 'Enable to get prayer time alerts and reminders, even when the app is closed.';
+
+  const btnLabel = perm === 'denied' ? 'Recheck permission' : enabled ? 'Disable notifications' : 'Enable notifications';
 
   return (
     <div className="card p-5">
-      <div className="text-[10px] font-mono tracking-widest text-bone-400">NOTIFICATIONS</div>
+      <div className="text-[10px] font-mono tracking-widest text-bone-400">BACKGROUND NOTIFICATIONS</div>
       <div className="font-display text-xl text-bone-100 mt-1 mb-1">Alerts & reminders</div>
       <div className="text-sm text-bone-400 mb-3">{statusLine}</div>
       {enabled && (
@@ -2274,10 +2298,10 @@ function NotificationsCard({ state, setState }) {
           {pushStatus}
         </div>
       )}
-      {supported && perm !== 'denied' && (
+      {supported && (
         <button onClick={toggle}
           className={`btn px-3 py-2 rounded-lg text-sm ${enabled ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>
-          {enabled ? 'Disable notifications' : 'Enable notifications'}
+          {btnLabel}
         </button>
       )}
     </div>
