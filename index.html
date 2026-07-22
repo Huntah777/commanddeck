@@ -32,6 +32,7 @@
       const s = document.documentElement.style;
       s.setProperty('--app-bg-img', `url("${_bg.url}")`);
       s.setProperty('--app-bg-scrim', 'rgba(10,10,11,0.78)');
+      s.setProperty('--body-bg', 'transparent');
     }
   } catch {}
 </script>
@@ -148,14 +149,14 @@ tailwind.config = {
   }
 
   /* ── BASE ─────────────────────────────────────────────────────────── */
-  html, body { background: var(--s0); color: var(--f0); -webkit-font-smoothing: antialiased; }
+  html, body { background: var(--body-bg, var(--s0)); color: var(--f0); -webkit-font-smoothing: antialiased; }
   body { font-family: 'Manrope', system-ui, sans-serif; }
   .font-display { font-family: 'Fraunces', serif; font-optical-sizing: auto; }
   .font-mono { font-family: 'JetBrains Mono', monospace; }
 
   /* ── WATERMARK — per-theme background texture ─────────────────────── */
   .bg-tess {
-    background-color: var(--s0);
+    background-color: var(--body-bg, var(--s0));
     background-image:
       radial-gradient(circle at 20% 10%, rgba(245,158,11,0.04), transparent 40%),
       radial-gradient(circle at 80% 90%, rgba(16,185,129,0.03), transparent 40%),
@@ -376,8 +377,15 @@ const BackgroundPref = {
 };
 function applyBackground(pref) {
   const s = document.documentElement.style;
-  s.setProperty('--app-bg-img',   pref?.url ? `url("${pref.url}")` : 'none');
-  s.setProperty('--app-bg-scrim', pref?.url ? 'color-mix(in srgb, var(--s0) 78%, transparent)' : 'transparent');
+  if (pref?.url) {
+    s.setProperty('--app-bg-img',   `url("${pref.url}")`);
+    s.setProperty('--app-bg-scrim', 'color-mix(in srgb, var(--s0) 78%, transparent)');
+    s.setProperty('--body-bg', 'transparent');
+  } else {
+    s.setProperty('--app-bg-img',   'none');
+    s.setProperty('--app-bg-scrim', 'transparent');
+    s.removeProperty('--body-bg');
+  }
 }
 
 const THEMES = [
