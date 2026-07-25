@@ -476,7 +476,7 @@ const SEED = () => ({
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
   goals: [],
-  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null },
+  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null, goalsReminder: { on: true, time: '07:00' } },
   admin: {
     pillars: {},          /* { [id]: { name?, color? } } */
     quads: {},            /* { [id]: { title?, sub?, hint? } } */
@@ -617,6 +617,26 @@ function scheduleNotifications(state) {
     if (!t.reminder || t.done) return;
     push(`t-${t.id}`, 'Task reminder', t.title, new Date(t.reminder).getTime());
   });
+
+  /* Morning goal reminders — quarterly, then yearly, then lifetime, each a
+     couple minutes apart so they land as separate notifications in that order */
+  const gr = state.ui?.goalsReminder;
+  if (gr?.on && gr.time) {
+    const [gh, gm] = gr.time.split(':').map(Number);
+    const base = todayAtMins(gh * 60 + gm);
+    const active = (state.goals || []).filter(g => g.status !== 'completed');
+    const y = new Date().getFullYear();
+    const qKey = `${y}-Q${Math.ceil((new Date().getMonth() + 1) / 3)}`;
+    const titles = (arr) => arr.map(g => g.title).join(' · ');
+
+    const quarterly = active.filter(g => g.horizon === 'quarter' && g.quarter === qKey);
+    const yearly    = active.filter(g => g.horizon === '1year');
+    const lifetime  = active.filter(g => g.horizon === 'lifetime');
+
+    if (quarterly.length) push('goals-quarter',  `This quarter's goals (${qKey})`, titles(quarterly), base);
+    if (yearly.length)    push('goals-year',     "This year's goals",              titles(yearly),    base + 2 * 60000);
+    if (lifetime.length)  push('goals-lifetime', 'Your lifetime mission',          titles(lifetime),  base + 4 * 60000);
+  }
 
   navigator.serviceWorker.controller.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
 
@@ -2167,6 +2187,7 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
 
       <SalahCard state={state} setState={setState}/>
       <NotificationsCard state={state} setState={setState}/>
+      <GoalReminderCard state={state} setState={setState}/>
       <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect}/>
       <AppZone />
       <AdminCard state={state} setState={setState}/>
@@ -2304,6 +2325,49 @@ function NotificationsCard({ state, setState }) {
           {btnLabel}
         </button>
       )}
+    </div>
+  );
+}
+
+function GoalReminderCard({ state, setState }) {
+  const gr = state.ui?.goalsReminder || { on: false, time: '07:00' };
+  const notifOk = !!state.ui?.notif && typeof Notification !== 'undefined' && Notification.permission === 'granted';
+
+  const setGr = (patch) => setState(s => ({
+    ...s,
+    ui: { ...s.ui, goalsReminder: { on: true, time: '07:00', ...s.ui?.goalsReminder, ...patch } },
+  }));
+
+  const active = (state.goals || []).filter(g => g.status !== 'completed');
+  const y = new Date().getFullYear();
+  const qKey = `${y}-Q${Math.ceil((new Date().getMonth() + 1) / 3)}`;
+  const counts = {
+    quarter:  active.filter(g => g.horizon === 'quarter' && g.quarter === qKey).length,
+    year:     active.filter(g => g.horizon === '1year').length,
+    lifetime: active.filter(g => g.horizon === 'lifetime').length,
+  };
+
+  return (
+    <div className="card p-5">
+      <div className="text-[10px] font-mono tracking-widest text-bone-400">GOAL REMINDERS</div>
+      <div className="font-display text-xl text-bone-100 mt-1 mb-1">Morning check-in</div>
+      <div className="text-sm text-bone-400 mb-3">
+        {notifOk
+          ? `Every morning at ${gr.time}: this quarter's goals, then this year's, then your lifetime mission.`
+          : 'Enable notifications above first.'}
+      </div>
+      <div className="text-xs font-mono mb-3 px-2 py-1.5 rounded-md border border-ink-700 text-bone-500">
+        {counts.quarter} quarterly · {counts.year} yearly · {counts.lifetime} lifetime goals set
+      </div>
+      <div className="flex items-center gap-2">
+        <input type="time" value={gr.time} disabled={!notifOk}
+          onChange={e => setGr({ time: e.target.value })}
+          className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 text-sm disabled:opacity-50"/>
+        <button onClick={() => setGr({ on: !gr.on })} disabled={!notifOk}
+          className={`btn px-3 py-2 rounded-lg text-sm disabled:opacity-50 ${gr.on ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>
+          {gr.on ? 'Disable' : 'Enable'}
+        </button>
+      </div>
     </div>
   );
 }
