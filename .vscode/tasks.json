@@ -4,13 +4,9 @@
     {
       "label": "git pull every hour",
       "type": "shell",
-      "command": "powershell",
+      "command": "node",
       "args": [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        "while ($true) { git -C \"${workspaceFolder}\" pull; Start-Sleep -Seconds 3600 }"
+        "${workspaceFolder}/.vscode/git-pull-every-hour.js"
       ],
       "isBackground": true,
       "problemMatcher": [],
@@ -18,6 +14,9 @@
         "reveal": "always",
         "panel": "dedicated",
         "focus": false
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
       }
     }
   ]
