@@ -23,6 +23,19 @@
     window.dispatchEvent(new Event('appinstalled_done'));
   });
 </script>
+<script>
+  /* Apply theme + background before CSS loads to prevent flash */
+  try {
+    document.documentElement.setAttribute('data-theme', localStorage.getItem('madinah_theme') || 'night');
+    const _bg = JSON.parse(localStorage.getItem('madinah_bg'));
+    if (_bg?.url) {
+      const s = document.documentElement.style;
+      s.setProperty('--app-bg-img', `url("${_bg.url}")`);
+      s.setProperty('--app-bg-scrim', 'rgba(10,10,11,0.78)');
+      s.setProperty('--body-bg', 'transparent');
+    }
+  } catch {}
+</script>
 
 <!-- iOS home screen -->
 <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -59,86 +72,172 @@ tailwind.config = {
 </script>
 
 <style>
-  html, body { background: #0a0a0b; color: #f4f3ee; -webkit-font-smoothing: antialiased; }
+  /* ── THEME TOKENS ─────────────────────────────────────────────────── */
+  :root, [data-theme="night"] {
+    --s0: #0a0a0b;  --s1: #101012;  --s12: #131317;  --s2: #17171b;
+    --s3: #1f1f24;  --s4: #2a2a31;
+    --f0: #f4f3ee;  --f1: #c9c6b8;  --f2: #9a9788;
+    --accent:      #f59e0b;
+    --accent-15:   rgba(245,158,11,.15);
+    --accent-25:   rgba(245,158,11,.25);
+    --accent-30:   rgba(245,158,11,.30);
+    --accent-50:   rgba(245,158,11,.50);
+    --accent-glow: rgba(245,158,11,.45);
+    --mark-from:   #f59e0b;  --mark-to: #b45309;
+    --mark-glow:   rgba(245,158,11,.6);
+  }
+  [data-theme="cyberpunk"] {
+    --s0: #05000f;  --s1: #0a0118;  --s12: #0e0220;  --s2: #140230;
+    --s3: rgba(0,229,255,0.14);  --s4: rgba(0,229,255,0.26);
+    --f0: #e0f0ff;  --f1: #88a0c0;  --f2: #445568;
+    --accent:      #00e5ff;
+    --accent-15:   rgba(0,229,255,.15);
+    --accent-25:   rgba(0,229,255,.25);
+    --accent-30:   rgba(0,229,255,.30);
+    --accent-50:   rgba(0,229,255,.50);
+    --accent-glow: rgba(0,229,255,.45);
+    --mark-from:   #00e5ff;  --mark-to: #0044aa;
+    --mark-glow:   rgba(0,229,255,.6);
+  }
+  [data-theme="ghibli"] {
+    --s0: #060b08;  --s1: #0b1510;  --s12: #0f1b12;  --s2: #131f14;
+    --s3: #1c2e1e;  --s4: #284030;
+    --f0: #f0e8c8;  --f1: #b8a480;  --f2: #786050;
+    --accent:      #56d470;
+    --accent-15:   rgba(86,212,112,.15);
+    --accent-25:   rgba(86,212,112,.25);
+    --accent-30:   rgba(86,212,112,.30);
+    --accent-50:   rgba(86,212,112,.50);
+    --accent-glow: rgba(86,212,112,.45);
+    --mark-from:   #56d470;  --mark-to: #1a7a2a;
+    --mark-glow:   rgba(86,212,112,.6);
+  }
+
+  /* ── TAILWIND CLASS OVERRIDES (all themes via [data-theme]) ───────── */
+  [data-theme] .bg-ink-950  { background-color: var(--s0)  !important; }
+  [data-theme] .bg-ink-900  { background-color: var(--s1)  !important; }
+  [data-theme] .bg-ink-800  { background-color: var(--s2)  !important; }
+  [data-theme] .bg-ink-700  { background-color: var(--s3)  !important; }
+  [data-theme] .border-ink-700 { border-color: var(--s3) !important; }
+  [data-theme] .border-ink-600 { border-color: var(--s4) !important; }
+  [data-theme] .text-bone-100, [data-theme] .text-bone-200 { color: var(--f0) !important; }
+  [data-theme] .text-bone-300 { color: var(--f1) !important; }
+  [data-theme] .text-bone-400, [data-theme] .text-bone-500 { color: var(--f2) !important; }
+  [data-theme] .text-strategy { color: var(--accent) !important; }
+  [data-theme] .bg-strategy   { background-color: var(--accent) !important; }
+  [data-theme] .text-ink-950  { color: var(--s0) !important; }
+  [data-theme] .text-ink-500  { color: var(--s4) !important; }
+  [data-theme] .bg-bone-100   { background-color: var(--f0) !important; }
+  [data-theme] .bg-strategy\/15   { background-color: var(--accent-15) !important; }
+  [data-theme] .border-strategy\/30 { border-color: var(--accent-30) !important; }
+  [data-theme] .border-strategy\/40 { border-color: color-mix(in srgb, var(--accent) 40%, transparent) !important; }
+  [data-theme] .border-strategy\/50 { border-color: var(--accent-50) !important; }
+  [data-theme] .bg-ink-950\/80 { background-color: color-mix(in srgb, var(--s0) 80%, transparent) !important; }
+  [data-theme] .bg-ink-950\/70 { background-color: color-mix(in srgb, var(--s0) 70%, transparent) !important; }
+  [data-theme] .bg-ink-900\/60 { background-color: color-mix(in srgb, var(--s1) 60%, transparent) !important; }
+  [data-theme] .bg-ink-900\/40 { background-color: color-mix(in srgb, var(--s1) 40%, transparent) !important; }
+  [data-theme] .bg-ink-800\/60 { background-color: color-mix(in srgb, var(--s2) 60%, transparent) !important; }
+  [data-theme] .bg-ink-800\/40 { background-color: color-mix(in srgb, var(--s2) 40%, transparent) !important; }
+  [data-theme] .focus\:border-strategy\/50:focus { border-color: var(--accent-50) !important; }
+
+  /* Cyberpunk — swap serif display font for monospace */
+  [data-theme="cyberpunk"] .font-display {
+    font-family: 'JetBrains Mono', monospace;
+    font-optical-sizing: auto;
+    font-style: normal;
+    letter-spacing: -0.02em;
+  }
+
+  /* ── BASE ─────────────────────────────────────────────────────────── */
+  html, body { background: var(--body-bg, var(--s0)); color: var(--f0); -webkit-font-smoothing: antialiased; }
   body { font-family: 'Manrope', system-ui, sans-serif; }
   .font-display { font-family: 'Fraunces', serif; font-optical-sizing: auto; }
   .font-mono { font-family: 'JetBrains Mono', monospace; }
 
-  /* Subtle Islamic-geometric tessellation watermark */
+  /* ── WATERMARK — per-theme background texture ─────────────────────── */
   .bg-tess {
-    background-color: #0a0a0b;
+    background-color: var(--body-bg, var(--s0));
     background-image:
       radial-gradient(circle at 20% 10%, rgba(245,158,11,0.04), transparent 40%),
       radial-gradient(circle at 80% 90%, rgba(16,185,129,0.03), transparent 40%),
       url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'><g fill='none' stroke='%23ffffff' stroke-opacity='0.025' stroke-width='1'><path d='M32 0 L40 16 L56 16 L48 32 L56 48 L40 48 L32 64 L24 48 L8 48 L16 32 L8 16 L24 16 Z'/><circle cx='32' cy='32' r='10'/></g></svg>");
     background-size: auto, auto, 64px 64px;
   }
+  [data-theme="cyberpunk"] .bg-tess {
+    background-image:
+      radial-gradient(circle at 15% 15%, rgba(0,229,255,0.07), transparent 40%),
+      radial-gradient(circle at 85% 85%, rgba(255,0,221,0.05), transparent 40%),
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='40' height='40' viewBox='0 0 40 40'><rect width='40' height='40' fill='none' stroke='%2300e5ff' stroke-width='0.5' stroke-opacity='0.07'/><line x1='20' y1='0' x2='20' y2='40' stroke='%2300e5ff' stroke-width='0.3' stroke-opacity='0.04'/><line x1='0' y1='20' x2='40' y2='20' stroke='%2300e5ff' stroke-width='0.3' stroke-opacity='0.04'/></svg>");
+    background-size: auto, auto, 40px 40px;
+  }
+  [data-theme="ghibli"] .bg-tess {
+    background-image:
+      radial-gradient(circle at 20% 10%, rgba(86,212,112,0.04), transparent 50%),
+      radial-gradient(circle at 80% 90%, rgba(200,160,80,0.03), transparent 50%),
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='80' height='80' viewBox='0 0 80 80'><path d='M0 80 Q20 55 40 40 Q60 25 80 0' fill='none' stroke='%2356d470' stroke-width='1.2' stroke-opacity='0.05'/><path d='M-10 60 Q15 45 30 30 Q50 10 70 0' fill='none' stroke='%2356d470' stroke-width='0.8' stroke-opacity='0.03'/><circle cx='15' cy='65' r='1.5' fill='%2356d470' fill-opacity='0.06'/><circle cx='65' cy='20' r='1.5' fill='%2356d470' fill-opacity='0.04'/></svg>");
+    background-size: auto, auto, 80px 80px;
+  }
 
-  .card { background: linear-gradient(180deg, #131317 0%, #101012 100%); border: 1px solid #1f1f24; border-radius: 14px; }
-  .card-soft { background: #131317; border: 1px solid #1f1f24; border-radius: 12px; }
-  .divider { border-top: 1px solid #1f1f24; }
+  /* ── COMPONENTS ───────────────────────────────────────────────────── */
+  .card     { background: linear-gradient(180deg, var(--s12) 0%, var(--s1) 100%); border: 1px solid var(--s3); border-radius: 14px; }
+  .card-soft { background: var(--s12); border: 1px solid var(--s3); border-radius: 12px; }
+  .divider  { border-top: 1px solid var(--s3); }
 
   .scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
-  .scrollbar::-webkit-scrollbar-thumb { background: #2a2a31; border-radius: 8px; }
+  .scrollbar::-webkit-scrollbar-thumb { background: var(--s4); border-radius: 8px; }
   .scrollbar::-webkit-scrollbar-track { background: transparent; }
 
   .btn { transition: all 160ms ease; }
   .btn:hover { transform: translateY(-1px); }
-  .glow-deen      { box-shadow: 0 0 0 1px rgba(16,185,129,.25), 0 8px 24px -12px rgba(16,185,129,.45); }
-  .glow-tech      { box-shadow: 0 0 0 1px rgba(34,211,238,.25), 0 8px 24px -12px rgba(34,211,238,.45); }
-  .glow-combat    { box-shadow: 0 0 0 1px rgba(239,68,68,.25), 0 8px 24px -12px rgba(239,68,68,.45); }
-  .glow-strategy  { box-shadow: 0 0 0 1px rgba(245,158,11,.25), 0 8px 24px -12px rgba(245,158,11,.45); }
+  .glow-deen      { box-shadow: 0 0 0 1px rgba(16,185,129,.25),  0 8px 24px -12px rgba(16,185,129,.45);  }
+  .glow-tech      { box-shadow: 0 0 0 1px rgba(34,211,238,.25),  0 8px 24px -12px rgba(34,211,238,.45);  }
+  .glow-combat    { box-shadow: 0 0 0 1px rgba(239,68,68,.25),   0 8px 24px -12px rgba(239,68,68,.45);   }
+  .glow-strategy  { box-shadow: 0 0 0 1px rgba(245,158,11,.25),  0 8px 24px -12px rgba(245,158,11,.45);  }
   .glow-character { box-shadow: 0 0 0 1px rgba(167,139,250,.25), 0 8px 24px -12px rgba(167,139,250,.45); }
 
-  /* time grid */
-  .now-line {
-    position: absolute; left: 56px; right: 0; height: 1px;
-    background: linear-gradient(90deg, #ef4444 0%, rgba(239,68,68,0.0) 100%);
-    z-index: 5;
-  }
-  .now-dot { position: absolute; left: 50px; width: 10px; height: 10px; border-radius: 999px; background:#ef4444; box-shadow: 0 0 0 4px rgba(239,68,68,.18); z-index:6; transform: translate(-50%, -50%); }
+  .now-line { position: absolute; left: 56px; right: 0; height: 1px; background: linear-gradient(90deg, #ef4444 0%, rgba(239,68,68,0) 100%); z-index: 5; }
+  .now-dot  { position: absolute; left: 50px; width: 10px; height: 10px; border-radius: 999px; background: #ef4444; box-shadow: 0 0 0 4px rgba(239,68,68,.18); z-index: 6; transform: translate(-50%, -50%); }
 
-  /* checkbox */
-  .tick { width: 18px; height: 18px; border-radius: 6px; border: 1.5px solid #3a3a44; display:inline-flex; align-items:center; justify-content:center; transition: all 140ms ease; flex-shrink:0; }
-  .tick.on { background:#10b981; border-color:#10b981; }
-  .tick.on svg { color:#0a0a0b; }
+  .tick { width: 18px; height: 18px; border-radius: 6px; border: 1.5px solid var(--s4); display: inline-flex; align-items: center; justify-content: center; transition: all 140ms ease; flex-shrink: 0; }
+  .tick.on { background: #10b981; border-color: #10b981; }
+  .tick.on svg { color: var(--s0); }
 
-  /* fade in */
-  @keyframes fadeUp { from { opacity:0; transform: translateY(6px); } to { opacity:1; transform:none; } }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
   .fadeUp { animation: fadeUp 320ms cubic-bezier(.2,.7,.2,1) both; }
 
-  /* heat squares */
-  .heat-0 { background:#17171b; }
+  .heat-0 { background: var(--s2); }
   .heat-1 { background: rgba(16,185,129,.25); }
   .heat-2 { background: rgba(16,185,129,.55); }
   .heat-3 { background: rgba(16,185,129,.85); }
   .heat-4 { background: #10b981; }
 
-  /* Hide spinner on number input */
-  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin:0; }
-  input[type=number] { -moz-appearance: textfield; }
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; appearance: textfield; }
 
-  /* Quadrant accent stripes */
-  .q-do        { background: linear-gradient(180deg, rgba(239,68,68,.10), transparent 50%); border-color: rgba(239,68,68,.30) !important; }
+  .q-do        { background: linear-gradient(180deg, rgba(239,68,68,.10),  transparent 50%); border-color: rgba(239,68,68,.30)  !important; }
   .q-plan      { background: linear-gradient(180deg, rgba(34,211,238,.10), transparent 50%); border-color: rgba(34,211,238,.30) !important; }
   .q-delegate  { background: linear-gradient(180deg, rgba(245,158,11,.10), transparent 50%); border-color: rgba(245,158,11,.30) !important; }
-  .q-eliminate { background: linear-gradient(180deg, rgba(120,113,108,.10), transparent 50%); border-color: rgba(120,113,108,.30) !important; }
+  .q-eliminate { background: linear-gradient(180deg, rgba(120,113,108,.10),transparent 50%); border-color: rgba(120,113,108,.30)!important; }
 
-  .drag-target { outline: 2px dashed rgba(244,243,238,.25); outline-offset: -6px; }
+  .drag-target { outline: 2px dashed color-mix(in srgb, var(--f0) 25%, transparent); outline-offset: -6px; }
 
-  /* Focus ring */
   input:focus, select:focus, textarea:focus, button:focus { outline: none; }
   input:focus-visible, select:focus-visible, textarea:focus-visible {
-    box-shadow: 0 0 0 2px rgba(245,158,11,.45);
-    border-color: #f59e0b !important;
+    box-shadow: 0 0 0 2px var(--accent-glow);
+    border-color: var(--accent) !important;
   }
 
-  /* Logo mark */
-  .mark { width:34px; height:34px; border-radius:9px; background: radial-gradient(circle at 30% 30%, #f59e0b, #b45309 70%); display:flex; align-items:center; justify-content:center; box-shadow: inset 0 0 0 1px rgba(0,0,0,.4), 0 6px 20px -8px rgba(245,158,11,.6); }
+  .mark { width: 34px; height: 34px; border-radius: 9px; background: radial-gradient(circle at 30% 30%, var(--mark-from), var(--mark-to) 70%); display: flex; align-items: center; justify-content: center; box-shadow: inset 0 0 0 1px rgba(0,0,0,.4), 0 6px 20px -8px var(--mark-glow); }
+
+  /* ── BACKGROUND PHOTO/GIF LAYER ──────────────────────────────────── */
+  #app-bg-img  { position: fixed; inset: 0; z-index: -2; background: var(--app-bg-img, none) center/cover no-repeat; background-color: var(--s0); }
+  #app-bg-scrim{ position: fixed; inset: 0; z-index: -1; background: var(--app-bg-scrim, transparent); pointer-events: none; }
 </style>
 </head>
 
 <body class="bg-tess min-h-screen">
+<div id="app-bg-img"></div>
+<div id="app-bg-scrim"></div>
 <div id="root"></div>
 
 <script src="/vendor/react.min.js"></script>
@@ -265,6 +364,74 @@ const HORIZONS = [
   { id:'3year',    label:'3 Years',   sub:'The near horizon'                           },
   { id:'1year',    label:'This Year', sub:'What must be true by December'              },
 ];
+
+/* ------------------------------------------------------------------
+   THEMES
+------------------------------------------------------------------- */
+const THEME_KEY = 'madinah_theme';
+const BG_KEY = 'madinah_bg';
+/* {url, source:'url'|'unsplash', attribution:{name,profileUrl}|null} | null */
+const BackgroundPref = {
+  get()    { try { return JSON.parse(localStorage.getItem(BG_KEY)); } catch { return null; } },
+  set(pref){ try { pref ? localStorage.setItem(BG_KEY, JSON.stringify(pref)) : localStorage.removeItem(BG_KEY); } catch {} },
+};
+function applyBackground(pref) {
+  const s = document.documentElement.style;
+  if (pref?.url) {
+    s.setProperty('--app-bg-img',   `url("${pref.url}")`);
+    s.setProperty('--app-bg-scrim', 'color-mix(in srgb, var(--s0) 78%, transparent)');
+    s.setProperty('--body-bg', 'transparent');
+  } else {
+    s.setProperty('--app-bg-img',   'none');
+    s.setProperty('--app-bg-scrim', 'transparent');
+    s.removeProperty('--body-bg');
+  }
+}
+
+const THEMES = [
+  {
+    id: 'night',
+    name: "Warrior's Night",
+    desc: 'Dark ink · warm amber',
+    bg: '#0a0a0b', card: '#131317', border: '#1f1f24',
+    accent: '#f59e0b', text: '#f4f3ee', sub: '#9a9788',
+  },
+  {
+    id: 'cyberpunk',
+    name: 'Neon Grid',
+    desc: 'Deep purple · electric cyan',
+    bg: '#05000f', card: '#0e0220', border: 'rgba(0,229,255,0.14)',
+    accent: '#00e5ff', text: '#e0f0ff', sub: '#445568',
+  },
+  {
+    id: 'ghibli',
+    name: 'Forest Spirit',
+    desc: 'Deep forest · warm parchment',
+    bg: '#060b08', card: '#0f1b12', border: '#1c2e1e',
+    accent: '#56d470', text: '#f0e8c8', sub: '#786050',
+  },
+];
+
+const BG_PRESETS = {
+  night: [
+    { url: 'https://images.unsplash.com/photo-1519817914152-22d216bb9170?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1519817914152-22d216bb9170?auto=format&fit=crop&w=240&q=60', label: 'Grand Mosque' },
+    { url: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=240&q=60', label: 'Night Sky' },
+    { url: 'https://images.unsplash.com/photo-1509316785289-025f5b846b35?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1509316785289-025f5b846b35?auto=format&fit=crop&w=240&q=60', label: 'Desert' },
+    { url: 'https://images.unsplash.com/photo-1502239608882-93b729c6af43?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1502239608882-93b729c6af43?auto=format&fit=crop&w=240&q=60', label: 'Minarets' },
+  ],
+  cyberpunk: [
+    { url: 'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=240&q=60', label: 'City Lights' },
+    { url: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=240&q=60', label: 'Neon Glow' },
+    { url: 'https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1480714378408-67cf0d13bc1b?auto=format&fit=crop&w=240&q=60', label: 'Night City' },
+    { url: 'https://images.unsplash.com/photo-1536514498073-a8cbdb60584b?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1536514498073-a8cbdb60584b?auto=format&fit=crop&w=240&q=60', label: 'Neon Alley' },
+  ],
+  ghibli: [
+    { url: 'https://images.unsplash.com/photo-1448375240586-882707db888b?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1448375240586-882707db888b?auto=format&fit=crop&w=240&q=60', label: 'Forest Light' },
+    { url: 'https://images.unsplash.com/photo-1511497584788-876760111969?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1511497584788-876760111969?auto=format&fit=crop&w=240&q=60', label: 'Bamboo' },
+    { url: 'https://images.unsplash.com/photo-1501854140801-50d01698950b?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1501854140801-50d01698950b?auto=format&fit=crop&w=240&q=60', label: 'Mountains' },
+    { url: 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?auto=format&fit=crop&w=1920&q=80', thumb: 'https://images.unsplash.com/photo-1464822759023-fed622ff2c3b?auto=format&fit=crop&w=240&q=60', label: 'Highlands' },
+  ],
+};
 
 /* ------------------------------------------------------------------
    DATE HELPERS
@@ -682,6 +849,18 @@ function App() {
   const [loaded, setLoaded] = useState(false);
   const [syncStatus, setSyncStatus] = useState('idle'); /* idle | saving | synced | offline | unauth | local */
   const [setupOpen, setSetupOpen]   = useState(false);
+  const [theme, setTheme] = useState(() => { try { return localStorage.getItem(THEME_KEY) || 'night'; } catch { return 'night'; } });
+  const [background, setBackground] = useState(() => BackgroundPref.get());
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    const themeColors = { night: '#0a0a0b', cyberpunk: '#05000f', ghibli: '#060b08' };
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', themeColors[theme] || '#0a0a0b');
+    try { localStorage.setItem(THEME_KEY, theme); } catch {}
+  }, [theme]);
+
+  useEffect(() => { applyBackground(background); }, [background]);
+  const changeBg = pref => { BackgroundPref.set(pref); setBackground(pref); };
 
   /* Respect ?view= param from manifest shortcuts */
   const VALID_VIEWS = ['today','habits','tasks','matrix','stats','focus'];
@@ -897,6 +1076,7 @@ function App() {
         {state.ui.view === 'tasks'  && <TasksView state={state} setState={setState} />}
         {state.ui.view === 'matrix' && <MatrixView state={state} setState={setState} />}
         {state.ui.view === 'stats'  && <StatsView state={state} setState={setState}
+            theme={theme} setTheme={setTheme} background={background} changeBg={changeBg}
             syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}/>}
         {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState}/>}
         {state.ui.view === 'goals'  && <GoalsView state={state} setState={setState}/>}
@@ -905,6 +1085,7 @@ function App() {
         MADINAH · COMMAND DECK · v1.1 · {Sync.configured() ? 'cloudflare d1' : 'local only'}
       </footer>
       {setupOpen && <TokenSetupModal current={Sync.getToken()} onClose={()=>setSetupOpen(false)} onSubmit={connectWithToken}/>}
+      {background?.source === 'unsplash' && background?.attribution && <UnsplashCredit attribution={background.attribution}/>}
     </div>
   );
 }
@@ -1994,7 +2175,7 @@ const STAT_RANGES = [
   { value: 730, label: '2yr' },
 ];
 
-function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect }) {
+function StatsView({ state, setState, theme, setTheme, background, changeBg, syncStatus, onConfigureSync, onDisconnect }) {
   const [statsRange, setStatsRange] = useState(30);
 
   /* Pillar performance over selected range */
@@ -2185,6 +2366,8 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
         </div>
       )}
 
+      <ThemeCard theme={theme} setTheme={setTheme}/>
+      <BackgroundCard background={background} changeBg={changeBg} theme={theme}/>
       <SalahCard state={state} setState={setState}/>
       <NotificationsCard state={state} setState={setState}/>
       <GoalReminderCard state={state} setState={setState}/>
@@ -2192,6 +2375,229 @@ function StatsView({ state, setState, syncStatus, onConfigureSync, onDisconnect 
       <AppZone />
       <AdminCard state={state} setState={setState}/>
       <DangerZone state={state} setState={setState}/>
+    </div>
+  );
+}
+
+function UnsplashCredit({ attribution }) {
+  if (!attribution?.name) return null;
+  const utm = 'utm_source=commanddeck&utm_medium=referral';
+  return (
+    <div style={{ position:'fixed', bottom:10, right:12, zIndex:40, fontSize:11, color:'rgba(255,255,255,.75)', textShadow:'0 1px 3px rgba(0,0,0,.7)', fontFamily:'Manrope,sans-serif', pointerEvents:'auto' }}>
+      Photo by{' '}
+      <a href={`${attribution.profileUrl}?${utm}`} target="_blank" rel="noopener noreferrer" style={{ color:'inherit', fontWeight:700 }}>{attribution.name}</a>
+      {' '}on{' '}
+      <a href={`https://unsplash.com/?${utm}`} target="_blank" rel="noopener noreferrer" style={{ color:'inherit', fontWeight:700 }}>Unsplash</a>
+    </div>
+  );
+}
+
+function BackgroundCard({ background, changeBg, theme }) {
+  const [urlInput, setUrlInput]   = useState(background?.source === 'url' ? background.url : '');
+  const [query, setQuery]         = useState('');
+  const [results, setResults]     = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [searchMsg, setSearchMsg] = useState(null);
+
+  const presets    = BG_PRESETS[theme] || BG_PRESETS.night;
+  const accentColor = THEMES.find(t => t.id === theme)?.accent || '#f59e0b';
+  const activeUrl  = background?.url || null;
+
+  const applyUrl = () => {
+    const url = urlInput.trim();
+    if (!url) return;
+    changeBg({ url, source: 'url', attribution: null });
+  };
+
+  const runSearch = async e => {
+    e.preventDefault();
+    if (!query.trim()) return;
+    if (!Sync.configured()) { setSearchMsg('Set up sync first — the Unsplash proxy uses the same token.'); return; }
+    setSearching(true); setSearchMsg(null);
+    try {
+      const r = await fetch(`/api/unsplash?q=${encodeURIComponent(query.trim())}`, {
+        headers: { Authorization: `Bearer ${Sync.getToken()}` },
+      });
+      const data = await r.json();
+      if (data.error === 'not_configured') { setSearchMsg('Add UNSPLASH_ACCESS_KEY to enable search — pasting a link still works.'); setResults([]); }
+      else if (data.error) { setSearchMsg('Search failed — try again.'); setResults([]); }
+      else { setResults(data.results || []); if (!data.results?.length) setSearchMsg('No results.'); }
+    } catch { setSearchMsg('Search failed — check your connection.'); }
+    setSearching(false);
+  };
+
+  const pickResult = r => {
+    changeBg({ url: r.fullUrl, source: 'unsplash', attribution: r.photographer });
+    if (r.downloadLocation && Sync.configured()) {
+      fetch('/api/unsplash', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${Sync.getToken()}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ downloadLocation: r.downloadLocation }),
+      }).catch(() => {});
+    }
+  };
+
+  return (
+    <div className="card p-5">
+      <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1">APPEARANCE</div>
+      <div className="font-display text-xl text-bone-100 mb-5">Background</div>
+
+      {/* Curated presets */}
+      <div className="grid grid-cols-5 gap-2 mb-5">
+        <button
+          onClick={() => changeBg(null)}
+          className="btn rounded-lg overflow-hidden flex items-center justify-center"
+          style={{
+            aspectRatio: '16/10',
+            background: 'var(--s2)',
+            border: `2px solid ${!activeUrl ? accentColor : 'var(--s4)'}`,
+            boxShadow: !activeUrl ? `0 0 0 1px ${accentColor}33, 0 4px 16px -4px ${accentColor}55` : 'none',
+          }}
+        >
+          <span style={{ fontSize: '8px', fontFamily: 'JetBrains Mono, monospace', color: 'var(--f2)', letterSpacing: '0.08em' }}>NONE</span>
+        </button>
+        {presets.map((p, i) => {
+          const active = activeUrl === p.url;
+          return (
+            <button key={i}
+              onClick={() => changeBg({ url: p.url, source: 'url', attribution: null })}
+              className="btn rounded-lg overflow-hidden"
+              style={{
+                aspectRatio: '16/10', position: 'relative',
+                backgroundImage: `url(${p.thumb})`, backgroundSize: 'cover', backgroundPosition: 'center',
+                border: `2px solid ${active ? accentColor : 'transparent'}`,
+                boxShadow: active ? `0 0 0 1px ${accentColor}33, 0 4px 16px -4px ${accentColor}55` : 'none',
+              }}
+            >
+              {!active && <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.18)' }}/>}
+              <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, padding: '3px 5px', background: 'rgba(0,0,0,0.65)', fontSize: '7px', fontFamily: 'JetBrains Mono, monospace', color: '#ddd', letterSpacing: '0.07em', lineHeight: 1.3 }}>{p.label}</div>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Live preview */}
+      {activeUrl && (
+        <div className="rounded-lg overflow-hidden mb-5 border border-ink-700" style={{ height: 72, position: 'relative' }}>
+          <div style={{ position: 'absolute', inset: 0, backgroundImage: `url(${activeUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }}/>
+          <div style={{ position: 'absolute', inset: 0, background: 'color-mix(in srgb, var(--s0) 78%, transparent)' }}/>
+          <div className="divider" style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 12px' }}>
+            <span style={{ fontSize: 10, fontFamily: 'JetBrains Mono, monospace', color: 'var(--f1)', letterSpacing: '0.1em' }}>PREVIEW</span>
+            <button onClick={() => changeBg(null)} style={{ fontSize: 10, fontFamily: 'JetBrains Mono, monospace', color: 'var(--f2)', letterSpacing: '0.08em', background: 'none', border: 'none', cursor: 'pointer' }}>REMOVE</button>
+          </div>
+        </div>
+      )}
+
+      <div className="divider mb-4"/>
+
+      {/* Paste a link */}
+      <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-2">PASTE A LINK</div>
+      <div className="flex gap-2 mb-5">
+        <input
+          type="url"
+          value={urlInput}
+          onChange={e => setUrlInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') applyUrl(); }}
+          placeholder="https://images.unsplash.com/… or a .gif link"
+          className="flex-1 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-xs text-bone-100 font-mono placeholder:text-bone-400 focus:outline-none"
+          style={{ minWidth: 0 }}
+        />
+        <button
+          onClick={applyUrl}
+          disabled={!urlInput.trim()}
+          className="btn px-3 py-2 rounded-lg text-xs font-mono font-semibold"
+          style={{ background: urlInput.trim() ? accentColor : 'var(--s3)', color: urlInput.trim() ? 'var(--s0)' : 'var(--f2)', whiteSpace: 'nowrap', transition: 'all 160ms' }}
+        >Apply</button>
+      </div>
+
+      {/* Unsplash search */}
+      <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-2">SEARCH UNSPLASH</div>
+      <form onSubmit={runSearch} className="flex gap-2 mb-3">
+        <input
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder="mosque, forest, night city…"
+          className="flex-1 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-xs text-bone-100 font-mono placeholder:text-bone-400 focus:outline-none"
+          style={{ minWidth: 0 }}
+        />
+        <button
+          type="submit"
+          disabled={searching}
+          className="btn px-3 py-2 rounded-lg text-xs font-mono font-semibold border border-ink-600 text-bone-300"
+          style={{ whiteSpace: 'nowrap', background: 'var(--s2)' }}
+        >{searching ? 'Searching…' : 'Search'}</button>
+      </form>
+      {searchMsg && <div className="text-xs text-bone-400 font-mono mb-3">{searchMsg}</div>}
+      {results.length > 0 && (
+        <div className="scrollbar mb-3" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))', gap: 8, maxHeight: 200, overflowY: 'auto' }}>
+          {results.map(r => (
+            <div key={r.id} onClick={() => pickResult(r)} title={r.photographer?.name}
+              className="btn rounded-lg overflow-hidden border border-ink-700"
+              style={{ cursor: 'pointer', aspectRatio: '1', backgroundImage: `url(${r.thumbUrl})`, backgroundSize: 'cover', backgroundPosition: 'center', transition: 'border-color 120ms' }}
+              onMouseEnter={e => e.currentTarget.style.borderColor = accentColor}
+              onMouseLeave={e => e.currentTarget.style.borderColor = 'var(--s3)'}
+            />
+          ))}
+        </div>
+      )}
+
+      <p className="text-[10px] font-mono tracking-wider text-bone-400 mt-1">
+        GIFs animate. Unsplash search needs a connected sync token + server-side API key. Device-local only.
+      </p>
+    </div>
+  );
+}
+
+function ThemeCard({ theme, setTheme }) {
+  return (
+    <div className="card p-5">
+      <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1">APPEARANCE</div>
+      <div className="font-display text-xl text-bone-100 mb-5">Theme</div>
+      <div className="grid grid-cols-3 gap-3">
+        {THEMES.map(t => {
+          const active = theme === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTheme(t.id)}
+              className="btn rounded-xl overflow-hidden text-left transition-all"
+              style={{
+                border: `2px solid ${active ? t.accent : 'transparent'}`,
+                boxShadow: active ? `0 0 0 1px ${t.accent}33, 0 8px 24px -8px ${t.accent}44` : 'none',
+                outline: 'none',
+              }}
+            >
+              {/* Colour preview */}
+              <div style={{ background: t.bg, padding: '10px 10px 8px' }}>
+                <div style={{
+                  background: t.card,
+                  border: `1px solid ${t.border}`,
+                  borderRadius: '6px',
+                  padding: '7px 9px',
+                  marginBottom: '7px',
+                }}>
+                  <div style={{ width: '65%', height: '4px', background: t.text, borderRadius: '2px', opacity: 0.75, marginBottom: '5px' }}/>
+                  <div style={{ width: '45%', height: '3px', background: t.sub,  borderRadius: '2px', opacity: 0.6 }}/>
+                </div>
+                <div style={{
+                  height: '3px',
+                  background: t.accent,
+                  borderRadius: '2px',
+                  boxShadow: `0 0 8px ${t.accent}88`,
+                }}/>
+              </div>
+              {/* Label */}
+              <div style={{ background: t.card, padding: '8px 10px 9px', borderTop: `1px solid ${t.border}` }}>
+                <div style={{ color: t.text, fontSize: '11px', fontWeight: 600, lineHeight: 1.3 }}>{t.name}</div>
+                <div style={{ color: t.sub, fontSize: '9px', marginTop: '2px', fontFamily: 'JetBrains Mono, monospace', letterSpacing: '0.06em' }}>{t.desc}</div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-[10px] font-mono tracking-wider text-bone-400 mt-4">
+        Theme is stored on this device only — it won't sync across devices.
+      </p>
     </div>
   );
 }

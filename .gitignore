@@ -2,3 +2,7 @@
 wrangler.toml
 wrangler-account.json
 push-worker/wrangler.toml
+node_modules/
+.wrangler/
+playwright-report/
+test-results/
