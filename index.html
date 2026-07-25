@@ -684,7 +684,7 @@ const SEED = () => ({
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
   goals: [],
-  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00' } },
+  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' } },
   admin: {
     pillars: {},          /* { [id]: { name?, color? } } */
     quads: {},            /* { [id]: { title?, sub?, hint? } } */
@@ -828,12 +828,11 @@ function scheduleNotifications(state) {
     push(`t-${t.id}`, 'Task reminder', t.title, new Date(t.reminder).getTime());
   });
 
-  /* Morning goal reminders — quarterly, then yearly, then lifetime, each a
-     couple minutes apart so they land as separate notifications in that order */
+  /* Goal reminders — quarterly, then yearly, then lifetime, each a couple
+     minutes apart so they land as separate notifications in that order.
+     Fires up to twice a day: once in the morning, once in the evening. */
   const gr = state.ui?.goalsReminder;
-  if (gr?.on && gr.time) {
-    const [gh, gm] = gr.time.split(':').map(Number);
-    const base = todayAtMins(gh * 60 + gm);
+  if (gr) {
     const active = (state.goals || []).filter(g => g.status !== 'completed');
     const y = new Date().getFullYear();
     const qKey = `${y}-Q${Math.ceil((new Date().getMonth() + 1) / 3)}`;
@@ -843,9 +842,17 @@ function scheduleNotifications(state) {
     const yearly    = active.filter(g => g.horizon === '1year');
     const lifetime  = active.filter(g => g.horizon === 'lifetime');
 
-    if (quarterly.length) push('goals-quarter',  `This quarter's goals (${qKey})`, titles(quarterly), base);
-    if (yearly.length)    push('goals-year',     "This year's goals",              titles(yearly),    base + 2 * 60000);
-    if (lifetime.length)  push('goals-lifetime', 'Your lifetime mission',          titles(lifetime),  base + 4 * 60000);
+    const fireGoalReminders = (idPrefix, time) => {
+      if (!time) return;
+      const [gh, gm] = time.split(':').map(Number);
+      const base = todayAtMins(gh * 60 + gm);
+      if (quarterly.length) push(`${idPrefix}-quarter`,  `This quarter's goals (${qKey})`, titles(quarterly), base);
+      if (yearly.length)    push(`${idPrefix}-year`,     "This year's goals",              titles(yearly),    base + 2 * 60000);
+      if (lifetime.length)  push(`${idPrefix}-lifetime`, 'Your lifetime mission',          titles(lifetime),  base + 4 * 60000);
+    };
+
+    if (gr.on)        fireGoalReminders('goals-am', gr.time);
+    if (gr.eveningOn) fireGoalReminders('goals-pm', gr.eveningTime);
   }
 
   navigator.serviceWorker.controller.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
@@ -914,7 +921,12 @@ function App() {
   const hydrate = (data) => {
     const merged = {
       ...SEED(), ...data,
-      ui:          { ...SEED().ui,       ...(data?.ui       || {}) },
+      ui:          { ...SEED().ui,       ...(data?.ui       || {}),
+                     /* deep-merge so a new goalsReminder sub-field (e.g. the
+                        evening reminder) gets its default even for a device
+                        whose saved state predates it */
+                     goalsReminder: { ...SEED().ui.goalsReminder, ...(data?.ui?.goalsReminder || {}) },
+                   },
       pomodoro:    { ...SEED().pomodoro, ...(data?.pomodoro || {}) },
       admin:       { ...SEED().admin,    ...(data?.admin    || {}),
                      pillars: { ...(data?.admin?.pillars || {}) },
@@ -2849,13 +2861,15 @@ function NotificationsCard({ state, setState }) {
   );
 }
 
+const GOAL_REMINDER_DEFAULTS = { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' };
+
 function GoalReminderCard({ state, setState }) {
-  const gr = state.ui?.goalsReminder || { on: false, time: '07:00' };
+  const gr = { ...GOAL_REMINDER_DEFAULTS, ...(state.ui?.goalsReminder || {}) };
   const notifOk = !!state.ui?.notif && typeof Notification !== 'undefined' && Notification.permission === 'granted';
 
   const setGr = (patch) => setState(s => ({
     ...s,
-    ui: { ...s.ui, goalsReminder: { on: true, time: '07:00', ...s.ui?.goalsReminder, ...patch } },
+    ui: { ...s.ui, goalsReminder: { ...GOAL_REMINDER_DEFAULTS, ...s.ui?.goalsReminder, ...patch } },
   }));
 
   const active = (state.goals || []).filter(g => g.status !== 'completed');
@@ -2870,22 +2884,33 @@ function GoalReminderCard({ state, setState }) {
   return (
     <div className="card p-5">
       <div className="text-[10px] font-mono tracking-widest text-bone-400">GOAL REMINDERS</div>
-      <div className="font-display text-xl text-bone-100 mt-1 mb-1">Morning check-in</div>
+      <div className="font-display text-xl text-bone-100 mt-1 mb-1">Morning & evening check-ins</div>
       <div className="text-sm text-bone-400 mb-3">
         {notifOk
-          ? `Every morning at ${gr.time}: this quarter's goals, then this year's, then your lifetime mission.`
+          ? "Each check-in runs through this quarter's goals, then this year's, then your lifetime mission."
           : 'Enable notifications above first.'}
       </div>
       <div className="text-xs font-mono mb-3 px-2 py-1.5 rounded-md border border-ink-700 text-bone-500">
         {counts.quarter} quarterly · {counts.year} yearly · {counts.lifetime} lifetime goals set
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 mb-2">
+        <span className="text-xs text-bone-400 w-16 shrink-0">Morning</span>
         <input type="time" value={gr.time} disabled={!notifOk}
           onChange={e => setGr({ time: e.target.value })}
           className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 text-sm disabled:opacity-50"/>
         <button onClick={() => setGr({ on: !gr.on })} disabled={!notifOk}
           className={`btn px-3 py-2 rounded-lg text-sm disabled:opacity-50 ${gr.on ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>
           {gr.on ? 'Disable' : 'Enable'}
+        </button>
+      </div>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-bone-400 w-16 shrink-0">Evening</span>
+        <input type="time" value={gr.eveningTime} disabled={!notifOk}
+          onChange={e => setGr({ eveningTime: e.target.value })}
+          className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 text-sm disabled:opacity-50"/>
+        <button onClick={() => setGr({ eveningOn: !gr.eveningOn })} disabled={!notifOk}
+          className={`btn px-3 py-2 rounded-lg text-sm disabled:opacity-50 ${gr.eveningOn ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>
+          {gr.eveningOn ? 'Disable' : 'Enable'}
         </button>
       </div>
     </div>

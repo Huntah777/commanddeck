@@ -238,11 +238,10 @@ async function buildTodaysSchedule(state) {
     push(`t-${t.id}`, 'Task reminder', t.title, new Date(t.reminder).getTime());
   }
 
-  /* Morning goal reminders — quarterly, then yearly, then lifetime */
+  /* Goal reminders — quarterly, then yearly, then lifetime. Can fire twice a
+     day: once in the morning, once in the evening (mirrors index.html). */
   const gr = state.ui?.goalsReminder;
-  if (gr?.on && gr.time) {
-    const [gh, gm] = gr.time.split(':').map(Number);
-    const base = zonedHmToUtcMs(y, mo, d, gh, gm, tz);
+  if (gr) {
     const active = (state.goals || []).filter(g => g.status !== 'completed');
     const qKey = `${y}-Q${Math.ceil(mo / 3)}`;
     const titles = arr => arr.map(g => g.title).join(' · ');
@@ -251,9 +250,17 @@ async function buildTodaysSchedule(state) {
     const yearly    = active.filter(g => g.horizon === '1year');
     const lifetime  = active.filter(g => g.horizon === 'lifetime');
 
-    if (quarterly.length) push('goals-quarter',  `This quarter's goals (${qKey})`, titles(quarterly), base);
-    if (yearly.length)    push('goals-year',     "This year's goals",              titles(yearly),    base + 2 * 60000);
-    if (lifetime.length)  push('goals-lifetime', 'Your lifetime mission',          titles(lifetime),  base + 4 * 60000);
+    const fireGoalReminders = (idPrefix, time) => {
+      if (!time) return;
+      const [gh, gm] = time.split(':').map(Number);
+      const base = zonedHmToUtcMs(y, mo, d, gh, gm, tz);
+      if (quarterly.length) push(`${idPrefix}-quarter`,  `This quarter's goals (${qKey})`, titles(quarterly), base);
+      if (yearly.length)    push(`${idPrefix}-year`,     "This year's goals",              titles(yearly),    base + 2 * 60000);
+      if (lifetime.length)  push(`${idPrefix}-lifetime`, 'Your lifetime mission',          titles(lifetime),  base + 4 * 60000);
+    };
+
+    if (gr.on)        fireGoalReminders('goals-am', gr.time);
+    if (gr.eveningOn) fireGoalReminders('goals-pm', gr.eveningTime);
   }
 
   return schedule;
