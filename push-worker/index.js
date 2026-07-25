@@ -147,22 +147,51 @@ export default {
         const sub      = JSON.parse(row.subscription);
         const schedule = JSON.parse(row.schedule || '[]');
 
-        const due    = schedule.filter(n => n.fireAt >= now - lookBack && n.fireAt <= now + 30_000);
-        const remain = schedule.filter(n => !due.some(d => d.id === n.id));
+        const due      = schedule.filter(n => n.fireAt >= now - lookBack && n.fireAt <= now + 30_000);
+        /* Entries that fell outside every lookback window (a missed/delayed
+           cron tick) can never be sent — drop them instead of letting them
+           zombie next_fire_at forever. */
+        const missed   = schedule.filter(n => n.fireAt < now - lookBack);
+        const upcoming = schedule.filter(n => n.fireAt > now + 30_000);
 
-        if (!due.length) return;
+        if (!due.length && !missed.length) return;
+        if (missed.length) {
+          console.log(`push → ${row.id}: dropping ${missed.length} missed notification(s)`);
+        }
 
-        await Promise.all(due.map(async n => {
-          const status = await sendPush(sub, {
-            title:   n.title,
-            body:    n.body || '',
-            tag:     n.id,
-            isSalah: n.id.startsWith('salah-'),
-          }, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT);
-          console.log(`push → ${row.id} [${n.title}] → HTTP ${status}`);
-        }));
+        /* allSettled so one throw doesn't take the whole batch down with it —
+           each notification's outcome is judged independently below. */
+        const results = await Promise.allSettled(due.map(n => sendPush(sub, {
+          title:   n.title,
+          body:    n.body || '',
+          tag:     n.id,
+          isSalah: n.id.startsWith('salah-'),
+        }, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT)));
 
-        /* Remove fired notifications so re-runs never send them again */
+        let subscriptionGone = false;
+        const retry = [];
+        due.forEach((n, i) => {
+          const r = results[i];
+          if (r.status === 'fulfilled') {
+            const s = r.value;
+            console.log(`push → ${row.id} [${n.title}] → HTTP ${s}`);
+            if (s === 404 || s === 410) { subscriptionGone = true; return; } /* expired sub */
+            if (s >= 200 && s < 300) return; /* delivered */
+            retry.push(n); /* other non-2xx — try again next tick */
+          } else {
+            console.error(`push → ${row.id} [${n.title}] threw:`, r.reason?.message);
+            retry.push(n); /* network error etc — try again next tick */
+          }
+        });
+
+        /* A 404/410 means the push service will never accept this
+           subscription again — delete it rather than keep re-querying it. */
+        if (subscriptionGone) {
+          await env.DB.prepare('DELETE FROM push_subs WHERE id = ?').bind(row.id).run();
+          return;
+        }
+
+        const remain     = [...upcoming, ...retry];
         const nextFireAt = remain.length ? Math.min(...remain.map(n => n.fireAt)) : 0;
         await env.DB.prepare(
           'UPDATE push_subs SET schedule = ?, next_fire_at = ? WHERE id = ?'

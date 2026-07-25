@@ -116,7 +116,7 @@ self.addEventListener('message', (event) => {
       /* For salah notifications: also signal open pages to play adhan tone */
       if (id.startsWith('salah-')) {
         self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-          .then(list => list.forEach(c => c.postMessage({ type: 'PLAY_ADHAN' })));
+          .then(list => list.forEach(c => c.postMessage({ type: 'PLAY_ADHAN', tag: id })));
       }
       pendingTimers.delete(id);
     }, delay);
@@ -144,7 +144,7 @@ self.addEventListener('push', (event) => {
     /* If this is a prayer-time push, also play the adhan in any open page */
     if (data.isSalah) {
       const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      clients.forEach(c => c.postMessage({ type: 'PLAY_ADHAN' }));
+      clients.forEach(c => c.postMessage({ type: 'PLAY_ADHAN', tag: data.tag || null }));
     }
   })());
 });
