@@ -3,8 +3,8 @@
    Remote MCP server (Streamable HTTP transport, MCP 2024-11-05).
    Add to claude.ai › Settings › Integrations as:
      URL:  https://commanddeck.huntah.co.uk/api/mcp
-   OAuth flow handled by /oauth/* endpoints.
-   Fallback (Claude Desktop): append ?key=<SYNC_TOKEN> to the URL.
+   Auth: Authorization: Bearer <SYNC_TOKEN>, or append ?key=<SYNC_TOKEN>
+   to the URL (e.g. for Claude Desktop).
    ============================================================ */
 
 const CORS = {
