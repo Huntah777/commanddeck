@@ -61,4 +61,70 @@ test.describe('Bug fixes', () => {
       expect(after?.ui?.selectedDate).toBe('2026-07-26');
     }).toPass({ timeout: 10_000 });
   });
+
+  test('a block before 01:00 renders inside the visible timeline grid', async ({ page }) => {
+    const seed = {
+      habits: [],
+      blocks: [
+        { id: 'b-early', title: 'Early bird', pillar: 'deen', start: 15, end: 45, every: [0,1,2,3,4,5,6] },
+      ],
+    };
+    await page.addInitScript((s) => localStorage.setItem('madinah_v1', JSON.stringify(s)), seed);
+    await page.goto('/');
+    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
+
+    const block = page.locator('button', { hasText: 'Early bird' });
+    await expect(block).toBeVisible({ timeout: 10_000 });
+    const top = await block.evaluate((el) => parseFloat(el.style.top));
+    expect(top).toBeGreaterThanOrEqual(0);
+  });
+
+  test('a block crossing midnight renders as two in-bounds segments', async ({ page }) => {
+    const seed = {
+      habits: [],
+      blocks: [
+        { id: 'b-wrap', title: 'Tahajjud', pillar: 'deen', start: 1410, end: 30, every: [0,1,2,3,4,5,6] },
+      ],
+    };
+    await page.addInitScript((s) => localStorage.setItem('madinah_v1', JSON.stringify(s)), seed);
+    await page.goto('/');
+    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
+
+    const segments = page.locator('button', { hasText: 'Tahajjud' });
+    await expect(segments).toHaveCount(2, { timeout: 10_000 });
+    const tops = await segments.evaluateAll((els) => els.map((el) => parseFloat(el.style.top)));
+    for (const top of tops) expect(top).toBeGreaterThanOrEqual(0);
+  });
+
+  test('BlockModal shows a visible error instead of silently failing on invalid input', async ({ page }) => {
+    await page.goto('/');
+    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
+
+    await page.getByLabel('Add block at 0:00').click();
+    await page.locator('button', { hasText: 'Save block' }).click();
+    await expect(page.locator('text=Give this block a title.')).toBeVisible({ timeout: 5_000 });
+
+    await page.locator('input').first().fill('Test block');
+    const timeInputs = page.locator('input[type="time"]');
+    await timeInputs.nth(0).fill('09:00');
+    await timeInputs.nth(1).fill('09:00');
+    await page.locator('button', { hasText: 'Save block' }).click();
+    await expect(page.locator("text=Start and end can't be the same time.")).toBeVisible({ timeout: 5_000 });
+  });
+
+  test('the device-local view survives even if the synced ui blob says otherwise', async ({ page }) => {
+    // Simulates what hydrate() sees right after a remote pull/merge: the
+    // main cache's ui.view is 'today' (a merged blob never carries a real
+    // view anymore — Sync.save strips it), but this device was actually
+    // sitting on the Focus tab. hydrate() must restore 'focus' from the
+    // separate device-local key, not fall back to whatever's in the blob.
+    await page.addInitScript(() => {
+      localStorage.setItem('madinah_v1', JSON.stringify({ habits: [], ui: { view: 'today' } }));
+      localStorage.setItem('madinah_ui_local_v1', JSON.stringify({ view: 'focus', selectedDate: '2026-07-25' }));
+    });
+    await page.goto('/');
+    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
+
+    await expect(page.locator('text=Pomodoro timer')).toBeVisible({ timeout: 10_000 });
+  });
 });
