@@ -342,6 +342,7 @@ async function fireDueNotifications(env) {
       }, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT)));
 
       let subscriptionGone = false;
+      let anySent = false;
       const retry = [];
       due.forEach((n, i) => {
         const r = results[i];
@@ -349,7 +350,7 @@ async function fireDueNotifications(env) {
           const s = r.value;
           console.log(`push → ${row.id} [${n.title}] → HTTP ${s}`);
           if (s === 404 || s === 410) { subscriptionGone = true; return; } /* expired sub */
-          if (s >= 200 && s < 300) return; /* delivered */
+          if (s >= 200 && s < 300) { anySent = true; return; } /* delivered */
           retry.push(n); /* other non-2xx — try again next tick */
         } else {
           console.error(`push → ${row.id} [${n.title}] threw:`, r.reason?.message);
@@ -366,14 +367,48 @@ async function fireDueNotifications(env) {
 
       const remain     = [...upcoming, ...retry];
       const nextFireAt = remain.length ? Math.min(...remain.map(n => n.fireAt)) : 0;
-      await env.DB.prepare(
-        'UPDATE push_subs SET schedule = ?, next_fire_at = ? WHERE id = ?'
-      ).bind(JSON.stringify(remain), nextFireAt, row.id).run();
+
+      /* Only bump updated_at on an actual successful delivery this tick —
+         it's the staleness signal cleanupStaleSubscriptions relies on below,
+         so it must reflect "still genuinely working," not just "was queried." */
+      if (anySent) {
+        await env.DB.prepare(
+          'UPDATE push_subs SET schedule = ?, next_fire_at = ?, updated_at = ? WHERE id = ?'
+        ).bind(JSON.stringify(remain), nextFireAt, now, row.id).run();
+      } else {
+        await env.DB.prepare(
+          'UPDATE push_subs SET schedule = ?, next_fire_at = ? WHERE id = ?'
+        ).bind(JSON.stringify(remain), nextFireAt, row.id).run();
+      }
 
     } catch (e) {
       console.error(`push error for ${row.id}:`, e.message);
     }
   }));
+}
+
+/* Safety net: a push subscription that hasn't successfully received a
+   notification, nor been re-confirmed by its own client, in this long is
+   almost certainly dead (uninstalled PWA, cleared site data, revoked
+   permission, a device that no longer exists) — even if it never hit the
+   404/410 auto-delete in fireDueNotifications (e.g. because it had nothing
+   scheduled to try sending in the first place, so that path never ran for
+   it). updated_at is bumped both by the client's own subscribe/re-sync POST
+   (functions/api/push.js) and by a successful send here, so this only ever
+   catches rows that are genuinely not working — never a device that's just
+   quietly receiving background pushes without reopening the app. */
+const STALE_SUBSCRIPTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+async function cleanupStaleSubscriptions(env) {
+  try {
+    const cutoff = Date.now() - STALE_SUBSCRIPTION_MS;
+    const result = await env.DB.prepare('DELETE FROM push_subs WHERE updated_at < ?').bind(cutoff).run();
+    if (result.meta?.changes) {
+      console.log(`cleanup: removed ${result.meta.changes} stale push subscription(s)`);
+    }
+  } catch (e) {
+    console.error('cleanupStaleSubscriptions failed:', e.message);
+  }
 }
 
 /* ── Entry point ───────────────────────────────────────────────── */
@@ -382,6 +417,7 @@ export default {
   async scheduled(event, env, _ctx) {
     if (event.cron === CRON_RECOMPUTE) {
       await recomputeServerSchedule(env);
+      await cleanupStaleSubscriptions(env);
       return;
     }
     await fireDueNotifications(env);
