@@ -130,8 +130,12 @@ function mergeState(existing, body) {
     pomodoroLogs: unionById(existing.pomodoroLogs, incoming.pomodoroLogs),
     logs:     mergeLogs(existing.logs, incoming.logs),
     admin:    mergeAdmin(existing.admin, incoming.admin),
-    pomodoro: incoming.pomodoro ?? existing.pomodoro,
-    ui:       incoming.ui ?? existing.ui,
+    /* Shallow per-key merge, not a whole-object swap — a device that pushes
+       a partial/stale ui or pomodoro object (e.g. recovered from a failed
+       load) must not be able to wipe unrelated settings like salahLoc or
+       notif just because its own copy didn't have them. */
+    pomodoro: { ...(existing.pomodoro || {}), ...(incoming.pomodoro || {}) },
+    ui:       { ...(existing.ui       || {}), ...(incoming.ui       || {}) },
   };
 }
 

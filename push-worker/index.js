@@ -186,7 +186,7 @@ const SALAH_NAMES = { // kept in sync by hand with index.html's SALAH_NAMES
 
 async function buildTodaysSchedule(state) {
   const schedule = [];
-  if (!state?.ui?.notif) return schedule;
+  if (!state?.ui?.notif) return { schedule, ok: true };
 
   const tz  = state.ui?.timezone || DEFAULT_TZ;
   const now = Date.now();
@@ -194,8 +194,13 @@ async function buildTodaysSchedule(state) {
 
   const push = (id, title, body, fireAt) => { if (fireAt > now) schedule.push({ id, title, body, fireAt }); };
 
-  /* Salah times — same unauthenticated Aladhan endpoint the client uses */
+  /* Salah times — same unauthenticated Aladhan endpoint the client uses.
+     A prayer-time fetch failure is NOT the same as "no location configured"
+     — signal it distinctly (ok:false) so the caller can skip writing an
+     incomplete schedule (which would silently drop all remaining prayer
+     notifications for the day) and just retry on the next tick instead. */
   const loc = state.ui?.salahLoc;
+  let salahOk = true;
   if (loc?.lat != null && loc?.lon != null) {
     try {
       const method = state.ui.salahMethod ?? 3, school = state.ui.salahSchool ?? 0;
@@ -209,8 +214,11 @@ async function buildTodaysSchedule(state) {
           const [hh, mm] = raw.split(' ')[0].split(':').map(Number);
           push(`salah-${key}`, names.en, `${names.ar} · Time to pray`, zonedHmToUtcMs(y, mo, d, hh, mm, tz));
         }
+      } else {
+        salahOk = false;
+        console.error('salah fetch failed: HTTP', r.status);
       }
-    } catch (e) { console.error('salah fetch failed:', e.message); }
+    } catch (e) { salahOk = false; console.error('salah fetch failed:', e.message); }
   }
 
   /* Calendar blocks — 3 notifications each, end anchored to next day if the
@@ -263,7 +271,7 @@ async function buildTodaysSchedule(state) {
     if (gr.eveningOn) fireGoalReminders('goals-pm', gr.eveningTime);
   }
 
-  return schedule;
+  return { schedule, ok: salahOk };
 }
 
 /* Re-derive "today's" notification schedule from the single shared state row
@@ -275,7 +283,15 @@ async function recomputeServerSchedule(env) {
   let state;
   try { state = JSON.parse(row.data); } catch { return; }
 
-  const schedule     = await buildTodaysSchedule(state);
+  const { schedule, ok } = await buildTodaysSchedule(state);
+  if (!ok) {
+    /* Prayer-time fetch failed this tick — do NOT overwrite push_subs with
+       an incomplete schedule missing salah entries. Leave whatever's
+       already stored untouched and just retry on the next tick. */
+    console.error('recomputeServerSchedule: skipping write, salah fetch failed this tick');
+    return;
+  }
+
   const scheduleJson = JSON.stringify(schedule);
   const nextFireAt   = schedule.length ? Math.min(...schedule.map(n => n.fireAt)) : 0;
 

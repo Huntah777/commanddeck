@@ -1,6 +1,18 @@
 import { test, expect } from '@playwright/test';
 
 test.describe('Bug fixes', () => {
+  test('a brand-new local state has no hardcoded personal habits/blocks', async ({ page }) => {
+    // SEED() used to ship with a hardcoded personal routine (Fajr, gym,
+    // tennis, etc.) that could resurrect over real synced data via the
+    // merge. A fresh device with no cache/sync must start completely empty.
+    await page.goto('/');
+    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
+
+    await expect(page.locator('text=No habits scheduled for this day.')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('text=Fajr in jama')).toHaveCount(0);
+    await expect(page.locator('text=Tennis with wife')).toHaveCount(0);
+  });
+
   test('a habit with an empty days array does not hang the app', async ({ page }) => {
     const seed = {
       habits: [
