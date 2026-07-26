@@ -1,0 +1,49 @@
+# Copy to wrangler.toml (which is gitignored) and fill in your database_id.
+#
+#   cp wrangler.toml.example wrangler.toml
+#
+# The real wrangler.toml is NOT tracked, which means a fresh clone cannot
+# deploy this Worker until you do the above. If the Worker's behaviour ever
+# looks like it's running old code, check that first.
+
+name               = "commanddeck-push"
+main               = "index.js"
+compatibility_date = "2024-09-23"
+
+# ONE trigger is all this Worker needs. Every tick rebuilds today's plan from
+# D1 and sends whatever is due — see the design notes at the top of index.js.
+# Nothing keys off this exact string, so changing the interval is safe.
+[triggers]
+crons = ["* * * * *"]
+
+# Must be the same D1 database the Cloudflare Pages project binds.
+# Dashboard → Storage & Databases → D1 → your DB
+[[d1_databases]]
+binding       = "DB"
+database_name = "madinah-deck"
+database_id   = "YOUR_DATABASE_ID_HERE"
+
+# ─── Deployment ──────────────────────────────────────────────────────────────
+#
+# 1. Apply the schema (adds the `sent` / `plan_day` columns the scheduler needs):
+#       npx wrangler d1 execute madinah-deck --remote --file=../schema.sql
+#    On a database that predates them, run the ALTER statements at the bottom
+#    of schema.sql instead — CREATE TABLE IF NOT EXISTS will not add columns to
+#    a table that already exists.
+#
+# 2. Set the secrets:
+#       npx wrangler secret put VAPID_PRIVATE_KEY
+#       npx wrangler secret put VAPID_SUBJECT      # mailto:you@example.com
+#       npx wrangler secret put SYNC_TOKEN         # same value as the Pages project
+#
+# 3. Deploy:
+#       npx wrangler deploy
+#
+# 4. Verify without waiting for cron — should report devices/writes/planned:
+#       curl -X POST https://commanddeck-push.<subdomain>.workers.dev/run \
+#            -H "Authorization: Bearer $SYNC_TOKEN"
+#
+# 5. Watch a live tick:
+#       npx wrangler tail
+#
+# ─────────────────────────────────────────────────────────────────────────────

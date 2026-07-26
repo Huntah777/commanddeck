@@ -1,4 +1,6 @@
-const CACHE = 'commanddeck-v6';
+/* Bump on every deploy: the shell is served cache-first, so a stale cache name
+   keeps serving the previous index.html indefinitely. */
+const CACHE = 'commanddeck-v7';
 
 const SHELL = [
   '/',
@@ -84,6 +86,22 @@ self.addEventListener('fetch', (event) => {
 // the SW uses setTimeout to fire each one at the right moment.
 const pendingTimers = new Map();
 
+/* The same notification can arrive twice — once from the in-page timer below
+   and once as a server push — since both fire around the same instant while
+   the app is open. Same tag means the second replaces the first visually, but
+   `renotify` makes it buzz again. Remember what we've just shown and let the
+   first one win. */
+const recentlyShown = new Map();
+const DEDUPE_MS = 5 * 60_000;
+
+function alreadyShown(tag) {
+  const now = Date.now();
+  for (const [k, t] of recentlyShown) if (now - t > DEDUPE_MS) recentlyShown.delete(k);
+  if (recentlyShown.has(tag)) return true;
+  recentlyShown.set(tag, now);
+  return false;
+}
+
 function swNotify(title, body, tag, renotify) {
   return self.registration.showNotification(title, {
     body:     body || '',
@@ -112,6 +130,7 @@ self.addEventListener('message', (event) => {
     const delay = fireAt - now;
     if (delay <= 0) return;
     const timer = setTimeout(() => {
+      if (alreadyShown(id)) { pendingTimers.delete(id); return; }
       swNotify(title, body, id, false);
       /* For salah notifications: also signal open pages to play adhan tone */
       if (id.startsWith('salah-')) {
@@ -131,11 +150,14 @@ self.addEventListener('push', (event) => {
     try { data = event.data?.json() || {}; } catch {}
 
     const title = data.title || 'Command Deck';
+    const tag   = data.tag || 'commanddeck';
+    if (alreadyShown(tag)) return;
+
     await self.registration.showNotification(title, {
       body:     data.body || '',
       icon:     '/icons/icon-192.png',
       badge:    '/icons/icon-192.png',
-      tag:      data.tag || 'commanddeck',
+      tag,
       renotify: true,
       vibrate:  [200, 100, 200],
       data:     { isSalah: !!data.isSalah },
@@ -154,7 +176,9 @@ self.addEventListener('notificationclick', (event) => {
   event.waitUntil(
     clients.matchAll({ type: 'window' }).then((list) => {
       if (list.length) return list[0].focus();
-      return clients.openWindow(event.notification.data || '/');
+      /* notification.data carries { isSalah }, not a URL — passing it to
+         openWindow navigated to "[object Object]". */
+      return clients.openWindow('/');
     })
   );
 });

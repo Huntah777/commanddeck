@@ -698,23 +698,35 @@ async function syncPushSchedule(notifications) {
       });
     }
 
-    /* Skip the D1 write if schedule is identical to last sync */
-    const fp = notifications.map(n => `${n.id}:${n.fireAt}`).sort().join('|');
+    /* Skip the D1 write if the schedule is identical to the last SUCCESSFUL
+       sync — and re-send anyway once every few hours. The row can disappear
+       from under us (stale-subscription cleanup, a restored database, the
+       404/410 auto-delete), and without a heartbeat the fingerprint would
+       keep insisting the server already knows, leaving the device silently
+       unregistered until its schedule happened to change. */
+    const fp    = notifications.map(n => `${n.id}:${n.fireAt}`).sort().join('|');
     const subId = sub.endpoint.slice(-32);
     const fpKey = `push_fp_${subId}`;
-    if (localStorage.getItem(fpKey) === fp) return;
+    const RESYNC_AFTER_MS = 6 * 60 * 60 * 1000;
 
-    const subJson = sub.toJSON();
+    let last = null;
+    try { last = JSON.parse(localStorage.getItem(fpKey) || 'null'); } catch {}
+    if (last?.fp === fp && Date.now() - (last.at || 0) < RESYNC_AFTER_MS) return;
 
-    await fetch('/api/push', {
+    const r = await fetch('/api/push', {
       method:  'POST',
       headers: {
         'Content-Type':  'application/json',
         'Authorization': `Bearer ${Sync.getToken()}`,
       },
-      body: JSON.stringify({ id: subId, subscription: subJson, schedule: notifications }),
+      body: JSON.stringify({ id: subId, subscription: sub.toJSON(), schedule: notifications }),
     });
-    localStorage.setItem(fpKey, fp);
+
+    /* fetch only rejects on network failure — a 401/500 resolves normally.
+       Recording the fingerprint regardless would convince this device the
+       server had a schedule it never actually accepted, and it would not try
+       again until the schedule changed. */
+    if (r.ok) localStorage.setItem(fpKey, JSON.stringify({ fp, at: Date.now() }));
   } catch(e) { /* no-op — background push is best-effort */ }
 }
 
@@ -742,17 +754,44 @@ function showNotificationViaSW(title, body, tag) {
   navigator.serviceWorker.controller.postMessage({ type: 'SHOW_NOTIFICATION', title, body: body || '', tag: tag || 'commanddeck' });
 }
 
-function todayAtMins(mins) {
-  const d = new Date();
-  d.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
-  return d.getTime();
+/* Timezone helpers — a mirror of the Cron Worker's, so a notification computed
+   here and the same notification computed server-side land on the identical
+   instant. Using the device's local clock instead (as this used to) makes an
+   iPad set to another zone disagree with the server by whole hours, and then
+   whichever wrote last wins. */
+const DEFAULT_TZ = 'Europe/London';
+
+function tzOffsetMs(date, tz) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  });
+  const p = Object.fromEntries(dtf.formatToParts(date).map(x => [x.type, x.value]));
+  return Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second) - date.getTime();
+}
+
+function zonedPartsNow(tz) {
+  const dtf = new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' });
+  const p = Object.fromEntries(dtf.formatToParts(new Date()).map(x => [x.type, x.value]));
+  const WD = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return { y: +p.year, mo: +p.month, d: +p.day, dow: WD[p.weekday] };
+}
+
+/* "HH:MM on y-mo-d in tz" → UTC epoch ms */
+function zonedHmToUtcMs(y, mo, d, hh, mm, tz) {
+  const guess = Date.UTC(y, mo - 1, d, hh, mm, 0);
+  return guess - tzOffsetMs(new Date(guess), tz);
 }
 
 function scheduleNotifications(state) {
   if (!notifEnabled() || !state?.ui?.notif) return;
-  if (!navigator.serviceWorker?.controller) return;
 
-  const dow = new Date().getDay();
+  const tz = state.ui?.timezone || DEFAULT_TZ;
+  const { y, mo, d: dayOfMonth, dow } = zonedPartsNow(tz);
+  const atHm   = (hh, mm) => zonedHmToUtcMs(y, mo, dayOfMonth, hh, mm, tz);
+  const atMins = (mins)   => atHm(Math.floor(mins / 60), mins % 60);
+
   const now = Date.now();
   const notifications = [];
 
@@ -768,8 +807,7 @@ function scheduleNotifications(state) {
         const raw = todaySalah[key];
         if (!raw) return;
         const [h, m] = raw.split(' ')[0].split(':').map(Number);
-        const d = new Date(); d.setHours(h, m, 0, 0);
-        push(`salah-${key}`, names.en, `${names.ar} · Time to pray`, d.getTime());
+        push(`salah-${key}`, names.en, `${names.ar} · Time to pray`, atHm(h, m));
       });
     }
   } catch(e) {}
@@ -777,9 +815,9 @@ function scheduleNotifications(state) {
   /* Calendar blocks — all blocks always fire 3 notifications */
   (state.blocks || []).forEach(b => {
     if (!b.every.includes(dow)) return;
-    const s = todayAtMins(b.start);
+    const s = atMins(b.start);
     /* end <= start means the block crosses midnight — anchor the end to the next day */
-    const e = todayAtMins(b.end) + (b.end <= b.start ? 24 * 60 * 60000 : 0);
+    const e = atMins(b.end) + (b.end <= b.start ? 24 * 60 * 60000 : 0);
     push(`b-${b.id}-15`,  'Starting in 15 min', b.title, s - 15 * 60000);
     push(`b-${b.id}-5`,   'Starting in 5 min',  b.title, s -  5 * 60000);
     push(`b-${b.id}-end`, 'Ending in 5 min',    b.title, e -  5 * 60000);
@@ -789,8 +827,7 @@ function scheduleNotifications(state) {
   (state.habits || []).forEach(h => {
     if (!h.reminder || !h.days.includes(dow) || state.logs?.[todayKey()]?.[h.id]) return;
     const [hr, mn] = h.reminder.split(':').map(Number);
-    const d = new Date(); d.setHours(hr, mn, 0, 0);
-    push(`h-${h.id}`, 'Habit reminder', h.name, d.getTime());
+    push(`h-${h.id}`, 'Habit reminder', h.name, atHm(hr, mn));
   });
 
   /* Task reminders */
@@ -805,8 +842,7 @@ function scheduleNotifications(state) {
   const gr = state.ui?.goalsReminder;
   if (gr) {
     const active = (state.goals || []).filter(g => g.status !== 'completed');
-    const y = new Date().getFullYear();
-    const qKey = `${y}-Q${Math.ceil((new Date().getMonth() + 1) / 3)}`;
+    const qKey = `${y}-Q${Math.ceil(mo / 3)}`;
     const titles = (arr) => arr.map(g => g.title).join(' · ');
 
     const quarterly = active.filter(g => g.horizon === 'quarter' && g.quarter === qKey);
@@ -816,7 +852,7 @@ function scheduleNotifications(state) {
     const fireGoalReminders = (idPrefix, time) => {
       if (!time) return;
       const [gh, gm] = time.split(':').map(Number);
-      const base = todayAtMins(gh * 60 + gm);
+      const base = atHm(gh, gm);
       if (quarterly.length) push(`${idPrefix}-quarter`,  `This quarter's goals (${qKey})`, titles(quarterly), base);
       if (yearly.length)    push(`${idPrefix}-year`,     "This year's goals",              titles(yearly),    base + 2 * 60000);
       if (lifetime.length)  push(`${idPrefix}-lifetime`, 'Your lifetime mission',          titles(lifetime),  base + 4 * 60000);
@@ -826,11 +862,18 @@ function scheduleNotifications(state) {
     if (gr.eveningOn) fireGoalReminders('goals-pm', gr.eveningTime);
   }
 
-  navigator.serviceWorker.controller.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
-
-  /* Also push the schedule to the server so the Cron Worker can fire
-     background notifications when the app is closed */
+  /* Server sync FIRST, and unconditionally. `controller` is null on the very
+     first load after registration, and whenever iOS or Android has evicted the
+     service worker — precisely the cases where background push is the only
+     thing that will fire. This call used to sit behind an early
+     `if (!navigator.serviceWorker?.controller) return`, so on those loads the
+     server was never told anything and the device went quiet. */
   syncPushSchedule(notifications);
+
+  /* In-page timers are a best-effort nicety for while the app is open: the
+     service worker is killed within ~30s of going idle, so setTimeout inside
+     it is not the real delivery mechanism. Push is. */
+  navigator.serviceWorker?.controller?.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
 }
 
 /* Synthesised adhan tone — plays when the page is open at prayer time */

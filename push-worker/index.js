@@ -1,31 +1,48 @@
 /**
  * Madinah Command Deck — Web Push Cron Worker
  *
- * Two Cron Triggers drive this Worker (add both in wrangler.toml / the
- * Cloudflare dashboard) — see the CRON_RECOMPUTE constant below for the
- * exact expression:
- *   every 1 minute  — fireDueNotifications: sends whatever is due right now
- *                      from each push_subs row's schedule.
- *   every 15 min    — recomputeServerSchedule: re-derives "today's"
- *                      notifications straight from the shared D1 state row
- *                      (salah times, blocks, habits, tasks, goals) and tops
- *                      up every push_subs row. This is what keeps
- *                      notifications firing even if the app isn't opened for
- *                      days — previously a push_subs row's schedule only
- *                      ever got refreshed by the client itself.
+ * ONE Cron Trigger drives this Worker — every minute:
+ *
+ *   crons = ["* * * * *"]
+ *
+ * Every tick is a single idempotent pass:
+ *   1. Re-derive today's FULL notification plan from the shared D1 state row
+ *      (salah times, blocks, habits, tasks, goals).
+ *   2. Write that plan onto every push_subs row, so notifications keep firing
+ *      even if the app is never opened.
+ *   3. Send anything now due that this device has not already been sent.
+ *
+ * Design notes — why it looks like this:
+ *   · The plan is the whole day and is rebuilt from scratch every tick; it is
+ *     never consumed. Delivery is tracked separately in the `sent` column, so
+ *     rebuilding can never resurrect an already-delivered notification, and a
+ *     delayed or skipped cron tick can never permanently lose one.
+ *   · Cloudflare cron triggers are best-effort and routinely drift by minutes.
+ *     A notification that came due while ticks were delayed is still sent,
+ *     late, up to MAX_LATE_MS. Past that it is retired without sending — a
+ *     three-hours-late "time to pray" is worse than none.
+ *   · Behaviour is deliberately NOT keyed off the cron expression string. Any
+ *     trigger firing at least once a minute drives the whole system. Keying
+ *     features off an exact string silently disables them whenever the
+ *     deployed schedule doesn't match the constant in this file.
  *
  * Required secrets (set via wrangler secret put):
  *   VAPID_PRIVATE_KEY  — base64url P-256 private scalar
  *   VAPID_SUBJECT      — mailto: contact URI (e.g. mailto:you@example.com)
+ *   SYNC_TOKEN         — same value as the Pages project; guards POST /run
  *
  * Required D1 binding: DB (same database as the Pages project)
  */
 
 const VAPID_PUBLIC_KEY = 'BFbFmnxVUcx5X_6pUxHKVv-n8aX78p73b8vbe8WCLqLPSmq9ydXMWdBtKjjDCceMju1CerMDVsRWkzJiM6jrvYo';
 
-/* Must exactly match the second Cron Trigger expression configured in
-   wrangler.toml / the Cloudflare dashboard for this Worker. */
-const CRON_RECOMPUTE = '*/15 * * * *';
+/* How late a notification may still be delivered before it is retired as
+   stale. Sized to absorb several consecutive missed or delayed cron ticks. */
+const MAX_LATE_MS = 10 * 60_000;
+
+/* A notification due within this window is sent on this tick rather than
+   waiting for the next one — keeps sub-minute accuracy despite a 1-min cron. */
+const LOOK_AHEAD_MS = 30_000;
 
 /* ── helpers ─────────────────────────────────────────────────── */
 
@@ -47,6 +64,23 @@ function concat(...arrays) {
 }
 
 const te = s => new TextEncoder().encode(s);
+
+const parseJson = (s, fallback) => { try { return JSON.parse(s); } catch { return fallback; } };
+
+/* Constant-time token comparison via HMAC — see functions/api/state.js for the
+   rationale. Hashing first also makes the compare length-independent. */
+async function tokenOk(given, expect) {
+  if (!given || !expect) return false;
+  const key = await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const [a, b] = await Promise.all([
+    crypto.subtle.sign('HMAC', key, te(given)),
+    crypto.subtle.sign('HMAC', key, te(expect)),
+  ]);
+  const ua = new Uint8Array(a), ub = new Uint8Array(b);
+  let diff = 0;
+  for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
+  return diff === 0;
+}
 
 /* HKDF-SHA-256: extract then expand (single OKM block, length ≤ 32) */
 async function hkdf(salt, ikm, info, length) {
@@ -134,7 +168,11 @@ async function sendPush(subscription, payload, privateKeyB64u, subject) {
       'Authorization':    `vapid t=${jwt},k=${VAPID_PUBLIC_KEY}`,
       'Content-Type':     'application/octet-stream',
       'Content-Encoding': 'aes128gcm',
-      'TTL':              '86400',
+      /* Short TTL, matched to MAX_LATE_MS. A reminder the push service could
+         not hand to the device within that window is stale, and we already
+         refuse to send one that late — a 24h TTL is what makes a phone that
+         was off overnight buzz with the whole of yesterday on wake. */
+      'TTL':              String(Math.round(MAX_LATE_MS / 1000)),
       'Urgency':          'high',
     },
     body,
@@ -184,15 +222,19 @@ const SALAH_NAMES = { // kept in sync by hand with index.html's SALAH_NAMES
   Isha:    { en: 'Isha',    ar: 'العشاء' },
 };
 
-async function buildTodaysSchedule(state) {
+/* Builds the FULL plan for today — entries already in the past are included.
+   Callers depend on this being a pure function of (state, day), so it can be
+   recomputed every tick and compared or replaced safely. What has actually
+   been delivered lives in push_subs.sent, never in here. */
+async function buildTodaysSchedule(state, tz, parts) {
   const schedule = [];
   if (!state?.ui?.notif) return { schedule, ok: true };
 
-  const tz  = state.ui?.timezone || DEFAULT_TZ;
-  const now = Date.now();
-  const { y, mo, d, dow, key: todayKey } = zonedPartsNow(tz);
+  const { y, mo, d, dow, key: todayKey } = parts;
 
-  const push = (id, title, body, fireAt) => { if (fireAt > now) schedule.push({ id, title, body, fireAt }); };
+  const push = (id, title, body, fireAt) => {
+    if (Number.isFinite(fireAt)) schedule.push({ id, title, body, fireAt });
+  };
 
   /* Salah times — same unauthenticated Aladhan endpoint the client uses.
      A prayer-time fetch failure is NOT the same as "no location configured"
@@ -205,7 +247,13 @@ async function buildTodaysSchedule(state) {
     try {
       const method = state.ui.salahMethod ?? 3, school = state.ui.salahSchool ?? 0;
       const dd = String(d).padStart(2, '0'), mm2 = String(mo).padStart(2, '0');
-      const r = await fetch(`https://api.aladhan.com/v1/timings/${dd}-${mm2}-${y}?latitude=${loc.lat}&longitude=${loc.lon}&method=${method}&school=${school}`);
+      /* cacheEverything pins the response at the edge: the timetable for a
+         given date and location never changes, so this is roughly one origin
+         hit per day instead of one per cron tick. */
+      const r = await fetch(
+        `https://api.aladhan.com/v1/timings/${dd}-${mm2}-${y}?latitude=${loc.lat}&longitude=${loc.lon}&method=${method}&school=${school}`,
+        { cf: { cacheTtl: 21600, cacheEverything: true } },
+      );
       if (r.ok) {
         const timings = (await r.json())?.data?.timings || {};
         for (const [key, names] of Object.entries(SALAH_NAMES)) {
@@ -274,126 +322,143 @@ async function buildTodaysSchedule(state) {
   return { schedule, ok: salahOk };
 }
 
-/* Re-derive "today's" notification schedule from the single shared state row
-   and top up every push_subs row with it (single household, no per-device
-   personalization). Runs on the CRON_RECOMPUTE trigger. */
-async function recomputeServerSchedule(env) {
-  const row = await env.DB.prepare('SELECT data FROM state WHERE id = 1').first();
-  if (!row?.data) return;
-  let state;
-  try { state = JSON.parse(row.data); } catch { return; }
-
-  const { schedule, ok } = await buildTodaysSchedule(state);
-  if (!ok) {
-    /* Prayer-time fetch failed this tick — do NOT overwrite push_subs with
-       an incomplete schedule missing salah entries. Leave whatever's
-       already stored untouched and just retry on the next tick. */
-    console.error('recomputeServerSchedule: skipping write, salah fetch failed this tick');
-    return;
-  }
-
-  const scheduleJson = JSON.stringify(schedule);
-  const nextFireAt   = schedule.length ? Math.min(...schedule.map(n => n.fireAt)) : 0;
-
-  const subs  = await env.DB.prepare('SELECT id FROM push_subs').all();
-  const stmts = (subs.results || []).map(r =>
-    env.DB.prepare('UPDATE push_subs SET schedule = ?, next_fire_at = ? WHERE id = ?')
-      .bind(scheduleJson, nextFireAt, r.id));
-  if (stmts.length) await env.DB.batch(stmts);
+/* Earliest not-yet-delivered entry, or 0 once the day is fully delivered. */
+function nextFireAt(schedule, sentSet) {
+  const pending = schedule.filter(n => !sentSet.has(n.id)).map(n => n.fireAt);
+  return pending.length ? Math.min(...pending) : 0;
 }
 
-/* ── Cron: send whatever's due right now (unchanged from before) ─ */
-
-async function fireDueNotifications(env) {
+/* One tick: refresh every device's plan, then send whatever is due.
+   Refresh and delivery are deliberately in the SAME pass — as two independent
+   cron jobs they raced, and a refresh landing just after a send could re-add
+   an entry that had already gone out. */
+async function tick(env) {
   const now = Date.now();
-  /* 90-second look-back — wide enough to survive one missed cron run,
-     narrow enough that each notification lands in at most one window. */
-  const lookBack = 90_000;
 
-  /* Only load rows that have a notification due imminently */
+  /* Today's plan, derived once and shared by every device (single household,
+     no per-device personalization). */
+  const stateRow = await env.DB.prepare('SELECT data FROM state WHERE id = 1').first();
+  const state    = stateRow?.data ? parseJson(stateRow.data, null) : null;
+
+  const tz    = state?.ui?.timezone || DEFAULT_TZ;
+  const parts = zonedPartsNow(tz);
+
+  /* plan === null means "no trustworthy plan this tick" — a missing/corrupt
+     state row, or a failed prayer-time fetch. Never overwrite stored plans
+     with an incomplete one; deliver from what's already there and retry. */
+  let plan = null;
+  if (state) {
+    const { schedule, ok } = await buildTodaysSchedule(state, tz, parts);
+    if (ok) plan = schedule;
+    else console.error('tick: salah fetch failed, keeping stored plans this tick');
+  } else {
+    console.error('tick: state row missing or unparseable, keeping stored plans');
+  }
+
   const rows = await env.DB.prepare(
-    'SELECT id, subscription, schedule FROM push_subs WHERE next_fire_at > 0 AND next_fire_at <= ?'
-  ).bind(now + 30_000).all();
+    'SELECT id, subscription, schedule, sent, plan_day FROM push_subs'
+  ).all();
+
+  const writes = [];
 
   await Promise.all((rows.results || []).map(async row => {
     try {
-      const sub      = JSON.parse(row.subscription);
-      const schedule = JSON.parse(row.schedule || '[]');
+      const sub = parseJson(row.subscription, null);
+      if (!sub?.endpoint) return;
 
-      const due      = schedule.filter(n => n.fireAt >= now - lookBack && n.fireAt <= now + 30_000);
-      /* Entries that fell outside every lookback window (a missed/delayed
-         cron tick) can never be sent — drop them instead of letting them
-         zombie next_fire_at forever. */
-      const missed   = schedule.filter(n => n.fireAt < now - lookBack);
-      const upcoming = schedule.filter(n => n.fireAt > now + 30_000);
+      /* Without a fresh plan we can only work from what's stored, and only if
+         it belongs to today — yesterday's plan replayed against a reset `sent`
+         would mark today's ids delivered and mute the whole day. */
+      if (!plan && row.plan_day !== parts.key) return;
 
-      if (!due.length && !missed.length) return;
-      if (missed.length) {
-        console.log(`push → ${row.id}: dropping ${missed.length} missed notification(s)`);
-      }
+      const schedule = plan ?? parseJson(row.schedule, []);
 
-      /* allSettled so one throw doesn't take the whole batch down with it —
-         each notification's outcome is judged independently below. */
-      const results = await Promise.allSettled(due.map(n => sendPush(sub, {
-        title:   n.title,
-        body:    n.body || '',
-        tag:     n.id,
-        isSalah: n.id.startsWith('salah-'),
-      }, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT)));
+      /* `sent` is scoped to one local day: block/habit/goal ids repeat daily,
+         so carrying yesterday's deliveries over would silence today. */
+      const newDay  = row.plan_day !== parts.key;
+      const sentSet = new Set(newDay ? [] : parseJson(row.sent, []));
+
+      const due = schedule.filter(n =>
+        !sentSet.has(n.id) && n.fireAt <= now + LOOK_AHEAD_MS);
 
       let subscriptionGone = false;
       let anySent = false;
-      const retry = [];
+
+      /* allSettled so one throw doesn't take the whole batch down with it —
+         each notification's outcome is judged independently below. */
+      const results = await Promise.allSettled(due.map(async n => {
+        /* Too stale to be useful — retire it rather than buzz the user with a
+           reminder whose moment has long passed. */
+        if (n.fireAt < now - MAX_LATE_MS) return 'stale';
+        return sendPush(sub, {
+          title:   n.title,
+          body:    n.body || '',
+          tag:     n.id,
+          isSalah: n.id.startsWith('salah-'),
+        }, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT);
+      }));
+
       due.forEach((n, i) => {
         const r = results[i];
-        if (r.status === 'fulfilled') {
-          const s = r.value;
-          console.log(`push → ${row.id} [${n.title}] → HTTP ${s}`);
-          if (s === 404 || s === 410) { subscriptionGone = true; return; } /* expired sub */
-          if (s >= 200 && s < 300) { anySent = true; return; } /* delivered */
-          retry.push(n); /* other non-2xx — try again next tick */
-        } else {
+        if (r.status !== 'fulfilled') {
+          /* Network error — leave unsent so the next tick retries it. */
           console.error(`push → ${row.id} [${n.title}] threw:`, r.reason?.message);
-          retry.push(n); /* network error etc — try again next tick */
+          return;
         }
+        if (r.value === 'stale') {
+          console.log(`push → ${row.id} [${n.title}]: ${Math.round((now - n.fireAt) / 60000)}m late, retiring`);
+          sentSet.add(n.id);
+          return;
+        }
+        const s = r.value;
+        console.log(`push → ${row.id} [${n.title}] → HTTP ${s}`);
+        /* A 404/410 means the push service will never accept this
+           subscription again — delete it rather than keep re-querying it. */
+        if (s === 404 || s === 410) { subscriptionGone = true; return; }
+        if (s >= 200 && s < 300) { sentSet.add(n.id); anySent = true; return; }
+        /* Any other non-2xx: leave unsent, retried each tick until MAX_LATE_MS. */
       });
 
-      /* A 404/410 means the push service will never accept this
-         subscription again — delete it rather than keep re-querying it. */
       if (subscriptionGone) {
-        await env.DB.prepare('DELETE FROM push_subs WHERE id = ?').bind(row.id).run();
+        writes.push(env.DB.prepare('DELETE FROM push_subs WHERE id = ?').bind(row.id));
         return;
       }
 
-      const remain     = [...upcoming, ...retry];
-      const nextFireAt = remain.length ? Math.min(...remain.map(n => n.fireAt)) : 0;
+      const scheduleJson = JSON.stringify(schedule);
+      const sentJson     = JSON.stringify([...sentSet]);
 
-      /* Only bump updated_at on an actual successful delivery this tick —
-         it's the staleness signal cleanupStaleSubscriptions relies on below,
-         so it must reflect "still genuinely working," not just "was queried." */
-      if (anySent) {
-        await env.DB.prepare(
-          'UPDATE push_subs SET schedule = ?, next_fire_at = ?, updated_at = ? WHERE id = ?'
-        ).bind(JSON.stringify(remain), nextFireAt, now, row.id).run();
-      } else {
-        await env.DB.prepare(
-          'UPDATE push_subs SET schedule = ?, next_fire_at = ? WHERE id = ?'
-        ).bind(JSON.stringify(remain), nextFireAt, row.id).run();
-      }
+      /* Skip the write when nothing about this row changed — the common case
+         once the day's plan has settled. */
+      if (!newDay && !anySent
+          && scheduleJson === (row.schedule || '[]')
+          && sentJson     === (row.sent     || '[]')) return;
+
+      /* updated_at is the staleness signal cleanupStaleSubscriptions uses, so
+         it must mean "still genuinely working", not merely "was queried". */
+      writes.push(anySent
+        ? env.DB.prepare(
+            'UPDATE push_subs SET schedule = ?, sent = ?, plan_day = ?, next_fire_at = ?, updated_at = ? WHERE id = ?'
+          ).bind(scheduleJson, sentJson, parts.key, nextFireAt(schedule, sentSet), now, row.id)
+        : env.DB.prepare(
+            'UPDATE push_subs SET schedule = ?, sent = ?, plan_day = ?, next_fire_at = ? WHERE id = ?'
+          ).bind(scheduleJson, sentJson, parts.key, nextFireAt(schedule, sentSet), row.id));
 
     } catch (e) {
       console.error(`push error for ${row.id}:`, e.message);
     }
   }));
+
+  if (writes.length) await env.DB.batch(writes);
+  return { devices: (rows.results || []).length, writes: writes.length, planned: plan?.length ?? null };
 }
 
 /* Safety net: a push subscription that hasn't successfully received a
    notification, nor been re-confirmed by its own client, in this long is
    almost certainly dead (uninstalled PWA, cleared site data, revoked
    permission, a device that no longer exists) — even if it never hit the
-   404/410 auto-delete in fireDueNotifications (e.g. because it had nothing
-   scheduled to try sending in the first place, so that path never ran for
-   it). updated_at is bumped both by the client's own subscribe/re-sync POST
+   404/410 auto-delete in tick() (e.g. because it had nothing scheduled to try
+   sending in the first place, so that path never ran for it).
+   updated_at is bumped both by the client's own subscribe/re-sync POST
    (functions/api/push.js) and by a successful send here, so this only ever
    catches rows that are genuinely not working — never a device that's just
    quietly receiving background pushes without reopening the app. */
@@ -414,16 +479,28 @@ async function cleanupStaleSubscriptions(env) {
 /* ── Entry point ───────────────────────────────────────────────── */
 
 export default {
-  async scheduled(event, env, _ctx) {
-    if (event.cron === CRON_RECOMPUTE) {
-      await recomputeServerSchedule(env);
-      await cleanupStaleSubscriptions(env);
-      return;
+  /* Deliberately ignores event.cron — see the design notes at the top of this
+     file. Any trigger firing at least once a minute drives the whole system. */
+  async scheduled(_event, env, ctx) {
+    await tick(env);
+    /* Housekeeping only — must never delay or fail a delivery tick. Once an
+       hour is plenty for a 30-day cutoff. */
+    if (new Date().getUTCMinutes() === 0) {
+      ctx.waitUntil(cleanupStaleSubscriptions(env));
     }
-    await fireDueNotifications(env);
   },
 
-  async fetch(_req, _env) {
+  /* POST /run with the sync token forces a tick, so the pipeline can be
+     verified end to end without waiting for the next cron. */
+  async fetch(req, env) {
+    const url = new URL(req.url);
+    if (req.method === 'POST' && url.pathname === '/run') {
+      const given = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+      if (!await tokenOk(given, env.SYNC_TOKEN)) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+      return Response.json(await tick(env));
+    }
     return new Response('OK', { status: 200 });
   },
 };

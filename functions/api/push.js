@@ -44,6 +44,12 @@ export async function onRequest({ request, env }) {
       const upcoming   = (schedule || []).map(n => n.fireAt).filter(t => t > now);
       const nextFireAt = upcoming.length ? Math.min(...upcoming) : 0;
 
+      /* `sent` and `plan_day` are deliberately absent from the UPDATE list:
+         they are the Cron Worker's delivery ledger. The client re-registers on
+         every app open, and clearing the ledger there would re-send every
+         notification already delivered today. The posted schedule is only a
+         bootstrap for a brand-new device — the Worker replaces it with the
+         server-derived plan on its next tick. */
       await env.DB.prepare(
         `INSERT INTO push_subs (id, subscription, schedule, next_fire_at, updated_at) VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE

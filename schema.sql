@@ -15,10 +15,19 @@ INSERT OR IGNORE INTO state (id, data, updated_at) VALUES (1, '{}', 0);
 CREATE TABLE IF NOT EXISTS push_subs (
   id           TEXT PRIMARY KEY,   -- last 32 chars of the push endpoint (stable device ID)
   subscription TEXT NOT NULL,      -- JSON: { endpoint, keys: { p256dh, auth } }
-  schedule     TEXT NOT NULL DEFAULT '[]', -- JSON: [{ id, title, body, fireAt }]
-  next_fire_at INTEGER NOT NULL DEFAULT 0, -- unix ms of next upcoming notification (0 = none)
-  updated_at   INTEGER NOT NULL
+  schedule     TEXT NOT NULL DEFAULT '[]', -- JSON: today's FULL plan [{ id, title, body, fireAt }]
+  sent         TEXT NOT NULL DEFAULT '[]', -- JSON: ids already delivered (or retired) for plan_day
+  plan_day     TEXT NOT NULL DEFAULT '',   -- local day the plan/sent pair belongs to, 'YYYY-MM-DD'
+  next_fire_at INTEGER NOT NULL DEFAULT 0, -- unix ms of earliest undelivered entry (0 = none)
+  updated_at   INTEGER NOT NULL            -- last time this sub was confirmed WORKING (client POST or successful send)
 );
 
--- Run once if the table already existed before this column was added:
+-- `schedule` is rebuilt from scratch by the Cron Worker every tick and is never
+-- consumed; what has actually gone out is tracked in `sent`, which resets when
+-- `plan_day` rolls over. That split is what lets a delayed or skipped cron tick
+-- still deliver, instead of silently dropping the notification.
+
+-- Migrations — run once each if the table predates these columns:
 -- ALTER TABLE push_subs ADD COLUMN next_fire_at INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE push_subs ADD COLUMN sent     TEXT NOT NULL DEFAULT '[]';
+-- ALTER TABLE push_subs ADD COLUMN plan_day TEXT NOT NULL DEFAULT '';
