@@ -246,65 +246,77 @@ export async function onRequest({ request, env }) {
   if (!await tokenOk(request, env)) return json({ error: 'Unauthorized' }, 401);
   if (!env.DB) return json({ error: 'not_configured', detail: 'DB binding missing' }, 500);
 
-  let body = {};
-  try { body = await request.json(); } catch {}
-  const force = body?.force === true;
-
-  const row = await env.DB.prepare('SELECT data FROM state WHERE id = 1').first();
-  let state = {};
-  try { state = row?.data ? JSON.parse(row.data) : {}; } catch {}
-
-  const today  = isDateKey(body?.today) ? body.today : new Date().toISOString().slice(0, 10);
-  const digest = buildDigest(state, today);
-  const fingerprint = digestFingerprint(digest);
-  const coach = state.coach || null;
-  const now = Date.now();
-
-  const blocked = checkAllowed(coach, { now, force, fingerprint });
-  if (blocked) {
-    /* Not an error — the stored review is still the current answer. */
-    return json({
-      review: coach?.review || null,
-      digest, cached: true, reason: blocked.reason,
-      at: coach?.at || null,
-      runsLeft: runsLeftIn(coach, now),
-      nextDueAt: coach?.at ? coach.at + WEEK_MS : null,
-    });
-  }
-
-  if (!env.AI) return json({ error: 'not_configured', detail: 'AI binding missing' }, 500);
-
-  let review, usage;
+  /* Every path below can throw on a first-ever run — a fresh D1 write
+     shape, a digest built from whatever malformed state has drifted in
+     over every version of this app. An uncaught throw here returns a
+     bare Cloudflare error page, not JSON: the client can't parse it,
+     falls through every specific case, and reports a useless "could
+     not reach the service" for what might be a one-line D1 error. See
+     state.js for the same wrapper. */
   try {
-    ({ review, usage } = await askClaude(digest, coach?.notes || [], env));
-  } catch (err) {
-    /* Nothing is written and no run is recorded, so a failure costs the
-       user neither money nor their weekly allowance. */
-    console.error('coach: review failed —', err?.message || err);
-    return json({ error: 'review_failed', detail: String(err?.message || err).slice(0, 200) }, 502);
-  }
+    let body = {};
+    try { body = await request.json(); } catch {}
+    const force = body?.force === true;
 
-  const saved = await persist(env, (prev) => ({
-    at: now,
-    review,
-    fingerprint,
-    runs: [...(prev?.runs || []).filter(t => now - t < WEEK_MS), now],
-    notes: [...(prev?.notes || []), review.note].slice(-MAX_NOTES),
-    /* The metrics as they stood when this advice was given. Next review
-       diffs against them, which is what lets it judge whether what it
-       told you to do actually worked. */
-    history: [...(prev?.history || []), {
+    const row = await env.DB.prepare('SELECT data FROM state WHERE id = 1').first();
+    let state = {};
+    try { state = row?.data ? JSON.parse(row.data) : {}; } catch {}
+
+    const today  = isDateKey(body?.today) ? body.today : new Date().toISOString().slice(0, 10);
+    const digest = buildDigest(state, today);
+    const fingerprint = digestFingerprint(digest);
+    const coach = state.coach || null;
+    const now = Date.now();
+
+    const blocked = checkAllowed(coach, { now, force, fingerprint });
+    if (blocked) {
+      /* Not an error — the stored review is still the current answer. */
+      return json({
+        review: coach?.review || null,
+        digest, cached: true, reason: blocked.reason,
+        at: coach?.at || null,
+        runsLeft: runsLeftIn(coach, now),
+        nextDueAt: coach?.at ? coach.at + WEEK_MS : null,
+      });
+    }
+
+    if (!env.AI) return json({ error: 'not_configured', detail: 'AI binding missing' }, 500);
+
+    let review, usage;
+    try {
+      ({ review, usage } = await askClaude(digest, coach?.notes || [], env));
+    } catch (err) {
+      /* Nothing is written and no run is recorded, so a failure costs
+         the user neither money nor their weekly allowance. */
+      console.error('coach: review failed —', err?.message || err);
+      return json({ error: 'review_failed', detail: String(err?.message || err).slice(0, 200) }, 502);
+    }
+
+    const saved = await persist(env, (prev) => ({
       at: now,
-      note: review.note,
-      actions: (review.actions || []).map(a => a.action),
-      metrics: metricsOf(digest),
-    }].slice(-MAX_HISTORY),
-  }));
+      review,
+      fingerprint,
+      runs: [...(prev?.runs || []).filter(t => now - t < WEEK_MS), now],
+      notes: [...(prev?.notes || []), review.note].slice(-MAX_NOTES),
+      /* The metrics as they stood when this advice was given. Next
+         review diffs against them, which is what lets it judge
+         whether what it told you to do actually worked. */
+      history: [...(prev?.history || []), {
+        at: now,
+        note: review.note,
+        actions: (review.actions || []).map(a => a.action),
+        metrics: metricsOf(digest),
+      }].slice(-MAX_HISTORY),
+    }));
 
-  return json({
-    review, digest, cached: false, usage,
-    at: now,
-    runsLeft: runsLeftIn(saved, now),
-    nextDueAt: now + WEEK_MS,
-  });
+    return json({
+      review, digest, cached: false, usage,
+      at: now,
+      runsLeft: runsLeftIn(saved, now),
+      nextDueAt: now + WEEK_MS,
+    });
+  } catch (err) {
+    console.error('coach handler error:', err);
+    return json({ error: 'internal_error', detail: String(err?.message || err).slice(0, 200) }, 500);
+  }
 }
