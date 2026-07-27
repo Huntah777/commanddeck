@@ -259,6 +259,11 @@ const PARSE_ENDPOINT = '/api/parse';
 /* Capture is a foreground interaction and the task already exists
    locally — a slow parse is abandoned rather than left hanging. */
 const PARSE_TIMEOUT_MS = 8_000;
+const SUGGEST_ENDPOINT = '/api/suggest';
+const COACH_ENDPOINT = '/api/coach';
+/* Opus with adaptive thinking takes its time — this is a deliberate,
+   once-a-week action with a spinner, not a background fetch. */
+const COACH_TIMEOUT_MS = 90_000;
 const UI_LOCAL_KEY = 'madinah_ui_local_v1';
 const DIRTY_KEY = 'madinah_dirty_v1';
 /* Must match sw.js */
@@ -361,6 +366,43 @@ const Sync = {
       if (!r.ok) return null;
       return await r.json();
     } catch { return null; }
+  },
+  /* What the system has learned from being overruled. Free, local-ish
+     computation — an endpoint only so the rules live in one place. */
+  async suggest(ctx) {
+    const token = this.getToken();
+    if (!token) return null;
+    try {
+      const r = await fetch(SUGGEST_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(ctx),
+      });
+      if (!r.ok) return null;
+      return await r.json();
+    } catch { return null; }
+  },
+  /* Ask for a coaching review. Unlike parse this one costs real money,
+     so the server owns the rate limiting — the client never decides
+     whether a call is allowed, it just reports what came back. */
+  async coach({ today, force = false }) {
+    const token = this.getToken();
+    if (!token) return { error: 'no_token' };
+    try {
+      const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = ac ? setTimeout(() => ac.abort(), COACH_TIMEOUT_MS) : null;
+      const r = await fetch(COACH_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ today, force }),
+        signal: ac?.signal,
+      }).finally(() => timer && clearTimeout(timer));
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) return { error: data?.error || `HTTP_${r.status}`, detail: data?.detail };
+      return data;
+    } catch (e) {
+      return { error: e?.name === 'AbortError' ? 'timeout' : 'network' };
+    }
   },
 };
 
@@ -886,6 +928,10 @@ const SEED = () => ({
     quads: {},            /* { [id]: { title?, sub?, hint? } } */
     fastingDays: [1, 4],  /* Mon=1, Thu=4 */
   },
+  /* coach: the last weekly review, plus the spend guard's own bookkeeping.
+     Written by /api/coach server-side; the client only ever reads it.
+     { at, review, fingerprint, runs: [ms], notes: [string] } */
+  coach: null,
   deleted: {},            /* { [id]: deletedAt } — tombstones, see mergeState */
   logsOff: {},            /* { 'YYYY-MM-DD': { [habitId]: unTickedAt } } */
 });
@@ -1226,8 +1272,14 @@ function App() {
       goals: data?.goals || [],
       people: (data?.people || []).map(p => ({ aliases: [], weight: 3, ...p })),
       lists: (data?.lists || SEED().lists).map(l => ({ keywords: [], ...l })),
+      coach: data?.coach || null,
       habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, ...h })),
-      tasks:  (data?.tasks  || []).map(t => ({ reminder: null, ...t })),
+      /* Tasks filed before the full parser snapshot existed carry only
+         aiQuadrant. Lift it into `ai` so corrections read uniformly. */
+      tasks:  (data?.tasks  || []).map(t => ({
+        reminder: null, ...t,
+        ai: t.ai || (t.aiQuadrant ? { quadrant: t.aiQuadrant } : null),
+      })),
       blocks: data?.blocks || SEED().blocks,
       /* Expire tombstones the same way the server does, so a device that
          never syncs doesn't accumulate them forever. */
@@ -1613,7 +1665,8 @@ function App() {
         {state.ui.view === 'matrix' && <MatrixView state={state} setState={setState} />}
         {state.ui.view === 'stats'  && <StatsView state={state} setState={setState} hydrate={hydrate}
             theme={theme} setTheme={setTheme} background={background} changeBg={changeBg}
-            syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}/>}
+            syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}
+            onSyncNow={syncNow}/>}
         {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState}/>}
         {state.ui.view === 'goals'  && <GoalsView state={state} setState={setState}/>}
       </main>
@@ -2213,51 +2266,96 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
 /* ------------------------------------------------------------------
    QUICK ADD TASK
 ------------------------------------------------------------------- */
-function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', defaultListId }) {
+/* Tasks the parser filed, trimmed to the fields a correction is visible
+   in and capped at the most recent handful. Sent with each capture so
+   /api/parse can derive few-shot examples from what this user actually
+   overruled — the rule for what counts as a correction stays server-side
+   in learn.js rather than being duplicated here. */
+const FILED_TASKS_SENT = 40;
+function filedTasksFor(state) {
+  return (state.tasks || [])
+    .filter(t => t.ai || t.aiQuadrant)
+    .sort((a, b) => (b.modifiedAt || 0) - (a.modifiedAt || 0))
+    .slice(0, FILED_TASKS_SENT)
+    .map(({ id, title, due, listId, personId, quadrant, ai, aiQuadrant, modifiedAt }) =>
+      ({ id, title, due, listId, personId, quadrant, ai, aiQuadrant, modifiedAt }));
+}
+
+/* Mostly one text box: the date, list and quadrant are read out of what
+   you type (see functions/api/parse.js). `showPicker` adds a date and
+   list control for the Tasks view, where you are deliberately filing
+   rather than dumping — anything set by hand there is treated as stated
+   intent and the parser will not overwrite it.
+
+   Everything remains editable afterwards: tap the task to edit it, or
+   drag it in the Matrix. Those edits are also how the system learns —
+   see functions/api/learn.js. */
+function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', defaultListId, showPicker=false }) {
   const [title, setTitle] = useState('');
-  const [open, setOpen]   = useState(false);
-  const [quadrant, setQuadrant] = useState(defaultQuadrant);
-  const [due, setDue] = useState(defaultDate || '');
-  const [listId, setListId] = useState(defaultListId || 'l-inbox');
-  /* Did the user set any field by hand? An explicit choice is never
-     overwritten by the parser — stated beats inferred. */
-  const [touched, setTouched] = useState(false);
   const [parsing, setParsing] = useState(false);
   const [filed, setFiled]     = useState(null); // last parse result, for the receipt
 
+  const [open, setOpen]     = useState(false);
+  const [due, setDue]       = useState(defaultDate || '');
+  const [listId, setListId] = useState(defaultListId || 'l-inbox');
+  /* Which fields the user set by hand this capture. Per-field rather
+     than a single flag: setting a date should not also cost you person
+     detection and quadrant assignment. */
+  const [touched, setTouched] = useState({});
+  const resetFields = () => { setDue(defaultDate || ''); setListId(defaultListId || 'l-inbox'); setTouched({}); };
+
   /* Ask the server to file a task that already exists locally. The
-     insert above never waits on this: capture stays instant, works
+     insert below never waits on this: capture stays instant, works
      offline, and works with no AI binding at all — the parse is an
      enhancement layer that patches the task a moment later. */
-  const smartFile = async (id, text, before) => {
+  const smartFile = async (id, text, before, held) => {
     setParsing(true);
-    const r = await Sync.parse(text, { today: todayKey(), people: state.people || [], lists: state.lists || [] });
+    const r = await Sync.parse(text, {
+      today: todayKey(),
+      people: state.people || [],
+      lists: state.lists || [],
+      /* Tasks previously filed by the parser, so the server can derive
+         few-shot examples from the ones this user corrected. */
+      filedTasks: filedTasksFor(state),
+    });
     setParsing(false);
     if (!r || r.error) return;
+    /* The parser's full output, kept beside what the task ends up as.
+       Any later divergence — a re-filed quadrant, a moved list, a
+       rewritten title — is a correction, and corrections are the only
+       training signal this app has. See functions/api/learn.js.
+
+       Fields the user set by hand are left out entirely rather than
+       recorded and then overridden: they pre-empted the parser rather
+       than disagreeing with it, and learn.js correctly treats a field
+       the parser never claimed as no disagreement at all. */
+    const ai = { raw: text, title: r.title || null, quadrant: r.quadrant || null, personId: r.personId || null, at: Date.now() };
+    if (!held?.due)    ai.due    = r.due    || null;
+    if (!held?.listId) ai.listId = r.listId || null;
+
     setState(s => ({
       ...s,
       tasks: s.tasks.map(t => t.id === id ? {
         ...t,
         title:    r.title || t.title,
-        due:      r.due   || t.due,
         quadrant: r.quadrant || t.quadrant,
-        listId:   r.listId   || t.listId,
         personId: r.personId || null,
-        /* What the parser chose, kept alongside what the task ended up
-           as. Re-filing a task is the only correction signal there is,
-           and it's what makes the weights self-tuning — see the People
-           tab in Configuration. */
-        aiQuadrant: r.quadrant || null,
+        /* Stated beats inferred: a value typed into the picker stands. */
+        due:    held?.due    ? t.due    : (r.due    || t.due),
+        listId: held?.listId ? t.listId : (r.listId || t.listId),
+        ai,
         modifiedAt: Date.now(),
       } : t),
     }));
-    setFiled({ id, before, ...r });
+    setFiled({ id, before, ...r, held });
   };
 
-  /* Put the task back exactly as it was captured. */
+  /* Put the task back exactly as it was captured. Clearing `ai` too:
+     an undo is a rejection of the whole filing, not a correction to
+     learn a rule from. */
   const undo = () => {
     if (!filed) return;
-    setState(s => ({ ...s, tasks: s.tasks.map(t => t.id === filed.id ? { ...t, ...filed.before, personId: null, aiQuadrant: null, modifiedAt: Date.now() } : t) }));
+    setState(s => ({ ...s, tasks: s.tasks.map(t => t.id === filed.id ? { ...t, ...filed.before, personId: null, ai: null, aiQuadrant: null, modifiedAt: Date.now() } : t) }));
     setFiled(null);
   };
 
@@ -2265,15 +2363,26 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
     const text = title.trim();
     if (!text) return;
     const id = `t-${Date.now()}`;
-    const before = { title: text, due: due || null, quadrant, listId };
+    /* Contextual defaults still apply where nothing was typed in — a
+       capture made from a given day or list means something. Anything
+       set in the picker is stated intent and outranks both. */
+    const before = {
+      title: text,
+      due: (showPicker ? due : defaultDate) || null,
+      quadrant: defaultQuadrant,
+      listId: (showPicker ? listId : defaultListId) || 'l-inbox',
+    };
+    const held = showPicker ? touched : {};
     setState(s => ({
       ...s,
       tasks: [{ id, notes:'', ...before, done:false, created: Date.now(), modifiedAt: Date.now() }, ...s.tasks],
     }));
-    setTitle(''); setOpen(false); setFiled(null);
-    if (!touched && Sync.configured()) smartFile(id, text, before);
-    setTouched(false);
-    setQuadrant(defaultQuadrant); setDue(defaultDate || ''); setListId(defaultListId || 'l-inbox');
+    /* The picker stays open — if you opened it once you are probably
+       filing several, and re-opening it needs a blur and refocus the
+       keyboard never gives you. Values reset so nothing leaks into the
+       next capture. */
+    setTitle(''); setFiled(null); resetFields();
+    if (Sync.configured()) smartFile(id, text, before, held);
   };
 
   const filedQuad = filed && resolveQuads(state).find(q => q.id === filed.quadrant);
@@ -2285,12 +2394,35 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
         <I.plus className="w-4 h-4 text-bone-400 ml-1.5"/>
         <input value={title} onChange={e=>setTitle(e.target.value)}
           onKeyDown={e=>{ if (e.key==='Enter') submit(); if (e.key==='Escape') setOpen(false); }}
-          onFocus={()=>setOpen(true)}
-          placeholder="Capture a task…"
+          onFocus={()=>showPicker && setOpen(true)}
+          placeholder="Capture a task… e.g. dave needs the deck by friday"
           className="flex-1 bg-transparent text-sm text-bone-100 placeholder:text-bone-400/70"/>
         {parsing && <span data-testid="parse-status" className="text-[10px] font-mono tracking-wider text-bone-400">FILING…</span>}
         {title && <button onClick={submit} className="btn px-3 py-1.5 rounded-md bg-strategy text-ink-950 text-xs font-semibold">Add</button>}
       </div>
+
+      {/* Optional overrides, for when you are filing rather than dumping.
+          Left empty the parser decides; set by hand it does not argue. */}
+      {showPicker && open && (
+        <div data-testid="capture-picker" className="border-t border-ink-700 p-2.5 fadeUp">
+          <div className="flex gap-2 items-center text-xs flex-wrap">
+            <input type="date" value={due} aria-label="Due date"
+              onChange={e=>{ setDue(e.target.value); setTouched(t => ({ ...t, due: true })); }}
+              className="min-w-[130px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100 font-mono"/>
+            <select value={listId} aria-label="List"
+              onChange={e=>{ setListId(e.target.value); setTouched(t => ({ ...t, listId: true })); }}
+              className="flex-1 min-w-[110px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
+              {state.lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+            </select>
+            {(touched.due || touched.listId) && (
+              <button onClick={resetFields}
+                className="btn px-2 py-1 rounded text-[10px] font-mono tracking-wider border border-ink-700 text-bone-400 hover:bg-ink-800">
+                LET IT DECIDE
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Receipt — what it decided and why, so a filing you disagree
           with is visible immediately rather than discovered later. */}
@@ -2307,23 +2439,6 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
           </div>
           <button onClick={undo} className="btn px-2 py-1 rounded text-[10px] font-mono tracking-wider border border-ink-700 text-bone-400 hover:bg-ink-800 shrink-0">UNDO</button>
           <button onClick={()=>setFiled(null)} className="btn text-bone-400 hover:text-bone-100 shrink-0" aria-label="Dismiss"><I.x className="w-3.5 h-3.5"/></button>
-        </div>
-      )}
-
-      {open && (
-        <div className="border-t border-ink-700 p-2.5 space-y-2 fadeUp">
-          <div className="flex gap-2 items-center text-xs flex-wrap">
-            <input type="date" value={due} onChange={e=>{ setDue(e.target.value); setTouched(true); }}
-              className="min-w-[120px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100 font-mono"/>
-            <select value={quadrant} onChange={e=>{ setQuadrant(e.target.value); setTouched(true); }}
-              className="flex-1 min-w-[90px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
-              {resolveQuads(state).map(q => <option key={q.id} value={q.id}>{q.title}</option>)}
-            </select>
-            <select value={listId} onChange={e=>{ setListId(e.target.value); setTouched(true); }}
-              className="flex-1 min-w-[90px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
-              {state.lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
-            </select>
-          </div>
         </div>
       )}
     </div>
@@ -2732,7 +2847,10 @@ function TasksView({ state, setState }) {
             ))}
           </div>
         </div>
-        <QuickAddTask state={state} setState={setState} defaultListId={activeList==='all'?'l-inbox':activeList}/>
+        {/* The one place with the pickers: Tasks is where you file
+            deliberately. Today and the Matrix stay pure capture. */}
+        <QuickAddTask state={state} setState={setState} showPicker
+          defaultListId={activeList==='all'?'l-inbox':activeList}/>
         <div className="card p-2">
           {filtered.length === 0
             ? <EmptyHint text="Nothing here."/>
@@ -2819,7 +2937,7 @@ const STAT_RANGES = [
   { value: 730, label: '2yr' },
 ];
 
-function StatsView({ state, setState, hydrate, theme, setTheme, background, changeBg, syncStatus, onConfigureSync, onDisconnect }) {
+function StatsView({ state, setState, hydrate, theme, setTheme, background, changeBg, syncStatus, onConfigureSync, onDisconnect, onSyncNow }) {
   const [statsRange, setStatsRange] = useState(30);
 
   /* Pillar performance over selected range */
@@ -2981,6 +3099,10 @@ function StatsView({ state, setState, hydrate, theme, setTheme, background, chan
           </div>
         </div>
       </div>
+
+      {/* The review sits with the numbers it is drawn from, not down in
+          settings — it is a reading of this page, not a preference. */}
+      <CoachCard state={state} syncStatus={syncStatus} onRefreshed={onSyncNow}/>
 
       {/* Per-habit breakdown */}
       {habitStats.length > 0 && (
@@ -3624,6 +3746,145 @@ function PersonRow({ p, expanded, onToggle, onUpdate, onDelete, movedCount }) {
 }
 
 /* ------------------------------------------------------------------
+   COACH CARD  — the weekly review. Reads state.coach (written server
+   side by /api/coach) and can ask for a fresh one.
+
+   Every number quoted here was computed in functions/api/digest.js and
+   handed to the model as finished arithmetic — the model prioritised
+   and phrased, it did not calculate. See that file for why.
+------------------------------------------------------------------- */
+const WEEK_MS_UI = 7 * 24 * 60 * 60 * 1000;
+
+/* Why the server refused, in words that say what to do about it. */
+const COACH_REFUSALS = {
+  not_due:      (d) => `Next review ${d}.`,
+  unchanged:    () => 'Nothing has moved since the last review.',
+  too_soon:     () => 'Just reviewed — try again in an hour.',
+  weekly_limit: () => 'Three reviews used this week. Resets as the week rolls on.',
+};
+
+function CoachCard({ state, syncStatus, onRefreshed }) {
+  const [busy, setBusy]   = useState(false);
+  const [msg, setMsg]     = useState(null);
+  const coach  = state.coach || null;
+  const review = coach?.review || null;
+
+  const configured = syncStatus !== 'local';
+  const dueAt = coach?.at ? coach.at + WEEK_MS_UI : 0;
+  const isDue = !coach?.at || Date.now() >= dueAt;
+  const dueLabel = dueAt
+    ? new Date(dueAt).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short' })
+    : 'now';
+
+  const run = async (force) => {
+    setBusy(true); setMsg(null);
+    const res = await Sync.coach({ today: todayKey(), force });
+    setBusy(false);
+
+    if (res?.error) {
+      setMsg(res.error === 'not_configured'
+        ? 'Not configured — add the Workers AI binding in Cloudflare, then redeploy.'
+        : res.error === 'timeout' ? 'The review timed out. Try again.'
+        : 'Could not reach the review service.');
+      return;
+    }
+    if (res?.cached && res.reason) setMsg(COACH_REFUSALS[res.reason]?.(dueLabel) || null);
+    /* The review is written into synced state server-side, so pull it
+       rather than trusting this device's copy of the response. */
+    if (!res?.cached) onRefreshed?.();
+  };
+
+  return (
+    <div className="card p-5">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-[10px] font-mono tracking-widest text-bone-400">REVIEW</div>
+          <div className="font-display text-xl text-bone-100 mt-1">What you're failing on</div>
+        </div>
+        {configured && (
+          <button onClick={() => run(!isDue)} disabled={busy}
+            className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-xs flex items-center gap-1.5 disabled:opacity-50">
+            <I.refresh className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`}/>
+            {busy ? 'Thinking…' : review ? 'Refresh' : 'Run review'}
+          </button>
+        )}
+      </div>
+
+      {!configured && (
+        <p className="text-sm text-bone-400 mt-3">Connect sync to enable the weekly review.</p>
+      )}
+
+      {configured && !review && !busy && (
+        <p className="text-sm text-bone-400 mt-3">
+          No review yet. It reads the last 30 days — habits, tasks, focus — and tells you
+          what's slipping and what to do about it. Runs weekly.
+        </p>
+      )}
+
+      {msg && <p data-testid="coach-msg" className="text-xs text-strategy mt-3">{msg}</p>}
+
+      {review && (
+        <div data-testid="coach-review" className="mt-4 space-y-4">
+          <p className="text-sm text-bone-100 leading-relaxed">{review.headline}</p>
+
+          {/* Whether last week's advice actually worked, measured against
+              the metrics snapshotted when it was given. This is the part
+              that makes the review a loop rather than a horoscope. */}
+          {review.verdict && (
+            <div data-testid="coach-verdict" className="pl-3 border-l-2 border-bone-400/30">
+              <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1">SINCE LAST REVIEW</div>
+              <div className="text-xs text-bone-300 leading-relaxed">{review.verdict}</div>
+            </div>
+          )}
+
+          {review.failing?.length > 0 && (
+            <div>
+              <div className="text-[10px] font-mono tracking-widest text-combat mb-2">SLIPPING</div>
+              <div className="space-y-2">
+                {review.failing.map((f, i) => (
+                  <div key={i} className="pl-3 border-l-2 border-combat/40">
+                    <div className="text-sm text-bone-100">{f.area}</div>
+                    <div className="text-xs text-bone-400">{f.evidence} — {f.why}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {review.actions?.length > 0 && (
+            <div>
+              <div className="text-[10px] font-mono tracking-widest text-strategy mb-2">THIS WEEK</div>
+              <div className="space-y-2">
+                {review.actions.map((a, i) => (
+                  <div key={i} className="pl-3 border-l-2 border-strategy/40">
+                    <div className="text-sm text-bone-100">{a.action}</div>
+                    <div className="text-xs text-bone-400">{a.because}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {review.working?.area && (
+            <div>
+              <div className="text-[10px] font-mono tracking-widest text-deen mb-2">HOLDING</div>
+              <div className="pl-3 border-l-2 border-deen/40">
+                <div className="text-sm text-bone-100">{review.working.area}</div>
+                <div className="text-xs text-bone-400">{review.working.evidence}</div>
+              </div>
+            </div>
+          )}
+
+          <div className="text-[10px] font-mono tracking-wider text-bone-500 pt-1">
+            {agoLabel(coach.at)} · {isDue ? 'due now' : `next ${dueLabel}`} · claude opus 5
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
    LIST ROW  — name/colour plus the keywords that route a captured task
    here without it naming the list outright. Same chip pattern as a
    person's aliases: type a word, Enter (or comma) commits it.
@@ -3757,9 +4018,41 @@ function AdminCard({ state, setState }) {
   }, [people, peopleQuery]);
   /* How often you overruled the parser on this person's tasks. Re-filing
      is the only correction signal there is, and a run of them usually
-     means the weight is wrong rather than the parse. */
-  const refiles = (id) => (state.tasks || [])
-    .filter(t => t.personId === id && t.aiQuadrant && t.aiQuadrant !== t.quadrant).length;
+     means the weight is wrong rather than the parse.
+     `ai` is the current snapshot; `aiQuadrant` is what tasks filed
+     before it existed still carry. */
+  const refiles = (id) => (state.tasks || []).filter(t => {
+    const was = t.ai?.quadrant ?? t.aiQuadrant;
+    return t.personId === id && was && was !== t.quadrant;
+  }).length;
+
+  /* What the corrections add up to, fetched from /api/suggest so the
+     rules stay shared with the parser rather than reimplemented here. */
+  const [suggestions, setSuggestions] = useState(null);
+  useEffect(() => {
+    if (!Sync.configured()) return;
+    let live = true;
+    Sync.suggest({ filedTasks: filedTasksFor(state), lists: state.lists || [], people: state.people || [] })
+      .then(r => { if (live) setSuggestions(r); });
+    return () => { live = false; };
+    /* Re-derived when the corrections themselves change, not on every
+       keystroke in an unrelated field. */
+  }, [tab, (state.tasks || []).length]);
+
+  const applyKeyword = (s) => {
+    setState(st => ({ ...st, lists: st.lists.map(l => l.id === s.listId
+      ? { ...l, keywords: [...(l.keywords || []), s.keyword], modifiedAt: Date.now() } : l) }));
+    setSuggestions(p => ({ ...p, keywords: p.keywords.filter(k => !(k.listId === s.listId && k.keyword === s.keyword)) }));
+  };
+  const dismissKeyword = (s) =>
+    setSuggestions(p => ({ ...p, keywords: p.keywords.filter(k => !(k.listId === s.listId && k.keyword === s.keyword)) }));
+
+  const applyWeight = (s) => {
+    updatePerson(s.personId, { weight: s.to });
+    setSuggestions(p => ({ ...p, weights: p.weights.filter(w => w.personId !== s.personId) }));
+  };
+  const dismissWeight = (s) =>
+    setSuggestions(p => ({ ...p, weights: p.weights.filter(w => w.personId !== s.personId) }));
 
   /* ── Fasting days ── */
   const fastingDays = admin.fastingDays ?? [1, 4];
@@ -3853,6 +4146,26 @@ function AdminCard({ state, setState }) {
             </p>
           )}
 
+          {/* Learned from re-filing: you keep pulling this person's tasks
+              across the importance line, so the weight is wrong. */}
+          {suggestions?.weights?.map(s => (
+            <div key={s.personId} data-testid="weight-suggestion"
+              className="p-3 rounded-lg border border-strategy/40 bg-strategy/5 flex items-center gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="text-sm text-bone-100">
+                  Move {s.name} to weight {s.to}?
+                </div>
+                <div className="text-[10px] text-bone-400">
+                  You re-filed {s.moves} of their tasks {s.direction === 'up' ? 'as more important' : 'as less important'} than {s.from} produced.
+                </div>
+              </div>
+              <button onClick={() => applyWeight(s)}
+                className="btn px-2.5 py-1.5 rounded text-[10px] font-mono tracking-wider bg-strategy text-ink-950 font-semibold shrink-0">APPLY</button>
+              <button onClick={() => dismissWeight(s)} aria-label={`Dismiss ${s.name} suggestion`}
+                className="btn text-bone-400 hover:text-bone-100 shrink-0"><I.x className="w-3.5 h-3.5"/></button>
+            </div>
+          ))}
+
           {/* Search only earns its keep once scrolling does — a couple of
               people don't need it, a couple of dozen do. */}
           {people.length > 5 && (
@@ -3891,6 +4204,30 @@ function AdminCard({ state, setState }) {
             Keywords route a captured task here without it naming the list outright —
             "meeting" on Work catches "book the client meeting" too.
           </p>
+
+          {/* Learned from moving tasks between lists: this word keeps
+              turning up in titles you re-file here. */}
+          {suggestions?.keywords?.map(s => {
+            const list = state.lists.find(l => l.id === s.listId);
+            return (
+              <div key={`${s.listId}-${s.keyword}`} data-testid="keyword-suggestion"
+                className="p-3 rounded-lg border border-strategy/40 bg-strategy/5 flex items-center gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-bone-100">
+                    Route "{s.keyword}" to {list?.name || 'that list'}?
+                  </div>
+                  <div className="text-[10px] text-bone-400 truncate">
+                    You moved {s.count} tasks with that word here — e.g. {s.titles.slice(0, 2).join('; ')}
+                  </div>
+                </div>
+                <button onClick={() => applyKeyword(s)}
+                  className="btn px-2.5 py-1.5 rounded text-[10px] font-mono tracking-wider bg-strategy text-ink-950 font-semibold shrink-0">ADD</button>
+                <button onClick={() => dismissKeyword(s)} aria-label={`Dismiss ${s.keyword} suggestion`}
+                  className="btn text-bone-400 hover:text-bone-100 shrink-0"><I.x className="w-3.5 h-3.5"/></button>
+              </div>
+            );
+          })}
+
           {state.lists.map(l => (
             <ListRow key={l.id} l={l}
               onUpdate={patch => updateList(l.id, patch)}

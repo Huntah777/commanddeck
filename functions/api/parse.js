@@ -30,6 +30,8 @@
    configured lists — which list a task belongs in. Capture never fails.
    ============================================================ */
 
+import { learningExamples } from './learn.js';
+
 const MAX_TEXT       = 500;
 const MODEL          = '@cf/meta/llama-3.1-8b-instruct-fast';
 const AI_TIMEOUT_MS  = 6_000;
@@ -290,7 +292,17 @@ const SCHEMA = {
   required: ['title', 'person', 'due', 'list'],
 };
 
-const prompt = (text, today, people, lists) => [
+/* Captures this user has previously corrected, as input → what they
+   actually wanted. Code already learns routing and priority from the
+   same corrections (see learn.js); these carry the part code cannot
+   express — how this person words a title. */
+const examplesBlock = (examples) => !examples?.length ? '' : `
+Corrections this user has made to your previous output. Match their
+style; do not copy their content:
+${examples.map(e => `  in:  ${e.input}\n  out: ${JSON.stringify(e.corrected)}`).join('\n')}
+`;
+
+const prompt = (text, today, people, lists, examples) => [
   { role: 'system', content:
 `You extract fields from a short task note. Reply with JSON only.
 Today is ${today} (${WEEKDAYS[weekdayOf(today)]}).
@@ -301,7 +313,7 @@ title  - the task, imperative, in the writer's own words, with the date phrase r
 person - the known person the note names or refers to, exactly as spelled above. "" if none.
 due    - YYYY-MM-DD only if the note states or implies a date. "" otherwise. Never invent one.
 list   - one of the list names above, or "".
-
+${examplesBlock(examples)}
 Extract only. Do not judge importance, urgency or priority.` },
   { role: 'user', content: text },
 ];
@@ -315,7 +327,7 @@ const asObject = (r) => {
 };
 
 async function aiExtract(text, ctx, env) {
-  const run = env.AI.run(MODEL, { messages: prompt(text, ctx.today, ctx.people, ctx.lists), response_format: { type: 'json_schema', json_schema: SCHEMA } });
+  const run = env.AI.run(MODEL, { messages: prompt(text, ctx.today, ctx.people, ctx.lists, ctx.examples), response_format: { type: 'json_schema', json_schema: SCHEMA } });
   /* fetch/AI calls have no timeout of their own, and capture is a
      foreground interaction — a stalled model must not hold it open. */
   const out = await Promise.race([
@@ -353,6 +365,15 @@ export async function onRequest({ request, env }) {
     people: Array.isArray(body?.people) ? body.people.slice(0, 200) : [],
     lists:  Array.isArray(body?.lists)  ? body.lists.slice(0, 50)   : [],
   };
+  /* The client sends the tasks the parser previously filed; the rule for
+     what counts as a correction lives here, in learn.js, rather than
+     being reimplemented in the browser. Capped so the prompt stays small
+     enough for this endpoint to remain inside the free tier. */
+  ctx.examples = learningExamples(
+    Array.isArray(body?.filedTasks) ? body.filedTasks.slice(0, 40) : [],
+    ctx.lists,
+    3,
+  );
 
   let extract, source = 'ai';
   try {

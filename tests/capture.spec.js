@@ -157,21 +157,105 @@ test.describe('natural-language capture', () => {
       .toMatchObject({ title: 'dave needs the deck by friday', quadrant: 'plan', personId: null });
   });
 
-  test('a hand-set quadrant is never overwritten by the parser', async ({ page }) => {
-    // Stated beats inferred. Touching any field opts that capture out.
-    const api = mockParse(page, FILED);
+  test('Today is pure capture — one text box, no pickers', async ({ page }) => {
+    // Capturing on the fly should not ask you to file. Today and the
+    // Matrix stay a single box; the parser does the filing.
+    mockParse(page, FILED);
+    await seed(page, { ui: { view: 'today' } });
+    await page.goto('/');
+    await boot(page);
+
+    const box = page.getByPlaceholder('Capture a task…').first();
+    await box.click();
+    await box.fill('dave needs the deck by friday');
+    await expect(page.getByTestId('capture-picker')).toHaveCount(0);
+  });
+
+  test('Tasks offers a date and list picker for deliberate filing', async ({ page }) => {
+    mockParse(page, FILED);
+    await seed(page); // seeded into the Tasks view
+    await page.goto('/');
+    await boot(page);
+
+    await page.getByPlaceholder('Capture a task…').first().click();
+    const picker = page.getByTestId('capture-picker');
+    await expect(picker).toBeVisible();
+    await expect(picker.getByLabel('Due date')).toBeVisible();
+    await expect(picker.getByLabel('List')).toBeVisible();
+  });
+
+  test('a hand-set date and list survive the parse', async ({ page }) => {
+    // Stated beats inferred: the parser still runs and still assigns the
+    // quadrant and person, it just does not argue with what you typed.
+    mockParse(page, FILED); // wants due 2026-07-31 and l-inbox
     await seed(page);
     await page.goto('/');
     await boot(page);
 
     const box = page.getByPlaceholder('Capture a task…').first();
+    await box.click();
     await box.fill('dave needs the deck by friday');
-    await page.locator('select').filter({ hasText: 'Eliminate' }).first().selectOption('do');
+    await page.getByTestId('capture-picker').getByLabel('Due date').fill('2026-09-15');
+    await page.getByTestId('capture-picker').getByLabel('List').selectOption('l-work');
     await box.press('Enter');
 
-    await page.waitForTimeout(1_500);
-    expect(api.calls).toBe(0);
-    expect((await tasks(page))[0]).toMatchObject({ quadrant: 'do', title: 'dave needs the deck by friday' });
+    await expect.poll(async () => (await tasks(page))[0], { timeout: 10_000 }).toMatchObject({
+      due: '2026-09-15',        // not the parser's 2026-07-31
+      listId: 'l-work',         // not the parser's l-inbox
+      quadrant: 'delegate',     // still parsed
+      personId: 'pp-mgr',       // still parsed
+    });
+  });
+
+  test('a field set by hand is not recorded as a correction', async ({ page }) => {
+    // The user pre-empted the parser rather than disagreeing with it.
+    // Recording a disagreement that never happened would teach the
+    // system a rule from a conversation it never had.
+    mockParse(page, FILED);
+    await seed(page);
+    await page.goto('/');
+    await boot(page);
+
+    const box = page.getByPlaceholder('Capture a task…').first();
+    await box.click();
+    await box.fill('dave needs the deck by friday');
+    await page.getByTestId('capture-picker').getByLabel('Due date').fill('2026-09-15');
+    await box.press('Enter');
+
+    await expect.poll(async () => (await tasks(page))[0]?.ai, { timeout: 10_000 }).toBeTruthy();
+    const ai = (await tasks(page))[0].ai;
+    expect(ai).not.toHaveProperty('due');   // never claimed, so never a disagreement
+    expect(ai.quadrant).toBe('delegate');   // the fields it did decide are still recorded
+  });
+
+  test('the pickers reset after each capture', async ({ page }) => {
+    // A date left over from the last task would silently attach to the
+    // next one.
+    mockParse(page, FILED);
+    await seed(page);
+    await page.goto('/');
+    await boot(page);
+
+    const box = page.getByPlaceholder('Capture a task…').first();
+    await box.click();
+    await page.getByTestId('capture-picker').getByLabel('Due date').fill('2026-09-15');
+    await box.fill('first task');
+    await box.press('Enter');
+
+    await box.click();
+    await expect(page.getByTestId('capture-picker').getByLabel('Due date')).toHaveValue('');
+  });
+
+  test('the contextual default still applies before the parse lands', async ({ page }) => {
+    // Losing the dropdowns must not lose the context: capturing from a
+    // given list still starts the task there, the parser just refines it.
+    mockParse(page, FILED, { hold: true });
+    await seed(page);
+    await page.goto('/');
+    await boot(page);
+
+    await capture(page, 'something with no list in the words');
+    expect((await tasks(page))[0]).toMatchObject({ listId: 'l-inbox', quadrant: 'plan' });
   });
 
   test('a failed parse leaves the task exactly as captured', async ({ page }) => {
@@ -236,17 +320,33 @@ test.describe('natural-language capture', () => {
     await expect.poll(() => auth, { timeout: 10_000 }).toBe('Bearer test-token');
   });
 
-  test('a re-filed task is remembered as a correction', async ({ page }) => {
-    // Re-filing is the only correction signal there is — it is what makes
-    // the weights self-tuning, so the parser's own choice has to survive
-    // alongside the one the user made.
+  test('the parser\'s whole decision is kept, including the original text', async ({ page }) => {
+    // Corrections are the only training signal this app has, so the full
+    // filing has to survive alongside whatever the task becomes — and the
+    // raw capture with it, or there is no input to learn from.
     mockParse(page, FILED);
     await seed(page);
     await page.goto('/');
     await boot(page);
 
     await capture(page, 'dave needs the deck by friday');
-    await expect.poll(async () => (await tasks(page))[0]?.aiQuadrant, { timeout: 10_000 }).toBe('delegate');
+    await expect.poll(async () => (await tasks(page))[0]?.ai, { timeout: 10_000 }).toMatchObject({
+      raw: 'dave needs the deck by friday',
+      title: 'Send Dave the deck',
+      quadrant: 'delegate',
+      due: '2026-07-31',
+      personId: 'pp-mgr',
+    });
+  });
+
+  test('editing a filed task leaves the disagreement legible', async ({ page }) => {
+    mockParse(page, FILED);
+    await seed(page);
+    await page.goto('/');
+    await boot(page);
+
+    await capture(page, 'dave needs the deck by friday');
+    await expect.poll(async () => (await tasks(page))[0]?.ai?.quadrant, { timeout: 10_000 }).toBe('delegate');
 
     await page.getByText('Send Dave the deck').click();
     await page.locator('select').filter({ hasText: 'Delegate' }).first().selectOption('do');
@@ -254,6 +354,43 @@ test.describe('natural-language capture', () => {
 
     const t = (await tasks(page))[0];
     expect(t.quadrant).toBe('do');
-    expect(t.aiQuadrant).toBe('delegate'); // the disagreement is still legible
+    expect(t.ai.quadrant).toBe('delegate');
+  });
+
+  test('a rewritten title is captured as a correction too', async ({ page }) => {
+    // Title is the one field only the model produces, so a rewrite is the
+    // only way to teach it how this person words things.
+    mockParse(page, FILED);
+    await seed(page);
+    await page.goto('/');
+    await boot(page);
+
+    await capture(page, 'dave needs the deck by friday');
+    await expect.poll(async () => (await tasks(page))[0]?.ai?.title, { timeout: 10_000 }).toBe('Send Dave the deck');
+
+    await page.getByText('Send Dave the deck').click();
+    // The Title field: the div holding the TITLE label, then its input.
+    await page.locator('div').filter({ hasText: /^TITLE$/ }).locator('..').locator('input').first()
+      .fill('Email Dave the Q3 deck');
+    await page.getByRole('button', { name: /save/i }).first().click();
+
+    const t = (await tasks(page))[0];
+    expect(t.title).toBe('Email Dave the Q3 deck');
+    expect(t.ai.title).toBe('Send Dave the deck'); // what it said, still there to learn from
+  });
+
+  test('undo clears the filing rather than recording it as a correction', async ({ page }) => {
+    // Rejecting the whole parse is not a rule to learn — it would poison
+    // the examples with a title the user never actually wanted.
+    mockParse(page, FILED);
+    await seed(page);
+    await page.goto('/');
+    await boot(page);
+
+    await capture(page, 'dave needs the deck by friday');
+    await expect(page.getByTestId('parse-receipt')).toBeVisible({ timeout: 10_000 });
+    await page.getByTestId('parse-receipt').getByText('UNDO').click();
+
+    await expect.poll(async () => (await tasks(page))[0]?.ai, { timeout: 5_000 }).toBeNull();
   });
 });
