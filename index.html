@@ -3510,6 +3510,113 @@ function AppZone() {
 }
 
 /* ------------------------------------------------------------------
+   PERSON ROW  — collapsed by default so a long people list stays
+   scannable; expands to edit name, aliases (as chips — one person is
+   often "wife" to the capture box and "Aisha" to everyone else) and
+   the importance weight.
+------------------------------------------------------------------- */
+/* Deterministic hue from the id, so a person's colour is stable across
+   sessions and devices without needing to store one. */
+const personHue = (id) => {
+  let h = 0;
+  for (let i = 0; i < String(id).length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return h % 360;
+};
+
+function PersonRow({ p, expanded, onToggle, onUpdate, onDelete, movedCount }) {
+  const [aliasInput, setAliasInput] = useState('');
+  const weight = p.weight ?? 3;
+  const aliases = p.aliases || [];
+  const hue = personHue(p.id);
+
+  const addAlias = () => {
+    const v = aliasInput.trim();
+    if (!v) return setAliasInput('');
+    if (aliases.some(a => a.toLowerCase() === v.toLowerCase())) return setAliasInput('');
+    onUpdate({ aliases: [...aliases, v] });
+    setAliasInput('');
+  };
+  const removeAlias = (a) => onUpdate({ aliases: aliases.filter(x => x !== a) });
+
+  return (
+    <div data-testid="person-row" className="rounded-lg border border-ink-700 overflow-hidden">
+      <button onClick={onToggle} aria-expanded={expanded}
+        className="w-full flex items-center gap-3 p-3 text-left hover:bg-ink-800/50 transition-colors">
+        <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
+          style={{ background: `hsl(${hue} 45% 20%)`, color: `hsl(${hue} 75% 78%)` }}>
+          {(p.name || '?').trim().charAt(0).toUpperCase() || '?'}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className="text-sm text-bone-100 truncate">{p.name || 'Unnamed'}</span>
+            {movedCount > 0 && (
+              <span title={`${movedCount} re-filed task${movedCount === 1 ? '' : 's'}`}
+                className="w-1.5 h-1.5 rounded-full bg-combat shrink-0"/>
+            )}
+          </div>
+          {aliases.length > 0 && (
+            <div className="text-[10px] text-bone-400/80 truncate">
+              also {aliases.slice(0, 3).join(', ')}{aliases.length > 3 ? ` +${aliases.length - 3}` : ''}
+            </div>
+          )}
+        </div>
+        <span className={`text-[10px] font-mono tracking-widest px-2 py-1 rounded shrink-0 ${weight >= 3 ? 'text-strategy border border-strategy/40' : 'text-bone-400 border border-ink-700'}`}>
+          {weight}
+        </span>
+        <I.chev className={`w-3.5 h-3.5 text-bone-400 shrink-0 transition-transform ${expanded ? 'rotate-180' : ''}`}/>
+      </button>
+
+      {expanded && (
+        <div className="border-t border-ink-700 p-3 space-y-3 fadeUp">
+          <div className="flex items-center gap-2">
+            <input value={p.name} placeholder="Name" autoFocus={!p.name}
+              onChange={e => onUpdate({ name: e.target.value })}
+              className="flex-1 min-w-0 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-strategy/50"/>
+            <button onClick={onDelete}
+              className="btn px-2.5 py-2 rounded-lg border border-ink-700 text-bone-400 hover:text-combat text-xs shrink-0">✕</button>
+          </div>
+
+          <div>
+            <div className="text-[10px] font-mono tracking-widest text-bone-500 mb-1.5">ALSO KNOWN AS</div>
+            <div className="flex flex-wrap gap-1.5 mb-1.5">
+              {aliases.map(a => (
+                <span key={a} className="inline-flex items-center gap-1 bg-ink-800 border border-ink-700 rounded-full pl-2.5 pr-1 py-1 text-xs text-bone-200">
+                  {a}
+                  <button onClick={() => removeAlias(a)} aria-label={`Remove ${a}`}
+                    className="btn w-4 h-4 rounded-full flex items-center justify-center text-bone-400 hover:text-combat hover:bg-ink-700">×</button>
+                </span>
+              ))}
+              {aliases.length === 0 && <span className="text-xs text-bone-400/60 italic py-1">No other names yet</span>}
+            </div>
+            <input value={aliasInput} placeholder="wife, the boss, mum… — Enter to add"
+              onChange={e => setAliasInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addAlias(); } }}
+              onBlur={addAlias}
+              className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-xs text-bone-300 focus:outline-none focus:border-strategy/50"/>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <input type="range" min="1" max="5" step="1" value={weight}
+              onChange={e => onUpdate({ weight: Number(e.target.value) })}
+              aria-label={`${p.name || 'person'} weight`} className="flex-1 accent-strategy"/>
+            <span className="text-[10px] font-mono tracking-widest text-bone-400 w-28 text-right shrink-0">
+              {weight} · {weight >= 3 ? 'IMPORTANT' : 'BACKGROUND'}
+            </span>
+          </div>
+
+          {movedCount > 0 && (
+            <div className="text-[10px] text-bone-400/80">
+              You re-filed {movedCount} of their {movedCount === 1 ? 'task' : 'tasks'} —
+              {weight >= 3 ? ' consider lowering' : ' consider raising'} this weight.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
    ADMIN CARD  — configure pillars, quadrants, lists, fasting days
 ------------------------------------------------------------------- */
 function AdminCard({ state, setState }) {
@@ -3556,16 +3663,30 @@ function AdminCard({ state, setState }) {
      parser only ever spots WHO — this table decides how much they
      count. See functions/api/parse.js. ── */
   const people = state.people || [];
+  const [peopleQuery, setPeopleQuery] = useState('');
+  const [expandedPerson, setExpandedPerson] = useState(null);
+
   const updatePerson = (id, patch) =>
     setState(s => ({ ...s, people: (s.people || []).map(p => p.id === id ? { ...p, ...patch, modifiedAt: Date.now() } : p) }));
   const deletePerson = (id) => {
     if (!confirm('Remove this person? Tasks keep their quadrant.')) return;
     setState(s => tomb({ ...s, people: (s.people || []).filter(p => p.id !== id) }, id));
+    if (expandedPerson === id) setExpandedPerson(null);
   };
   const addPerson = () => {
     const name = prompt('Name:'); if (!name?.trim()) return;
-    setState(s => ({ ...s, people: [...(s.people || []), { id: `pp-${Date.now()}`, name: name.trim(), aliases: [], weight: 3, modifiedAt: Date.now() }] }));
+    const id = `pp-${Date.now()}`;
+    setState(s => ({ ...s, people: [...(s.people || []), { id, name: name.trim(), aliases: [], weight: 3, modifiedAt: Date.now() }] }));
+    setExpandedPerson(id); // open straight away — the next thing to do is add aliases
   };
+  /* Heaviest weight first, so a list that has grown long still surfaces
+     the people whose requests matter most without scrolling for them. */
+  const visiblePeople = useMemo(() => {
+    const q = peopleQuery.trim().toLowerCase();
+    const found = !q ? people : people.filter(p =>
+      p.name?.toLowerCase().includes(q) || (p.aliases || []).some(a => a.toLowerCase().includes(q)));
+    return [...found].sort((a, b) => (b.weight ?? 3) - (a.weight ?? 3) || (a.name || '').localeCompare(b.name || ''));
+  }, [people, peopleQuery]);
   /* How often you overruled the parser on this person's tasks. Re-filing
      is the only correction signal there is, and a run of them usually
      means the weight is wrong rather than the parse. */
@@ -3657,42 +3778,36 @@ function AdminCard({ state, setState }) {
             Capture names someone and the weight below files the task. 3 is neutral —
             above it lands in <strong>Do</strong> or <strong>Schedule</strong>, below it in <strong>Delegate</strong> or <strong>Eliminate</strong>.
           </p>
+
           {people.length === 0 && (
             <p className="text-xs text-bone-400/70 italic py-2">
               Nobody yet. Add the people whose requests should outrank the rest.
             </p>
           )}
-          {people.map(p => {
-            const moved = refiles(p.id);
-            return (
-              <div key={p.id} data-testid="person-row" className="p-3 rounded-lg border border-ink-700 space-y-2">
-                <div className="flex items-center gap-2">
-                  <input value={p.name} placeholder="Name"
-                    onChange={e => updatePerson(p.id, { name: e.target.value })}
-                    className="flex-1 min-w-0 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-strategy/50"/>
-                  <button onClick={() => deletePerson(p.id)}
-                    className="btn px-2.5 py-2 rounded-lg border border-ink-700 text-bone-400 hover:text-combat text-xs shrink-0">✕</button>
-                </div>
-                <input value={(p.aliases || []).join(', ')} placeholder="Also called… (wife, the boss)"
-                  onChange={e => updatePerson(p.id, { aliases: e.target.value.split(',').map(a => a.trim()).filter(Boolean) })}
-                  className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-xs text-bone-300 focus:outline-none focus:border-strategy/50"/>
-                <div className="flex items-center gap-3">
-                  <input type="range" min="1" max="5" step="1" value={p.weight ?? 3}
-                    onChange={e => updatePerson(p.id, { weight: Number(e.target.value) })}
-                    aria-label={`${p.name} weight`} className="flex-1 accent-strategy"/>
-                  <span className="text-[10px] font-mono tracking-widest text-bone-400 w-28 text-right shrink-0">
-                    {p.weight ?? 3} · {(p.weight ?? 3) >= 3 ? 'IMPORTANT' : 'BACKGROUND'}
-                  </span>
-                </div>
-                {moved > 0 && (
-                  <div className="text-[10px] text-bone-400/80">
-                    You re-filed {moved} of their {moved === 1 ? 'task' : 'tasks'} —
-                    {(p.weight ?? 3) >= 3 ? ' consider lowering' : ' consider raising'} this weight.
-                  </div>
-                )}
-              </div>
-            );
-          })}
+
+          {/* Search only earns its keep once scrolling does — a couple of
+              people don't need it, a couple of dozen do. */}
+          {people.length > 5 && (
+            <input value={peopleQuery} onChange={e => setPeopleQuery(e.target.value)}
+              placeholder="Search people…"
+              className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-strategy/50"/>
+          )}
+
+          {people.length > 0 && visiblePeople.length === 0 && (
+            <p className="text-xs text-bone-400/70 italic py-2">No one matches "{peopleQuery}".</p>
+          )}
+
+          <div className="space-y-2">
+            {visiblePeople.map(p => (
+              <PersonRow key={p.id} p={p}
+                expanded={expandedPerson === p.id}
+                onToggle={() => setExpandedPerson(id => id === p.id ? null : p.id)}
+                onUpdate={patch => updatePerson(p.id, patch)}
+                onDelete={() => deletePerson(p.id)}
+                movedCount={refiles(p.id)}/>
+            ))}
+          </div>
+
           <button onClick={addPerson}
             className="btn w-full py-2 rounded-lg border border-dashed border-ink-700 text-bone-400 hover:text-bone-100 hover:border-bone-400 text-xs">
             + Add person
