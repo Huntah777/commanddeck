@@ -256,6 +256,7 @@ const KEY = 'madinah_v1';
 const TOKEN_KEY = 'madinah_token';
 const ENDPOINT = '/api/state';
 const UI_LOCAL_KEY = 'madinah_ui_local_v1';
+const DIRTY_KEY = 'madinah_dirty_v1';
 
 /* view/selectedDate are per-device UI state, not real settings — kept out
    of the synced blob (see Sync.save) and mirrored here instead, so a
@@ -282,28 +283,45 @@ const Sync = {
     } catch (e) { console.warn('token write failed', e); }
   },
   configured() { return !!this.getToken(); },
+  /* Last server version this device has seen, so an unchanged pull costs a
+     304 instead of the whole blob. Kept in memory only — a fresh page load
+     should always take one full copy. */
+  etag: null,
   async load() {
     const token = this.getToken();
     if (!token) throw new Error('NO_TOKEN');
-    const r = await fetch(ENDPOINT, { cache: 'no-store', headers: { 'Authorization': `Bearer ${token}` } });
+    const headers = { 'Authorization': `Bearer ${token}` };
+    if (this.etag) headers['If-None-Match'] = this.etag;
+    const r = await fetch(ENDPOINT, { cache: 'no-store', headers });
     if (r.status === 401) throw new Error('UNAUTHORIZED');
+    if (r.status === 304) return { notModified: true };
     if (!r.ok) throw new Error(`HTTP_${r.status}`);
-    return await r.json();
+    this.etag = r.headers.get('ETag') || null;
+    return { data: await r.json() };
   },
-  async save(state, clientKnownAt = 0) {
+  /* The part of the state that actually syncs. view/selectedDate are
+     per-device UI, never round-tripped (see madinah_ui_local_v1 in Cache).
+     Shared with the save effect so "did anything syncable change?" can't
+     drift from what actually gets sent. */
+  body(state) {
+    const { view, selectedDate, ...restUi } = state.ui || {};
+    return { ...state, ui: restUi };
+  },
+  async save(state) {
     const token = this.getToken();
     if (!token) throw new Error('NO_TOKEN');
-    /* view/selectedDate are per-device UI state, not real settings — never
-       round-trip them through sync (see madinah_ui_local_v1 in Cache). */
-    const { view, selectedDate, ...restUi } = state.ui || {};
-    const body = { ...state, ui: restUi, clientKnownAt };
+    const body = this.body(state);
     const r = await fetch(ENDPOINT, {
       method: 'PUT',
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     if (r.status === 401) throw new Error('UNAUTHORIZED');
+    if (r.status === 413) throw new Error('TOO_LARGE');
     if (!r.ok) throw new Error(`HTTP_${r.status}`);
+    /* Our own write is the newest version — record it so the next pull can
+       be answered with a 304. */
+    this.etag = r.headers.get('ETag') || null;
     return await r.json().catch(() => ({}));
   },
 };
@@ -316,6 +334,15 @@ const Cache = {
   write(state) {
     try { localStorage.setItem(KEY, JSON.stringify(state)); }
     catch (e) { console.warn('cache write failed', e); }
+  },
+  /* "This device holds edits the server hasn't acknowledged." Persisted, not
+     just held in memory, because the app can be closed mid-flight: on the
+     next launch a dirty cache must be pushed (and merged) rather than
+     silently replaced by whatever the server has. */
+  isDirty() { try { return localStorage.getItem(DIRTY_KEY) === '1'; } catch { return false; } },
+  setDirty(on) {
+    try { on ? localStorage.setItem(DIRTY_KEY, '1') : localStorage.removeItem(DIRTY_KEY); }
+    catch (e) { console.warn('dirty flag write failed', e); }
   },
 };
 
@@ -661,7 +688,35 @@ const SEED = () => ({
     quads: {},            /* { [id]: { title?, sub?, hint? } } */
     fastingDays: [1, 4],  /* Mon=1, Thu=4 */
   },
+  deleted: {},            /* { [id]: deletedAt } — tombstones, see mergeState */
+  logsOff: {},            /* { 'YYYY-MM-DD': { [habitId]: unTickedAt } } */
 });
+
+/* ── Delete bookkeeping ───────────────────────────────────────────
+   Deleting has to be recorded, not just applied: the sync merge treats an
+   absent item as "this device hasn't heard about it", never as "gone", so
+   without a tombstone another device would push the item straight back. ── */
+const TOMBSTONE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+/* Mark ids deleted as of now. Wrap the state update that removes them:
+   `setState(s => tomb({ ...s, tasks: s.tasks.filter(...) }, t.id))` */
+const tomb = (s, ...ids) => ({
+  ...s,
+  deleted: { ...(s.deleted || {}), ...Object.fromEntries(ids.map(id => [id, Date.now()])) },
+});
+
+/* Bulk replacements (wipe, import) delete by omission — diff the id sets and
+   tombstone whatever the replacement dropped, so the removal actually syncs
+   instead of the old items merging straight back in. */
+const COLLECTIONS = ['habits', 'tasks', 'lists', 'blocks', 'goals'];
+const tombMissing = (prev, next) => {
+  const gone = [];
+  for (const key of COLLECTIONS) {
+    const kept = new Set((next?.[key] || []).map(x => x.id));
+    for (const item of prev?.[key] || []) if (!kept.has(item.id)) gone.push(item.id);
+  }
+  return gone.length ? tomb(next, ...gone) : next;
+};
 
 /* ------------------------------------------------------------------
    NOTIFICATION SCHEDULER  +  WEB PUSH (background)
@@ -951,6 +1006,12 @@ function App() {
       habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, ...h })),
       tasks:  (data?.tasks  || []).map(t => ({ reminder: null, ...t })),
       blocks: data?.blocks || SEED().blocks,
+      /* Expire tombstones the same way the server does, so a device that
+         never syncs doesn't accumulate them forever. */
+      deleted: Object.fromEntries(
+        Object.entries(data?.deleted || {}).filter(([, at]) => Date.now() - at < TOMBSTONE_TTL_MS)
+      ),
+      logsOff: data?.logsOff || {},
     };
     /* Re-apply this device's own view/selectedDate — never trust whatever
        (if anything) came from SEED defaults or a remote/merged payload. */
@@ -994,21 +1055,29 @@ function App() {
     }
 
     try {
-      const remote = await Sync.load();
+      const { data: remote } = await Sync.load();
       const remoteEmpty   = !remote?.habits || remote.habits.length === 0;
       const cacheHasData  = cache && cache.habits && cache.habits.length > 0;
 
       if (remoteEmpty && cacheHasData) {
         /* First-time sync: push local up so we don't lose it */
-        await Sync.save(cache, lastPulledAt.current);
-        setState(landToday(hydrate(cache)));
+        const result = await Sync.save(cache);
+        setState(landToday(hydrate(result?.data || cache)));
       } else if (remoteEmpty) {
         const seed = SEED();
-        await Sync.save(seed, lastPulledAt.current);
+        await Sync.save(seed);
         setState(landToday(seed));
+      } else if (cacheHasData && Cache.isDirty()) {
+        /* This device was closed holding edits the server never acknowledged
+           (offline, or killed mid-save). Push them so they merge with what
+           arrived meanwhile — taking the remote copy here would silently
+           discard everything done since the last successful save. */
+        const result = await Sync.save(cache);
+        setState(landToday(hydrate(result?.data || cache)));
       } else {
         setState(landToday(hydrate(remote)));
       }
+      Cache.setDirty(false);
       setSyncStatus('synced');
       lastPulledAt.current = Date.now();
     } catch (e) {
@@ -1087,72 +1156,168 @@ function App() {
     return () => navigator.serviceWorker?.removeEventListener('message', onMsg);
   }, []);
 
-  /* Persist on change: localStorage immediately, API debounced */
-  const skipFirst = useRef(true);
-  const saveTimer = useRef(null);
+  /* ── Sync engine ──────────────────────────────────────────────────
+     Every edit is written to localStorage synchronously and pushed to D1 on
+     a short debounce. Two rules keep several devices honest:
+
+       1. Nothing overwrites unsynced local work. While this device is dirty,
+          a refresh pushes (and the server merges) instead of pulling — and
+          a response that arrives after a newer local edit is discarded
+          rather than applied over it.
+       2. A failed push is retried with backoff and on reconnect, and the
+          dirty flag outlives the tab, so edits made offline survive the app
+          being closed instead of being replaced on next launch.
+     ─────────────────────────────────────────────────────────────────── */
+  const STALE_MS       = 60_000;
+  const SAVE_DEBOUNCE  = 800;
+  const MAX_BACKOFF_MS = 60_000;
+
+  const skipFirst    = useRef(true);
+  const saveTimer    = useRef(null);
+  const retryTimer   = useRef(null);
+  const retries      = useRef(0);
+  const inFlight     = useRef(false);
   const lastPulledAt = useRef(0);
+  const stateRef     = useRef(null);
+  const revRef       = useRef(0);      /* bumped on every local edit */
+  const fromRemote   = useRef(false);  /* next state change came from the server */
+  const pushRef      = useRef(null);
+  const pullRef      = useRef(null);
+  useEffect(() => { stateRef.current = state; }, [state]);
+
+  const scheduleRetry = () => {
+    if (!Cache.isDirty()) return;
+    const n = Math.min(retries.current + 1, 6);
+    retries.current = n;
+    clearTimeout(retryTimer.current);
+    retryTimer.current = setTimeout(() => pushRef.current?.(), Math.min(MAX_BACKOFF_MS, 1000 * 2 ** n));
+  };
+
+  /* Flush local state to the server and adopt the merged result. */
+  const pushNow = async () => {
+    if (!Sync.configured() || !stateRef.current) return;
+    if (inFlight.current) {           // let the in-flight request land first
+      clearTimeout(saveTimer.current);
+      saveTimer.current = setTimeout(() => pushRef.current?.(), 300);
+      return;
+    }
+    clearTimeout(saveTimer.current);  saveTimer.current  = null;
+    clearTimeout(retryTimer.current); retryTimer.current = null;
+
+    const snapshot = stateRef.current;
+    const rev = revRef.current;
+    inFlight.current = true;
+    setSyncStatus('saving');
+    try {
+      const result = await Sync.save(snapshot);
+      retries.current = 0;
+      /* If anything was edited while this was in flight, the response is
+         already stale — applying it would undo the newer edit, and calling
+         ourselves clean would strand it. The pending debounce re-pushes. */
+      if (revRef.current !== rev) return;
+
+      Cache.setDirty(false);
+      lastPulledAt.current = Date.now();
+      setSyncStatus('synced');
+      /* The server merges in concurrent edits from other devices and returns
+         the result, so adopting it is how this device converges. rev is
+         unchanged, so snapshot is still what's on screen. */
+      if (result?.data) {
+        const merged = keepLocalUi(snapshot, hydrate(result.data));
+        if (JSON.stringify(merged) !== JSON.stringify(snapshot)) {
+          fromRemote.current = true;
+          setState(merged);
+        }
+      }
+    } catch (e) {
+      if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
+      else if (e.message === 'TOO_LARGE') { setSyncStatus('toobig'); }
+      else { setSyncStatus('offline'); scheduleRetry(); }
+    } finally {
+      inFlight.current = false;
+    }
+  };
+
+  /* Take the server's copy. Defers to a push whenever this device is dirty. */
+  const pull = async () => {
+    if (!Sync.configured() || inFlight.current) return;
+    if (Cache.isDirty()) return pushRef.current?.();
+    try {
+      const res = await Sync.load();
+      lastPulledAt.current = Date.now();
+      setSyncStatus('synced');
+      if (res.notModified || !res.data || res.data.error) return;
+      /* A payload with no habits key at all is a blank row — never written,
+         or wiped server-side. Adopting it would clear this device, so push
+         what we have instead. (An intentionally empty list is `[]`, which
+         does get adopted.) */
+      if (!res.data.habits) return pushRef.current?.();
+      /* Not dirty and nothing in flight, so state can't be racing us. */
+      const prev = stateRef.current;
+      const merged = keepLocalUi(prev, hydrate(res.data));
+      if (JSON.stringify(merged) !== JSON.stringify(prev)) {
+        fromRemote.current = true;
+        setState(merged);
+      }
+    } catch (e) {
+      if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
+      else setSyncStatus('offline');
+    }
+  };
+
+  useEffect(() => { pushRef.current = pushNow; pullRef.current = pull; });
+
+  /* Persist on change: localStorage immediately, API debounced */
+  const lastSyncable = useRef(null);
   useEffect(() => {
     if (!state) return;
+    const syncable = JSON.stringify(Sync.body(state));
+    const unchanged = syncable === lastSyncable.current;
+    lastSyncable.current = syncable;
+
     if (skipFirst.current) { skipFirst.current = false; return; }
     Cache.write(state);
+    /* A change we just adopted from the server needs caching but not sending
+       straight back — and must not mark this device dirty. */
+    if (fromRemote.current) { fromRemote.current = false; return; }
     if (!Sync.configured()) return;
+    /* Switching tab or stepping the date changes only per-device UI state,
+       which never leaves this device — don't spend a write on it. */
+    if (unchanged) return;
+    revRef.current++;
+    Cache.setDirty(true);
     setSyncStatus('saving');
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      saveTimer.current = null;
-      try {
-        const result = await Sync.save(state, lastPulledAt.current);
-        setSyncStatus('synced');
-        lastPulledAt.current = Date.now();
-        /* The server merges concurrent edits from other devices and hands
-           back the merged result — apply it if it actually differs from
-           what we just sent, so this device converges too. The merge is
-           idempotent, so skipping this on no-op saves is just an optimization,
-           not a correctness requirement. */
-        if (result?.data) {
-          setState(prev => {
-            const merged = keepLocalUi(prev, hydrate(result.data));
-            return JSON.stringify(merged) === JSON.stringify(prev) ? prev : merged;
-          });
-        }
-      }
-      catch (e) {
-        if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
-        else { setSyncStatus('offline'); }
-      }
-    }, 800);
+    saveTimer.current = setTimeout(() => pushRef.current?.(), SAVE_DEBOUNCE);
   }, [state]);
 
-  /* Mirror syncStatus into a ref so the pull effect can read it without a dep */
-  const syncStatusRef = useRef('idle');
-  useEffect(() => { syncStatusRef.current = syncStatus; }, [syncStatus]);
-
-  /* Re-pull from D1 when returning to the tab/PWA after >=60 s away.
-     pageshow covers iOS Safari bfcache restores that visibilitychange misses. */
+  /* Refresh on wake, on reconnect, and on a slow poll while visible, so
+     another device's changes show up without a manual refresh. The poll is
+     answered with a 304 whenever nothing changed. */
   useEffect(() => {
     if (!Sync.configured()) return;
-    const STALE_MS = 60_000;
-    const pull = async () => {
-      if (Date.now() - lastPulledAt.current < STALE_MS) return;
-      if (syncStatusRef.current === 'saving') return;
-      try {
-        const remote = await Sync.load();
-        if (remote && !remote.error) {
-          setState(prev => keepLocalUi(prev, hydrate(remote)));
-          setSyncStatus('synced');
-          lastPulledAt.current = Date.now();
-        }
-      } catch (e) {
-        if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
-      }
+    const wake = () => {
+      if (Cache.isDirty()) { pushRef.current?.(); return; }
+      if (Date.now() - lastPulledAt.current >= STALE_MS) pullRef.current?.();
     };
-    const onVisible  = () => { if (document.visibilityState === 'visible') pull(); };
-    const onPageShow = (e) => { if (e.persisted) pull(); };
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') wake();
+      else if (Cache.isDirty()) pushRef.current?.(); // getting backgrounded — flush now
+    };
+    const onPageShow = (e) => { if (e.persisted) wake(); };
+    const onOnline   = () => { retries.current = 0; wake(); };
+    const poll = setInterval(() => {
+      if (document.visibilityState === 'visible') wake();
+    }, STALE_MS);
+
     document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('pageshow', onPageShow);
+    window.addEventListener('online', onOnline);
     return () => {
+      clearInterval(poll);
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('pageshow', onPageShow);
+      window.removeEventListener('online', onOnline);
     };
   }, []);
 
@@ -1168,12 +1333,14 @@ function App() {
 
   const connectWithToken = async (token) => {
     Sync.setToken(token);
+    Sync.etag = null;
     setSyncStatus('saving');
     try {
-      const remote = await Sync.load();
+      const { data: remote } = await Sync.load();
       const remoteEmpty = !remote?.habits || remote.habits.length === 0;
-      if (remoteEmpty) { await Sync.save(state, lastPulledAt.current); }
+      if (remoteEmpty) { await Sync.save(state); }
       else { setState(landToday(hydrate(remote))); }
+      Cache.setDirty(false);
       setSyncStatus('synced');
       setSetupOpen(false);
       lastPulledAt.current = Date.now();
@@ -1192,23 +1359,20 @@ function App() {
   const disconnect = () => {
     if (!confirm('Stop syncing on this device? Local data stays put.')) return;
     Sync.setToken(null);
+    Sync.etag = null;
+    /* Nothing left to flush to — a stale dirty flag would make the next
+       connect push this device's copy over whatever is there. */
+    Cache.setDirty(false);
     setSyncStatus('local');
   };
 
-  const syncNow = async () => {
+  /* Manual refresh — same rules as the automatic one: send unsynced work
+     first, otherwise take the server's copy. Deliberately goes through the
+     engine so it can't drift from it. */
+  const syncNow = () => {
     if (!Sync.configured()) return;
-    clearTimeout(saveTimer.current);
-    saveTimer.current = null;
-    setSyncStatus('saving');
-    try {
-      const remote = await Sync.load();
-      if (remote && !remote.error) { setState(landToday(hydrate(remote))); }
-      setSyncStatus('synced');
-      lastPulledAt.current = Date.now();
-    } catch (e) {
-      if (e.message === 'UNAUTHORIZED') { Sync.setToken(null); setSyncStatus('unauth'); setSetupOpen(true); }
-      else setSyncStatus('offline');
-    }
+    retries.current = 0;
+    return Cache.isDirty() ? pushRef.current?.() : pullRef.current?.();
   };
 
   return (
@@ -1438,11 +1602,23 @@ function TodayView({ state, setState }) {
 
   const habitsToday = state.habits.filter(h => h.days.includes(dow));
   const log = state.logs[dKey] || {};
+  /* A tick stores when it happened and an un-tick is recorded in logsOff,
+     rather than a tick being bare presence in logs. Presence alone can't
+     survive a merge: the stored `true` unions straight back over the
+     un-tick and the box re-ticks itself. Values stay truthy either way, so
+     every read site is just `log[habitId]` as before. */
   const toggleHabit = (id) => setState(s => {
-    const cur = (s.logs[dKey] || {})[id];
-    const next = { ...(s.logs[dKey] || {}) };
-    if (cur) delete next[id]; else next[id] = true;
-    return { ...s, logs: { ...s.logs, [dKey]: next } };
+    const on = (s.logs[dKey] || {})[id];
+    const at = Date.now();
+    const logs    = { ...(s.logs[dKey]    || {}) };
+    const logsOff = { ...(s.logsOff?.[dKey] || {}) };
+    if (on) { delete logs[id]; logsOff[id] = at; }
+    else    { logs[id] = at;   delete logsOff[id]; }
+    return {
+      ...s,
+      logs:    { ...s.logs,       [dKey]: logs },
+      logsOff: { ...(s.logsOff || {}), [dKey]: logsOff },
+    };
   });
 
   /* tasks due today or undated and not done */
@@ -1692,7 +1868,7 @@ function Timeline({ state, setState, dow, dKey, sel }) {
             setEditing(null); setAdding(null);
           }}
           onDelete={(id)=>{
-            setState(s => ({ ...s, blocks: s.blocks.filter(x => x.id !== id) }));
+            setState(s => tomb({ ...s, blocks: s.blocks.filter(x => x.id !== id) }, id));
             setEditing(null);
           }}
           currentDow={dow}
@@ -1851,7 +2027,7 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart }) {
     ...s,
     tasks: s.tasks.map(x => x.id === t.id ? { ...x, done: !x.done, doneAt: !x.done ? Date.now() : null, modifiedAt: Date.now() } : x),
   }));
-  const remove = () => setState(s => ({ ...s, tasks: s.tasks.filter(x => x.id !== t.id) }));
+  const remove = () => setState(s => tomb({ ...s, tasks: s.tasks.filter(x => x.id !== t.id) }, t.id));
 
   return (
     <>
@@ -2037,7 +2213,7 @@ function HabitsView({ state, setState }) {
             });
             setAdding(false); setEditing(null);
           }}
-          onDelete={(id)=>{ setState(s=>({ ...s, habits: s.habits.filter(x=>x.id!==id) })); setEditing(null); }}/>
+          onDelete={(id)=>{ setState(s=>tomb({ ...s, habits: s.habits.filter(x=>x.id!==id) }, id)); setEditing(null); }}/>
       )}
     </div>
   );
@@ -2952,13 +3128,14 @@ function GoalReminderCard({ state, setState }) {
 }
 
 function SyncCard({ status, onConfigure, onDisconnect }) {
-  const connected = status === 'synced' || status === 'saving' || status === 'offline';
+  const connected = status === 'synced' || status === 'saving' || status === 'offline' || status === 'toobig';
   const label = {
     idle:'…', local:'Local only',
     saving:'Saving to D1…',
     synced:'In sync with Cloudflare D1',
-    offline:'Connected, but currently offline',
+    offline:'Offline — changes are saved here and will sync when you reconnect',
     unauth:'Token rejected',
+    toobig:'Too much data to sync — export a backup and trim old entries',
   }[status] || status;
   return (
     <div className="card p-5">
@@ -3022,11 +3199,11 @@ function AdminCard({ state, setState }) {
     setState(s => ({ ...s, lists: s.lists.map(l => l.id === id ? { ...l, ...patch, modifiedAt: Date.now() } : l) }));
   const deleteList = (id) => {
     if (!confirm('Delete this list? Tasks will move to Inbox.')) return;
-    setState(s => ({
+    setState(s => tomb({
       ...s,
       lists: s.lists.filter(l => l.id !== id),
       tasks: s.tasks.map(t => t.listId === id ? { ...t, listId: 'l-inbox', modifiedAt: Date.now() } : t),
-    }));
+    }, id));
   };
   const addList = () => {
     const name = prompt('List name:'); if (!name?.trim()) return;
@@ -3168,14 +3345,20 @@ function DangerZone({ state, setState, hydrate }) {
     const f = e.target.files?.[0]; if (!f) return;
     const reader = new FileReader();
     reader.onload = () => {
-      try { const parsed = JSON.parse(reader.result); if (parsed.habits) setState(hydrate(parsed)); }
+      /* Import and reset replace everything, so anything the replacement
+         drops has to be tombstoned — otherwise the sync merge reads the
+         missing items as "not heard about" and hands them straight back. */
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (parsed.habits) setState(s => tombMissing(s, hydrate(parsed)));
+      }
       catch(err){ alert('Import failed: ' + err.message); }
     };
     reader.readAsText(f);
     e.target.value = '';
   };
   const reset = () => {
-    if (confirm('Wipe everything and restore the default seed?')) setState(SEED());
+    if (confirm('Wipe everything and restore the default seed?')) setState(s => tombMissing(s, SEED()));
   };
 
   return (
@@ -3580,7 +3763,7 @@ function GoalsView({ state, setState }) {
   };
 
   const deleteGoal = (id) => {
-    setState(s => ({ ...s, goals: (s.goals || []).filter(x => x.id !== id) }));
+    setState(s => tomb({ ...s, goals: (s.goals || []).filter(x => x.id !== id) }, id));
     setEditing(null);
   };
 
@@ -3932,6 +4115,7 @@ function SyncBadge({ status, onClick }) {
     synced:  { text:'D1',        color:'#10b981' },
     offline: { text:'OFFLINE',   color:'#ef4444' },
     unauth:  { text:'UNAUTHED',  color:'#ef4444' },
+    toobig:  { text:'TOO BIG',   color:'#ef4444' },
   };
   const m = map[status] || map.idle;
   const pulse = status === 'saving';

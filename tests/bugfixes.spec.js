@@ -188,6 +188,11 @@ test.describe('Bug fixes', () => {
     await page.locator('button').filter({ hasText: /^‹$/ }).first().click();
     await expect(async () => expect(await readDate()).toBe(expected)).toPass({ timeout: 10_000 });
 
+    // Stepping the date alone no longer touches the network, so tick a habit
+    // to force a real round-trip while sitting on the past day — that is the
+    // response that used to drag the view back to today.
+    await page.locator('button').filter({ hasText: 'Read' }).first().click();
+
     // Well past the 800ms save debounce and its merged response.
     await page.waitForTimeout(2_500);
     expect(await readDate()).toBe(expected);

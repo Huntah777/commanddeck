@@ -11,6 +11,16 @@ CREATE TABLE IF NOT EXISTS state (
 -- Seed the single row so PUT can always UPSERT cleanly
 INSERT OR IGNORE INTO state (id, data, updated_at) VALUES (1, '{}', 0);
 
+-- `data` is the whole app state as one JSON blob, merged server-side on every
+-- PUT (see functions/api/state.js). Two fields exist purely for that merge:
+--   deleted  { [id]: deletedAt }                      — tombstones
+--   logsOff  { 'YYYY-MM-DD': { [habitId]: at } }      — habit un-ticks
+-- Both are needed because absence can't mean "deleted": a device that hasn't
+-- heard about an item yet pushes a payload without it. Both are garbage-
+-- collected after 90 days.
+-- `updated_at` doubles as the ETag/optimistic-concurrency version, so it must
+-- stay strictly increasing.
+
 -- Web Push subscriptions + notification schedule (one row per device/browser)
 CREATE TABLE IF NOT EXISTS push_subs (
   id           TEXT PRIMARY KEY,   -- last 32 chars of the push endpoint (stable device ID)

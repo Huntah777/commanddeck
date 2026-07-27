@@ -1,6 +1,6 @@
 /* Bump on every deploy: the shell is served cache-first, so a stale cache name
    keeps serving the previous index.html indefinitely. */
-const CACHE = 'commanddeck-v7';
+const CACHE = 'commanddeck-v8';
 
 const SHELL = [
   '/',
