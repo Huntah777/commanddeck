@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { buildTodaysSchedule, nextFireAt, staleAfter } from '../push-worker/index.js';
+import { buildTodaysSchedule, nextFireAt, staleAfter, salahOffsets, salahMinutes } from '../push-worker/index.js';
 
 /* The Cron Worker's plan builder decides what gets delivered and when, for
    every device, whether or not the app is running. It had no tests. No browser
@@ -97,6 +97,57 @@ test.describe('notification plan — suppression', () => {
     const open = { tasks: [{ id: 't1', title: 'x', reminder: new Date(at).toISOString(), done: false }] };
     expect(find((await build(done)).schedule, 't-t1')).toBeUndefined();
     expect(find((await build(open)).schedule, 't-t1').fireAt).toBe(at);
+  });
+});
+
+test.describe('notification plan — prayer time offsets', () => {
+  const withTimings = (fn) => async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ data: { timings: { Fajr: '03:12 (BST)', Dhuhr: '13:05 (BST)', Isha: '23:50 (BST)' } } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+    try { await fn(); } finally { globalThis.fetch = realFetch; }
+  };
+
+  test('an offset moves the notification, not just the displayed time', withTimings(async () => {
+    // The reminder has to land on the minute the app shows, so the worker
+    // applies the same offsets the client does.
+    const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Dhuhr: 5 } } };
+    const { schedule } = await build(state);
+
+    expect(find(schedule, 'salah-Dhuhr').fireAt).toBe(Date.UTC(2026, 6, 15, 12, 10, 0)); // 13:10 BST
+    expect(find(schedule, 'salah-Fajr').fireAt).toBe(Date.UTC(2026, 6, 15, 2, 12, 0));   // untouched
+  }));
+
+  test('a negative offset works too', withTimings(async () => {
+    const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Fajr: -7 } } };
+    const { schedule } = await build(state);
+    expect(find(schedule, 'salah-Fajr').fireAt).toBe(Date.UTC(2026, 6, 15, 2, 5, 0)); // 03:05 BST
+  }));
+
+  test('an offset cannot push a prayer onto the next day', withTimings(async () => {
+    // Isha at 23:50 with a large positive offset must stay on today.
+    const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Isha: 60 } } };
+    const { schedule } = await build(state);
+    const isha = find(schedule, 'salah-Isha').fireAt;
+    expect(isha).toBeLessThan(Date.UTC(2026, 6, 15, 23, 0, 0)); // still the 15th in UTC terms
+    expect(salahMinutes('23:50 (BST)', 60)).toBe(24 * 60 - 1);
+  }));
+
+  test('offsets default to zero and are clamped to a sane range', () => {
+    expect(salahOffsets(undefined)).toEqual({ Fajr: 0, Dhuhr: 0, Asr: 0, Maghrib: 0, Isha: 0 });
+    expect(salahOffsets({ salahOffsets: { Dhuhr: 5 } }).Dhuhr).toBe(5);
+    expect(salahOffsets({ salahOffsets: { Dhuhr: 'nonsense' } }).Dhuhr).toBe(0);
+    expect(salahOffsets({ salahOffsets: { Dhuhr: 9999 } }).Dhuhr).toBe(60);
+    expect(salahOffsets({ salahOffsets: { Dhuhr: -9999 } }).Dhuhr).toBe(-60);
+  });
+
+  test('salahMinutes parses Aladhan formatting and applies the offset', () => {
+    expect(salahMinutes('13:05 (BST)', 0)).toBe(13 * 60 + 5);
+    expect(salahMinutes('13:05', 5)).toBe(13 * 60 + 10);
+    expect(salahMinutes('00:10 (GMT)', -30)).toBe(0); // clamped, never yesterday
+    expect(salahMinutes(undefined, 5)).toBeNull();
   });
 });
 

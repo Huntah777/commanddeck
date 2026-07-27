@@ -237,6 +237,29 @@ const SALAH_NAMES = { // kept in sync by hand with index.html's SALAH_NAMES
   Isha:    { en: 'Isha',    ar: 'العشاء' },
 };
 
+/* Per-prayer offsets, mirroring index.html's salahOffsets/salahMinutes. The
+   notification has to land on the same minute the app displays, so these two
+   implementations must agree — including the clamping. */
+const SALAH_OFFSET_LIMIT = 60;
+
+export function salahOffsets(ui) {
+  const out = {};
+  for (const key of Object.keys(SALAH_NAMES)) {
+    const v = Number(ui?.salahOffsets?.[key]);
+    out[key] = Number.isFinite(v) ? Math.max(-SALAH_OFFSET_LIMIT, Math.min(SALAH_OFFSET_LIMIT, Math.round(v))) : 0;
+  }
+  return out;
+}
+
+/* "HH:MM (TZ)" → minutes from midnight with the offset applied, clamped into
+   the day so a nudge can never move a prayer onto the wrong date. */
+export function salahMinutes(raw, offsetMin) {
+  if (!raw) return null;
+  const [hh, mm] = String(raw).split(' ')[0].split(':').map(Number);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  return Math.max(0, Math.min(24 * 60 - 1, hh * 60 + mm + (Number(offsetMin) || 0)));
+}
+
 /* Builds the FULL plan for today — entries already in the past are included.
    Callers depend on this being a pure function of (state, day), so it can be
    recomputed every tick and compared or replaced safely. What has actually
@@ -277,11 +300,12 @@ export async function buildTodaysSchedule(state, tz, parts) {
       );
       if (r.ok) {
         const timings = (await r.json())?.data?.timings || {};
+        const offsets = salahOffsets(state.ui);
         for (const [key, names] of Object.entries(SALAH_NAMES)) {
-          const raw = timings[key];
-          if (!raw) continue;
-          const [hh, mm] = raw.split(' ')[0].split(':').map(Number);
-          push(`salah-${key}`, names.en, `${names.ar} · Time to pray`, zonedHmToUtcMs(y, mo, d, hh, mm, tz));
+          const mins = salahMinutes(timings[key], offsets[key]);
+          if (mins == null) continue;
+          push(`salah-${key}`, names.en, `${names.ar} · Time to pray`,
+               zonedHmToUtcMs(y, mo, d, Math.floor(mins / 60), mins % 60, tz));
         }
       } else {
         salahOk = false;

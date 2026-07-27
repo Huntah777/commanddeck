@@ -519,7 +519,6 @@ const fromHM = (s) => { const [h,m] = s.split(':').map(Number); return (h||0)*60
    SALAH TIMES  ─ Aladhan API (free, no key required)
 ------------------------------------------------------------------- */
 const SALAH_LOC_KEY   = 'madinah_salah_loc';
-const SALAH_CACHE_PFX = 'madinah_salah_';
 const SALAH_DURATION  = 20; /* minutes of timeline space per prayer */
 /* Curated list — the actual value is a free-form IANA string, this is just
    a convenience picker covering common timezones for this app's audience. */
@@ -550,14 +549,121 @@ const SALAH_NAMES = {
   Isha:    { en:'Isha',    ar:'العشاء' },
 };
 
-function useSalahTimes(dKey, method, school, syncedLoc, onLocationChange) {
-  const [salahTimes, setSalahTimes] = useState(null);
-  const [location, setLocation]     = useState(() => {
+/* Per-prayer adjustment in minutes — e.g. praying Dhuhr with a jama'ah that
+   starts 5 minutes after the calculated time. Applied after the API response
+   rather than through Aladhan's `tune` parameter, so the client and the Cron
+   Worker (which has its own copy of this rule) can't disagree, and changing an
+   offset never invalidates a cached timetable. */
+/* "just now" / "12m ago" / "3h ago" / "2d ago" */
+function agoLabel(at) {
+  if (!at) return 'never';
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (s < 60)    return 'just now';
+  if (s < 3600)  return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+const SALAH_OFFSET_LIMIT = 60;
+function salahOffsets(ui) {
+  const out = {};
+  for (const key of Object.keys(SALAH_NAMES)) {
+    const v = Number(ui?.salahOffsets?.[key]);
+    out[key] = Number.isFinite(v) ? Math.max(-SALAH_OFFSET_LIMIT, Math.min(SALAH_OFFSET_LIMIT, Math.round(v))) : 0;
+  }
+  return out;
+}
+
+/* Aladhan returns "HH:MM (TZ)". → minutes from midnight, offset applied.
+   Clamped into the day: offsets are meant to be a nudge, and letting one spill
+   past midnight would silently move a prayer to the wrong date. */
+function salahMinutes(raw, offsetMin) {
+  if (!raw) return null;
+  const base = fromHM(String(raw).split(' ')[0]);
+  if (!Number.isFinite(base)) return null;
+  return Math.max(0, Math.min(24 * 60 - 1, base + (Number(offsetMin) || 0)));
+}
+
+/* Aladhan's monthly calendar → { 'YYYY-MM-DD': timings }. One request covers a
+   whole month, so ordinary day-to-day use needs no network at all and a blip
+   on any given morning can't leave the app without prayer times. */
+function parseSalahCalendar(payload) {
+  const days = {};
+  for (const entry of payload?.data || []) {
+    /* gregorian.date is DD-MM-YYYY */
+    const [d, mo, y] = String(entry?.date?.gregorian?.date || '').split('-');
+    if (!y || !mo || !d || !entry?.timings) continue;
+    days[`${y}-${mo}-${d}`] = entry.timings;
+  }
+  return days;
+}
+
+const SALAH_MONTH_PFX  = 'madinah_salah_cal_';
+/* Budgeted so a dead network resolves to a definite error in ~17s rather than
+   leaving the strip spinning: two tries, each hard-capped, one short backoff. */
+const SALAH_TIMEOUT_MS = 8_000;
+const SALAH_ATTEMPTS   = 2;
+/* A month's timetable is fixed, but re-validate daily so a changed method or a
+   corrected upstream table doesn't sit stale for weeks. */
+const SALAH_REVALIDATE_MS = 24 * 60 * 60 * 1000;
+
+const monthCacheKey = (lat, lon, y, mo, m, s) =>
+  `${SALAH_MONTH_PFX}${y}-${String(mo).padStart(2, '0')}_${lat.toFixed(3)}_${lon.toFixed(3)}_m${m}_s${s}`;
+
+/* Entries from the superseded one-key-per-day scheme: madinah_salah_<date>_… */
+const SALAH_LEGACY_DAY_RE = /^madinah_salah_\d{4}-\d{2}-\d{2}_/;
+
+/* Drop timetables for other months/locations so localStorage doesn't grow
+   without bound. Matches the two cache shapes explicitly rather than the
+   shared `madinah_salah_` prefix — that also covers madinah_salah_loc, and
+   sweeping it would wipe the saved location on every successful fetch. */
+function pruneSalahCache(keepKeys) {
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (SALAH_LEGACY_DAY_RE.test(k)) { localStorage.removeItem(k); continue; }
+      if (k.startsWith(SALAH_MONTH_PFX) && !keepKeys.includes(k)) localStorage.removeItem(k);
+    }
+  } catch {}
+}
+
+/* One month of prayer times, with a hard timeout and a couple of retries.
+   fetch() alone has no timeout: a request that never settles is what leaves
+   the strip saying "fetching…" forever with nothing to act on. */
+async function fetchSalahMonth({ lat, lon, y, mo, method, school }) {
+  let lastErr = new Error('unreachable');
+  for (let attempt = 0; attempt < SALAH_ATTEMPTS; attempt++) {
+    if (attempt) await new Promise(r => setTimeout(r, 800 * 2 ** (attempt - 1)));
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), SALAH_TIMEOUT_MS);
+    try {
+      const r = await fetch(
+        `https://api.aladhan.com/v1/calendar/${y}/${mo}?latitude=${lat}&longitude=${lon}&method=${method}&school=${school}`,
+        { signal: ctl.signal },
+      );
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const days = parseSalahCalendar(await r.json());
+      if (!Object.keys(days).length) throw new Error('empty timetable');
+      return days;
+    } catch (e) {
+      lastErr = e?.name === 'AbortError' ? new Error('timed out') : e;
+    } finally { clearTimeout(timer); }
+  }
+  throw lastErr;
+}
+
+function useSalahTimes(dKey, method, school, syncedLoc, offsets, onLocationConfirmed) {
+  const [timings, setTimings]   = useState(null);
+  const [location, setLocation] = useState(() => {
     if (syncedLoc) return syncedLoc;
     try { return JSON.parse(localStorage.getItem(SALAH_LOC_KEY)); } catch { return null; }
   });
-  const [loading, setLoading] = useState(false);
-  const [error,   setError]   = useState(null);
+  /* One object rather than loose loading/error flags, so the UI can always say
+     something definite: what happened, when, and whether it came from the
+     network or the cache. "fetching…" with no resolution was the whole problem. */
+  const [status, setStatus] = useState({ state: 'idle', at: 0, source: null, message: null });
+  const reqSeq = useRef(0);
 
   /* Apply a location that arrived from remote sync after initial render */
   useEffect(() => {
@@ -568,76 +674,121 @@ function useSalahTimes(dKey, method, school, syncedLoc, onLocationChange) {
     });
   }, [syncedLoc?.lat, syncedLoc?.lon]);
 
-  const fetchTimes = useCallback(async (lat, lon, dk, m, s) => {
-    const cacheKey = `${SALAH_CACHE_PFX}${dk}_${lat.toFixed(3)}_${lon.toFixed(3)}_m${m}_s${s}`;
+  /* Load the timetable covering `dk`. Resolves to true once times are in hand
+     — from cache or network — so callers can wait for confirmation before
+     committing a location. */
+  const load = useCallback(async (loc, dk, m, s, { force = false } = {}) => {
+    if (!loc || !Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)) return false;
+    const [y, mo] = dk.split('-').map(Number);
+    const key = monthCacheKey(loc.lat, loc.lon, y, mo, m, s);
+    const seq = ++reqSeq.current;
+    const live = () => seq === reqSeq.current; // a newer request supersedes this one
+
+    let cached = null;
+    try { cached = JSON.parse(localStorage.getItem(key) || 'null'); } catch {}
+
+    const showFrom = (days, source, at) => {
+      if (!live()) return false;
+      setTimings(days?.[dk] || null);
+      /* Local notification scheduling reads today's timetable from here, so
+         refresh it from whatever month we just loaded even when the user is
+         looking at a different day — otherwise browsing back a week left
+         today's reminders running on whatever was cached last. */
+      const todays = days?.[todayKey()];
+      if (todays) { try { localStorage.setItem('madinah_today_salah', JSON.stringify(todays)); } catch {} }
+      setStatus({ state: 'ok', at, source, message: null });
+      return true;
+    };
+
+    const fresh = cached && Date.now() - (cached.at || 0) < SALAH_REVALIDATE_MS;
+    if (cached?.days && !force) {
+      showFrom(cached.days, 'cache', cached.at || 0);
+      if (fresh) return true; // nothing to revalidate
+    } else if (live()) {
+      setStatus(st => ({ ...st, state: 'loading', message: null }));
+    }
+
     try {
-      const cached = localStorage.getItem(cacheKey);
-      if (cached) {
-        setSalahTimes(JSON.parse(cached));
-        if (dk === todayKey()) { try { localStorage.setItem('madinah_today_salah', cached); } catch {} }
-        return;
+      const days = await fetchSalahMonth({ lat: loc.lat, lon: loc.lon, y, mo, method: m, school: s });
+      const at = Date.now();
+      try { localStorage.setItem(key, JSON.stringify({ at, days })); } catch {}
+      /* Keep the current month too, so paging across a month boundary and
+         back doesn't evict the timetable that today's own reminders use. */
+      const [ty, tmo] = todayKey().split('-').map(Number);
+      pruneSalahCache([key, monthCacheKey(loc.lat, loc.lon, ty, tmo, m, s)]);
+      return showFrom(days, 'live', at);
+    } catch (e) {
+      if (!live()) return false;
+      /* A stale timetable is far better than none — prayer times for a fixed
+         location barely move day to day, and the month is already downloaded. */
+      if (cached?.days?.[dk]) {
+        showFrom(cached.days, 'cache', cached.at || 0);
+        setStatus({ state: 'stale', at: cached.at || 0, source: 'cache', message: e.message });
+        return true;
       }
-    } catch {}
-    setLoading(true); setError(null);
-    try {
-      const [y, mo, d] = dk.split('-');
-      const r = await fetch(
-        `https://api.aladhan.com/v1/timings/${d}-${mo}-${y}?latitude=${lat}&longitude=${lon}&method=${m}&school=${s}`
-      );
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const json = await r.json();
-      const t = json.data.timings;
-      try { localStorage.setItem(cacheKey, JSON.stringify(t)); } catch {}
-      if (dk === todayKey()) { try { localStorage.setItem('madinah_today_salah', JSON.stringify(t)); } catch {} }
-      setSalahTimes(t);
-    } catch(e) { setError('Salah times unavailable'); }
-    setLoading(false);
+      setStatus({ state: 'error', at: Date.now(), source: null, message: e.message });
+      return false;
+    }
   }, []);
 
+  /* Confirm a candidate location by fetching for it FIRST, and only then
+     commit it to synced state. Committing up front meant a mistyped or
+     unreachable coordinate was pushed to every device — and to the Cron
+     Worker, which builds notifications from it — before anyone knew whether
+     it produced prayer times at all. */
+  const useLocation = useCallback(async (loc) => {
+    const ok = await load(loc, dKey, method, school, { force: true });
+    if (!ok) return false;
+    setLocation(loc);
+    try { localStorage.setItem(SALAH_LOC_KEY, JSON.stringify(loc)); } catch {}
+    onLocationConfirmed?.(loc);
+    return true;
+  }, [dKey, method, school, load, onLocationConfirmed]);
+
   const resyncLocation = useCallback(() => {
-    if (!navigator.geolocation) { setError('Geolocation not supported'); return; }
-    setLoading(true); setError(null);
+    if (!navigator.geolocation) {
+      setStatus({ state: 'error', at: Date.now(), source: null, message: 'Geolocation not supported' });
+      return;
+    }
+    setStatus(st => ({ ...st, state: 'locating', message: null }));
     navigator.geolocation.getCurrentPosition(
-      pos => {
-        const loc = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-        setLocation(loc);
-        try { localStorage.setItem(SALAH_LOC_KEY, JSON.stringify(loc)); } catch {}
-        onLocationChange?.(loc);
-        fetchTimes(loc.lat, loc.lon, dKey, method, school);
-      },
-      err => {
-        const msg = err?.code === 1 ? 'Location blocked — enter coordinates manually' : 'Location unavailable';
-        setError(msg); setLoading(false);
-      },
-      { timeout: 10000 }
+      pos => { useLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude }); },
+      err => setStatus({
+        state: 'error', at: Date.now(), source: null,
+        message: err?.code === 1 ? 'Location blocked — enter coordinates manually' : 'Location unavailable',
+      }),
+      { timeout: 10_000, maximumAge: 5 * 60_000 },
     );
-  }, [dKey, method, school, fetchTimes, onLocationChange]);
+  }, [useLocation]);
 
   const setManualLocation = useCallback((lat, lon) => {
     const loc = { lat: parseFloat(lat), lon: parseFloat(lon) };
-    setLocation(loc);
-    setError(null);
-    try { localStorage.setItem(SALAH_LOC_KEY, JSON.stringify(loc)); } catch {}
-    onLocationChange?.(loc);
-    fetchTimes(loc.lat, loc.lon, dKey, method, school);
-  }, [dKey, method, school, fetchTimes, onLocationChange]);
+    if (!Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)
+        || Math.abs(loc.lat) > 90 || Math.abs(loc.lon) > 180) {
+      setStatus({ state: 'error', at: Date.now(), source: null, message: 'Coordinates out of range' });
+      return Promise.resolve(false);
+    }
+    return useLocation(loc);
+  }, [useLocation]);
 
-  useEffect(() => {
-    if (location) fetchTimes(location.lat, location.lon, dKey, method, school);
-  }, [location, dKey, method, school, fetchTimes]);
+  const retry = useCallback(
+    () => load(location, dKey, method, school, { force: true }),
+    [location, dKey, method, school, load],
+  );
+
+  useEffect(() => { if (location) load(location, dKey, method, school); },
+    [location, dKey, method, school, load]);
 
   const salahBlocks = useMemo(() => {
-    if (!salahTimes) return [];
+    if (!timings) return [];
     return Object.entries(SALAH_NAMES).map(([key, names]) => {
-      const raw = salahTimes[key];
-      if (!raw) return null;
-      const timeOnly = raw.split(' ')[0];
-      const start = fromHM(timeOnly);
+      const start = salahMinutes(timings[key], offsets?.[key] || 0);
+      if (start == null) return null;
       return { id:`salah-${key}`, title:names.en, subtitle:names.ar, pillar:'deen', start, end: start + SALAH_DURATION, isSalah:true };
     }).filter(Boolean);
-  }, [salahTimes]);
+  }, [timings, offsets]);
 
-  return { salahBlocks, location, loading, error, resyncLocation, setManualLocation };
+  return { salahBlocks, location, status, resyncLocation, setManualLocation, retry };
 }
 
 /* ------------------------------------------------------------------
@@ -696,7 +847,7 @@ const SEED = () => ({
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
   goals: [],
-  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' } },
+  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null, salahOffsets: { Fajr: 0, Dhuhr: 0, Asr: 0, Maghrib: 0, Isha: 0 }, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' } },
   admin: {
     pillars: {},          /* { [id]: { name?, color? } } */
     quads: {},            /* { [id]: { title?, sub?, hint? } } */
@@ -890,15 +1041,16 @@ function scheduleNotifications(state) {
     if (fireAt > now) notifications.push({ id, title, body, fireAt });
   };
 
-  /* Salah (prayer) times — read from today's cached API response */
+  /* Salah (prayer) times — today's cached timetable, with the user's
+     per-prayer offsets applied (the cache stores the API's raw times). */
   try {
     const todaySalah = JSON.parse(localStorage.getItem('madinah_today_salah') || 'null');
     if (todaySalah) {
+      const offsets = salahOffsets(state.ui);
       Object.entries(SALAH_NAMES).forEach(([key, names]) => {
-        const raw = todaySalah[key];
-        if (!raw) return;
-        const [h, m] = raw.split(' ')[0].split(':').map(Number);
-        push(`salah-${key}`, names.en, `${names.ar} · Time to pray`, atHm(h, m));
+        const mins = salahMinutes(todaySalah[key], offsets[key]);
+        if (mins == null) return;
+        push(`salah-${key}`, names.en, `${names.ar} · Time to pray`, atMins(mins));
       });
     }
   } catch(e) {}
@@ -1730,11 +1882,15 @@ function Timeline({ state, setState, dow, dKey, sel }) {
   const salahMethod = state.ui.salahMethod ?? 3;
   const salahSchool = state.ui.salahSchool ?? 0;
   const salahLoc    = state.ui.salahLoc ?? null;
-  const onSalahLocChange = useCallback(
+  const offsets     = useMemo(() => salahOffsets(state.ui), [state.ui.salahOffsets]);
+  const onSalahLocConfirmed = useCallback(
     loc => setState(s => ({ ...s, ui: { ...s.ui, salahLoc: loc } })),
     [setState]
   );
-  const { salahBlocks, location, loading: salahLoading, error: salahError, resyncLocation, setManualLocation } = useSalahTimes(dKey, salahMethod, salahSchool, salahLoc, onSalahLocChange);
+  const { salahBlocks, location, status: salahStatus, resyncLocation, setManualLocation, retry: retrySalah }
+    = useSalahTimes(dKey, salahMethod, salahSchool, salahLoc, offsets, onSalahLocConfirmed);
+  const salahBusy = salahStatus.state === 'loading' || salahStatus.state === 'locating';
+  const salahFailed = salahStatus.state === 'error';
 
   const layouts = useMemo(() => layoutBlocks([...blocks, ...salahBlocks]), [blocks, salahBlocks]);
 
@@ -1759,11 +1915,15 @@ function Timeline({ state, setState, dow, dKey, sel }) {
         <div className="flex items-center justify-between gap-2 px-3 py-2 flex-wrap">
           <div className="flex items-center gap-3 flex-wrap min-w-0">
             <span className="text-[10px] font-mono tracking-widest text-deen shrink-0">SALAH</span>
-            {salahLoading && <span className="text-[10px] font-mono text-bone-400 animate-pulse">fetching…</span>}
-            {salahError && !showManual && (
-              <span className="text-[10px] font-mono text-combat">{salahError}</span>
+            {salahBusy && (
+              <span className="text-[10px] font-mono text-bone-400 animate-pulse">
+                {salahStatus.state === 'locating' ? 'locating…' : 'fetching…'}
+              </span>
             )}
-            {!salahLoading && !salahError && salahBlocks.length === 0 && !location && (
+            {salahFailed && !showManual && (
+              <span className="text-[10px] font-mono text-combat">{salahStatus.message || 'Salah times unavailable'}</span>
+            )}
+            {!salahBusy && !salahFailed && salahBlocks.length === 0 && !location && (
               <span className="text-[10px] font-mono text-bone-400">— tap to load prayer times</span>
             )}
             {salahBlocks.map(s => (
@@ -1771,9 +1931,23 @@ function Timeline({ state, setState, dow, dKey, sel }) {
                 {s.title} <span className="text-deen">{toHM(s.start)}</span>
               </span>
             ))}
+            {/* Say plainly whether these times are confirmed, and how old they
+                are — "fetching…" that silently stopped told you nothing. */}
+            {!salahBusy && salahBlocks.length > 0 && (
+              <span className={`text-[10px] font-mono whitespace-nowrap ${salahStatus.state === 'stale' ? 'text-strategy' : 'text-bone-500'}`}
+                    title={salahStatus.at ? new Date(salahStatus.at).toLocaleString() : ''}>
+                {salahStatus.state === 'stale' ? `· offline · ${agoLabel(salahStatus.at)}` : `· updated ${agoLabel(salahStatus.at)}`}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
-            {salahError && (
+            {(salahFailed || salahStatus.state === 'stale') && (
+              <button onClick={retrySalah}
+                className="btn flex items-center gap-1 px-2 py-1 rounded-md border border-bone-600/40 text-bone-400 text-[10px] font-mono tracking-wider hover:bg-ink-700">
+                RETRY
+              </button>
+            )}
+            {salahFailed && (
               <button onClick={() => setShowManual(v => !v)}
                 className="btn flex items-center gap-1 px-2 py-1 rounded-md border border-bone-600/40 text-bone-400 text-[10px] font-mono tracking-wider hover:bg-ink-700">
                 MANUAL
@@ -1801,10 +1975,11 @@ function Timeline({ state, setState, dow, dKey, sel }) {
               onChange={e => setManualLon(e.target.value)}
               className="w-24 bg-ink-700 border border-ink-600 rounded px-2 py-1 text-[11px] font-mono text-bone-100 focus:outline-none focus:border-deen/60" />
             <button
-              onClick={() => {
+              onClick={async () => {
                 if (!manualLat || !manualLon) return;
-                setManualLocation(manualLat, manualLon);
-                setShowManual(false);
+                /* Stay open on failure — closing the editor on a coordinate
+                   that produced no times leaves nothing to correct. */
+                if (await setManualLocation(manualLat, manualLon)) setShowManual(false);
               }}
               className="btn px-2.5 py-1 rounded-md bg-deen/20 border border-deen/50 text-deen text-[10px] font-mono tracking-wider hover:bg-deen/30">
               SET
@@ -2972,8 +3147,15 @@ function ThemeCard({ theme, setTheme }) {
 function SalahCard({ state, setState }) {
   const method = state.ui.salahMethod ?? 3;
   const school = state.ui.salahSchool ?? 0;
+  const offsets = salahOffsets(state.ui);
   const setMethod = (v) => setState(s => ({ ...s, ui: { ...s.ui, salahMethod: Number(v) } }));
   const setSchool = (v) => setState(s => ({ ...s, ui: { ...s.ui, salahSchool: Number(v) } }));
+  const setOffset = (key, v) => setState(s => {
+    const n = v === '' || v === '-' ? 0 : Number(v);
+    if (!Number.isFinite(n)) return s;
+    const clamped = Math.max(-SALAH_OFFSET_LIMIT, Math.min(SALAH_OFFSET_LIMIT, Math.round(n)));
+    return { ...s, ui: { ...s.ui, salahOffsets: { ...salahOffsets(s.ui), [key]: clamped } } };
+  });
   return (
     <div className="card p-5">
       <div className="text-[10px] font-mono tracking-widest text-bone-400">PRAYER TIMES</div>
@@ -3004,6 +3186,27 @@ function SalahCard({ state, setState }) {
             >Hanafi</button>
           </div>
           <div className="text-xs text-bone-400 mt-2">Hanafi Asr begins when a shadow is twice the object's height; standard is once.</div>
+        </div>
+        <div>
+          <div className="text-xs font-mono tracking-widest text-bone-400 mb-2">TIME ADJUSTMENT</div>
+          <div className="grid grid-cols-5 gap-2">
+            {Object.entries(SALAH_NAMES).map(([key, names]) => (
+              <label key={key} className="flex flex-col gap-1">
+                <span className="text-[10px] font-mono text-bone-400 text-center">{names.en}</span>
+                <input
+                  type="number" step="1" min={-SALAH_OFFSET_LIMIT} max={SALAH_OFFSET_LIMIT}
+                  value={offsets[key]}
+                  onChange={e => setOffset(key, e.target.value)}
+                  aria-label={`${names.en} offset in minutes`}
+                  className="w-full bg-ink-800 border border-ink-600 rounded-lg px-2 py-1.5 text-sm text-center text-bone-100 focus:outline-none focus:border-deen/60"
+                />
+              </label>
+            ))}
+          </div>
+          <div className="text-xs text-bone-400 mt-2">
+            Minutes to add or subtract, e.g. <span className="text-bone-300">+5</span> on Dhuhr to match your
+            masjid's jama‘ah. Applies to the timeline and to notifications, on every device.
+          </div>
         </div>
       </div>
     </div>
