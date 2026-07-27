@@ -255,6 +255,10 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 const KEY = 'madinah_v1';
 const TOKEN_KEY = 'madinah_token';
 const ENDPOINT = '/api/state';
+const PARSE_ENDPOINT = '/api/parse';
+/* Capture is a foreground interaction and the task already exists
+   locally — a slow parse is abandoned rather than left hanging. */
+const PARSE_TIMEOUT_MS = 8_000;
 const UI_LOCAL_KEY = 'madinah_ui_local_v1';
 const DIRTY_KEY = 'madinah_dirty_v1';
 /* Must match sw.js */
@@ -337,6 +341,26 @@ const Sync = {
        be answered with a 304. */
     this.etag = r.headers.get('ETag') || null;
     return await r.json().catch(() => ({}));
+  },
+  /* Natural-language capture → filed task. Returns null on any failure:
+     the task has already been created locally by the time this is
+     called, so a parse that doesn't come back just leaves it where the
+     user put it. Never let this throw into the capture path. */
+  async parse(text, ctx) {
+    const token = this.getToken();
+    if (!token) return null;
+    try {
+      const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timer = ac ? setTimeout(() => ac.abort(), PARSE_TIMEOUT_MS) : null;
+      const r = await fetch(PARSE_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, ...ctx }),
+        signal: ac?.signal,
+      }).finally(() => timer && clearTimeout(timer));
+      if (!r.ok) return null;
+      return await r.json();
+    } catch { return null; }
   },
 };
 
@@ -847,6 +871,11 @@ const SEED = () => ({
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
   goals: [],
+  /* people: who a task concerns, and how much that raises its
+     importance. The weight is policy — it is applied by code, never
+     judged by the model. See functions/api/parse.js.
+     { id, name, aliases: [], weight: 1..5, modifiedAt } */
+  people: [],
   ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null, salahOffsets: { Fajr: 0, Dhuhr: 0, Asr: 0, Maghrib: 0, Isha: 0 }, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' } },
   admin: {
     pillars: {},          /* { [id]: { name?, color? } } */
@@ -873,7 +902,7 @@ const tomb = (s, ...ids) => ({
 /* Bulk replacements (wipe, import) delete by omission — diff the id sets and
    tombstone whatever the replacement dropped, so the removal actually syncs
    instead of the old items merging straight back in. */
-const COLLECTIONS = ['habits', 'tasks', 'lists', 'blocks', 'goals'];
+const COLLECTIONS = ['habits', 'tasks', 'lists', 'blocks', 'goals', 'people'];
 const tombMissing = (prev, next) => {
   const gone = [];
   for (const key of COLLECTIONS) {
@@ -1191,6 +1220,7 @@ function App() {
                    },
       pomodoroLogs: data?.pomodoroLogs || [],
       goals: data?.goals || [],
+      people: (data?.people || []).map(p => ({ aliases: [], weight: 3, ...p })),
       habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, ...h })),
       tasks:  (data?.tasks  || []).map(t => ({ reminder: null, ...t })),
       blocks: data?.blocks || SEED().blocks,
@@ -2184,20 +2214,64 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
   const [quadrant, setQuadrant] = useState(defaultQuadrant);
   const [due, setDue] = useState(defaultDate || '');
   const [listId, setListId] = useState(defaultListId || 'l-inbox');
+  /* Did the user set any field by hand? An explicit choice is never
+     overwritten by the parser — stated beats inferred. */
+  const [touched, setTouched] = useState(false);
+  const [parsing, setParsing] = useState(false);
+  const [filed, setFiled]     = useState(null); // last parse result, for the receipt
 
-  const submit = () => {
-    if (!title.trim()) return;
+  /* Ask the server to file a task that already exists locally. The
+     insert above never waits on this: capture stays instant, works
+     offline, and works with no AI binding at all — the parse is an
+     enhancement layer that patches the task a moment later. */
+  const smartFile = async (id, text, before) => {
+    setParsing(true);
+    const r = await Sync.parse(text, { today: todayKey(), people: state.people || [], lists: state.lists || [] });
+    setParsing(false);
+    if (!r || r.error) return;
     setState(s => ({
       ...s,
-      tasks: [{
-        id:`t-${Date.now()}`, title: title.trim(), notes:'',
-        due: due || null, quadrant, listId,
-        done:false, created: Date.now(), modifiedAt: Date.now(),
-      }, ...s.tasks],
+      tasks: s.tasks.map(t => t.id === id ? {
+        ...t,
+        title:    r.title || t.title,
+        due:      r.due   || t.due,
+        quadrant: r.quadrant || t.quadrant,
+        listId:   r.listId   || t.listId,
+        personId: r.personId || null,
+        /* What the parser chose, kept alongside what the task ended up
+           as. Re-filing a task is the only correction signal there is,
+           and it's what makes the weights self-tuning — see the People
+           tab in Configuration. */
+        aiQuadrant: r.quadrant || null,
+        modifiedAt: Date.now(),
+      } : t),
     }));
-    setTitle(''); setOpen(false);
+    setFiled({ id, before, ...r });
+  };
+
+  /* Put the task back exactly as it was captured. */
+  const undo = () => {
+    if (!filed) return;
+    setState(s => ({ ...s, tasks: s.tasks.map(t => t.id === filed.id ? { ...t, ...filed.before, personId: null, aiQuadrant: null, modifiedAt: Date.now() } : t) }));
+    setFiled(null);
+  };
+
+  const submit = () => {
+    const text = title.trim();
+    if (!text) return;
+    const id = `t-${Date.now()}`;
+    const before = { title: text, due: due || null, quadrant, listId };
+    setState(s => ({
+      ...s,
+      tasks: [{ id, notes:'', ...before, done:false, created: Date.now(), modifiedAt: Date.now() }, ...s.tasks],
+    }));
+    setTitle(''); setOpen(false); setFiled(null);
+    if (!touched && Sync.configured()) smartFile(id, text, before);
+    setTouched(false);
     setQuadrant(defaultQuadrant); setDue(defaultDate || ''); setListId(defaultListId || 'l-inbox');
   };
+
+  const filedQuad = filed && resolveQuads(state).find(q => q.id === filed.quadrant);
 
   return (
     <div className="card-soft mb-3 overflow-hidden">
@@ -2208,18 +2282,37 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
           onFocus={()=>setOpen(true)}
           placeholder="Capture a task…"
           className="flex-1 bg-transparent text-sm text-bone-100 placeholder:text-bone-400/70"/>
+        {parsing && <span data-testid="parse-status" className="text-[10px] font-mono tracking-wider text-bone-400">FILING…</span>}
         {title && <button onClick={submit} className="btn px-3 py-1.5 rounded-md bg-strategy text-ink-950 text-xs font-semibold">Add</button>}
       </div>
+
+      {/* Receipt — what it decided and why, so a filing you disagree
+          with is visible immediately rather than discovered later. */}
+      {filed && (
+        <div data-testid="parse-receipt" className="border-t border-ink-700 px-3 py-2 flex items-start gap-2 fadeUp">
+          <div className="flex-1 min-w-0">
+            <div className="text-xs text-bone-100 truncate">
+              <span className="font-semibold">{filedQuad?.title || filed.quadrant}</span>
+              {filed.personName && <span className="text-bone-400"> · {filed.personName}</span>}
+              {filed.due && <span className="text-bone-400 font-mono"> · {filed.due}</span>}
+            </div>
+            <div className="text-[10px] text-bone-400/80 truncate">{(filed.why || []).join(' · ')}</div>
+          </div>
+          <button onClick={undo} className="btn px-2 py-1 rounded text-[10px] font-mono tracking-wider border border-ink-700 text-bone-400 hover:bg-ink-800 shrink-0">UNDO</button>
+          <button onClick={()=>setFiled(null)} className="btn text-bone-400 hover:text-bone-100 shrink-0" aria-label="Dismiss"><I.x className="w-3.5 h-3.5"/></button>
+        </div>
+      )}
+
       {open && (
         <div className="border-t border-ink-700 p-2.5 space-y-2 fadeUp">
           <div className="flex gap-2 items-center text-xs flex-wrap">
-            <input type="date" value={due} onChange={e=>setDue(e.target.value)}
+            <input type="date" value={due} onChange={e=>{ setDue(e.target.value); setTouched(true); }}
               className="min-w-[120px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100 font-mono"/>
-            <select value={quadrant} onChange={e=>setQuadrant(e.target.value)}
+            <select value={quadrant} onChange={e=>{ setQuadrant(e.target.value); setTouched(true); }}
               className="flex-1 min-w-[90px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
               {resolveQuads(state).map(q => <option key={q.id} value={q.id}>{q.title}</option>)}
             </select>
-            <select value={listId} onChange={e=>setListId(e.target.value)}
+            <select value={listId} onChange={e=>{ setListId(e.target.value); setTouched(true); }}
               className="flex-1 min-w-[90px] bg-ink-800 border border-ink-700 rounded px-2 py-1 text-bone-100">
               {state.lists.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
             </select>
@@ -2237,6 +2330,7 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart }) {
   const [editing, setEditing] = useState(false);
   const list = state.lists.find(l => l.id === t.listId);
   const q = resolveQuads(state).find(x => x.id === t.quadrant);
+  const person = t.personId ? (state.people || []).find(p => p.id === t.personId) : null;
 
   const toggle = () => setState(s => ({
     ...s,
@@ -2262,6 +2356,7 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart }) {
             <div className="flex items-center gap-2 mt-1 text-[10px] font-mono tracking-wider text-bone-400 flex-wrap">
               {t.due && <span className={t.due < todayKey() && !t.done ? 'text-combat' : ''}>{t.due}</span>}
               {q && <span className="px-1.5 rounded-sm border border-ink-700">{q.title.toUpperCase()}</span>}
+              {person && <span className="text-character">@{person.name}</span>}
               {list && <span style={{ color: list.color }}>· {list.name}</span>}
             </div>
           )}
@@ -3453,6 +3548,30 @@ function AdminCard({ state, setState }) {
     setState(s => ({ ...s, lists: [...s.lists, { id: `l-${Date.now()}`, name: name.trim(), color: '#9a9788', modifiedAt: Date.now() }] }));
   };
 
+  /* ── People helpers ───────────────────────────────────────────
+     A person's weight is the importance half of the Eisenhower grid:
+     it decides whether their request lands in Do/Schedule or in
+     Delegate/Eliminate. 3 is the neutral default applied when a task
+     names nobody, so anyone below 3 is being actively demoted. The
+     parser only ever spots WHO — this table decides how much they
+     count. See functions/api/parse.js. ── */
+  const people = state.people || [];
+  const updatePerson = (id, patch) =>
+    setState(s => ({ ...s, people: (s.people || []).map(p => p.id === id ? { ...p, ...patch, modifiedAt: Date.now() } : p) }));
+  const deletePerson = (id) => {
+    if (!confirm('Remove this person? Tasks keep their quadrant.')) return;
+    setState(s => tomb({ ...s, people: (s.people || []).filter(p => p.id !== id) }, id));
+  };
+  const addPerson = () => {
+    const name = prompt('Name:'); if (!name?.trim()) return;
+    setState(s => ({ ...s, people: [...(s.people || []), { id: `pp-${Date.now()}`, name: name.trim(), aliases: [], weight: 3, modifiedAt: Date.now() }] }));
+  };
+  /* How often you overruled the parser on this person's tasks. Re-filing
+     is the only correction signal there is, and a run of them usually
+     means the weight is wrong rather than the parse. */
+  const refiles = (id) => (state.tasks || [])
+    .filter(t => t.personId === id && t.aiQuadrant && t.aiQuadrant !== t.quadrant).length;
+
   /* ── Fasting days ── */
   const fastingDays = admin.fastingDays ?? [1, 4];
   const toggleFasting = (d) =>
@@ -3471,7 +3590,7 @@ function AdminCard({ state, setState }) {
 
       {/* Tab bar */}
       <div className="flex gap-1.5 flex-wrap mb-5">
-        {[['pillars','Pillars'],['quads','Quadrants'],['lists','Task lists'],['fasting','Fasting days']].map(([id,label]) => (
+        {[['pillars','Pillars'],['quads','Quadrants'],['people','People'],['lists','Task lists'],['fasting','Fasting days']].map(([id,label]) => (
           <button key={id} onClick={()=>setTab(id)} className={TAB_CLS(id)}>{label}</button>
         ))}
       </div>
@@ -3527,6 +3646,57 @@ function AdminCard({ state, setState }) {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* ── PEOPLE ── */}
+      {tab === 'people' && (
+        <div className="space-y-3">
+          <p className="text-xs text-bone-400">
+            Who a task concerns decides how <em>important</em> it is; the due date decides how <em>urgent</em>.
+            Capture names someone and the weight below files the task. 3 is neutral —
+            above it lands in <strong>Do</strong> or <strong>Schedule</strong>, below it in <strong>Delegate</strong> or <strong>Eliminate</strong>.
+          </p>
+          {people.length === 0 && (
+            <p className="text-xs text-bone-400/70 italic py-2">
+              Nobody yet. Add the people whose requests should outrank the rest.
+            </p>
+          )}
+          {people.map(p => {
+            const moved = refiles(p.id);
+            return (
+              <div key={p.id} data-testid="person-row" className="p-3 rounded-lg border border-ink-700 space-y-2">
+                <div className="flex items-center gap-2">
+                  <input value={p.name} placeholder="Name"
+                    onChange={e => updatePerson(p.id, { name: e.target.value })}
+                    className="flex-1 min-w-0 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-strategy/50"/>
+                  <button onClick={() => deletePerson(p.id)}
+                    className="btn px-2.5 py-2 rounded-lg border border-ink-700 text-bone-400 hover:text-combat text-xs shrink-0">✕</button>
+                </div>
+                <input value={(p.aliases || []).join(', ')} placeholder="Also called… (wife, the boss)"
+                  onChange={e => updatePerson(p.id, { aliases: e.target.value.split(',').map(a => a.trim()).filter(Boolean) })}
+                  className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-xs text-bone-300 focus:outline-none focus:border-strategy/50"/>
+                <div className="flex items-center gap-3">
+                  <input type="range" min="1" max="5" step="1" value={p.weight ?? 3}
+                    onChange={e => updatePerson(p.id, { weight: Number(e.target.value) })}
+                    aria-label={`${p.name} weight`} className="flex-1 accent-strategy"/>
+                  <span className="text-[10px] font-mono tracking-widest text-bone-400 w-28 text-right shrink-0">
+                    {p.weight ?? 3} · {(p.weight ?? 3) >= 3 ? 'IMPORTANT' : 'BACKGROUND'}
+                  </span>
+                </div>
+                {moved > 0 && (
+                  <div className="text-[10px] text-bone-400/80">
+                    You re-filed {moved} of their {moved === 1 ? 'task' : 'tasks'} —
+                    {(p.weight ?? 3) >= 3 ? ' consider lowering' : ' consider raising'} this weight.
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <button onClick={addPerson}
+            className="btn w-full py-2 rounded-lg border border-dashed border-ink-700 text-bone-400 hover:text-bone-100 hover:border-bone-400 text-xs">
+            + Add person
+          </button>
         </div>
       )}
 

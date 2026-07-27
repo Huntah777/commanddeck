@@ -85,7 +85,7 @@ function mergeDeleted(existing, incoming, now) {
 
 const stampOf = (item) => item?.modifiedAt ?? item?.created ?? 0;
 
-/* Merge one id-keyed collection (habits/tasks/lists/blocks/goals).
+/* Merge one id-keyed collection (habits/tasks/lists/blocks/goals/people).
    - An id in both: newer modifiedAt (falling back to created) wins.
    - An id only on one side: kept — absence carries no meaning.
    - A tombstone removes the item unless the item was edited after the
@@ -179,6 +179,7 @@ export function mergeState(existing, body, now = Date.now()) {
     lists:  mergeCollection(existing.lists,  incoming.lists,  deleted),
     blocks: mergeCollection(existing.blocks, incoming.blocks, deleted),
     goals:  mergeCollection(existing.goals,  incoming.goals,  deleted),
+    people: mergeCollection(existing.people, incoming.people, deleted),
     pomodoroLogs: unionById(existing.pomodoroLogs, incoming.pomodoroLogs),
     deleted, logs, logsOff,
     admin:    mergeAdmin(existing.admin, incoming.admin),

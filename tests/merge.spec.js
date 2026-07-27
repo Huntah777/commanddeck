@@ -148,3 +148,37 @@ test.describe('mergeState — collections and settings', () => {
     expect(twice).toEqual(once);
   });
 });
+
+test.describe('mergeState — people', () => {
+  /* The people table drives task priority, so it has to survive a
+     round-trip like any other collection — a device that hasn't heard
+     about someone yet must not be able to delete them, and a weight
+     changed on a phone must reach the laptop. */
+
+  test('a person added on one device survives a push from another', () => {
+    const existing = { people: [{ id: 'pp-1', name: 'Aisha', weight: 5, modifiedAt: ago(10_000) }] };
+    const incoming = { people: [{ id: 'pp-2', name: 'Dave',  weight: 2, modifiedAt: NOW }] };
+    const merged = mergeState(existing, incoming);
+    expect(merged.people.map(p => p.id).sort()).toEqual(['pp-1', 'pp-2']);
+  });
+
+  test('the newer weight wins', () => {
+    const existing = { people: [{ id: 'pp-1', name: 'Dave', weight: 2, modifiedAt: ago(60_000) }] };
+    const incoming = { people: [{ id: 'pp-1', name: 'Dave', weight: 4, modifiedAt: NOW }] };
+    expect(mergeState(existing, incoming).people[0].weight).toBe(4);
+  });
+
+  test('a stale device cannot revert a weight it never saw change', () => {
+    const existing = { people: [{ id: 'pp-1', name: 'Dave', weight: 4, modifiedAt: NOW }] };
+    const incoming = { people: [{ id: 'pp-1', name: 'Dave', weight: 2, modifiedAt: ago(86_400_000) }] };
+    expect(mergeState(existing, incoming).people[0].weight).toBe(4);
+  });
+
+  test('deleting a person needs a tombstone, not an omission', () => {
+    const existing = { people: [{ id: 'pp-1', name: 'Dave', weight: 2, modifiedAt: ago(10_000) }] };
+    // Omission alone means "not heard about it" — the person stays.
+    expect(mergeState(existing, { people: [] }).people).toHaveLength(1);
+    // With a tombstone the delete actually lands.
+    expect(mergeState(existing, { people: [], deleted: { 'pp-1': NOW } }).people).toHaveLength(0);
+  });
+});
