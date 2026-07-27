@@ -2,6 +2,16 @@
    keeps serving the previous index.html indefinitely. */
 const CACHE = 'commanddeck-v8';
 
+/* Written by the page, read by this worker. The SW cannot see localStorage,
+   but it needs the sync token to re-register a rotated push subscription while
+   the app is closed — see the pushsubscriptionchange handler. Survives cache
+   version bumps (see `activate`); same origin-scoped exposure as localStorage. */
+const AUTH_CACHE = 'commanddeck-auth';
+const TOKEN_URL  = '/__sync_token';
+
+/* Must match index.html's copy and the Cron Worker's private key. */
+const VAPID_PUBLIC_KEY = 'BFbFmnxVUcx5X_6pUxHKVv-n8aX78p73b8vbe8WCLqLPSmq9ydXMWdBtKjjDCceMju1CerMDVsRWkzJiM6jrvYo';
+
 const SHELL = [
   '/',
   '/index.html',
@@ -28,7 +38,10 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
       Promise.all(
-        keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))
+        /* AUTH_CACHE is not a version of the shell — deleting it on every
+           deploy would drop the token and silently break push re-registration
+           for any device that isn't opened again afterwards. */
+        keys.filter((k) => k !== CACHE && k !== AUTH_CACHE).map((k) => caches.delete(k))
       )
     )
   );
@@ -151,22 +164,92 @@ self.addEventListener('push', (event) => {
 
     const title = data.title || 'Command Deck';
     const tag   = data.tag || 'commanddeck';
-    if (alreadyShown(tag)) return;
+
+    /* Consuming a push without showing anything breaks the userVisibleOnly
+       promise: browsers respond by posting their own "site was updated in the
+       background" notice, and repeat offenders lose push permission entirely.
+       So a duplicate is still shown — same tag replaces the visible one, with
+       renotify off so it doesn't buzz a second time. */
+    const seen = alreadyShown(tag);
 
     await self.registration.showNotification(title, {
       body:     data.body || '',
       icon:     '/icons/icon-192.png',
       badge:    '/icons/icon-192.png',
       tag,
-      renotify: true,
-      vibrate:  [200, 100, 200],
+      renotify: !seen,
+      vibrate:  seen ? [] : [200, 100, 200],
+      silent:   seen,
       data:     { isSalah: !!data.isSalah },
     });
 
     /* If this is a prayer-time push, also play the adhan in any open page */
-    if (data.isSalah) {
+    if (!seen && data.isSalah) {
       const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       clients.forEach(c => c.postMessage({ type: 'PLAY_ADHAN', tag: data.tag || null }));
+    }
+  })());
+});
+
+/* ── Push subscription lifecycle ──────────────────────────────────
+   Browsers rotate a push subscription whenever they feel like it (storage
+   pressure, permission churn, their own expiry policy). The old endpoint then
+   starts returning 410, the Cron Worker drops the row, and the device receives
+   nothing more.
+
+   Without this handler the only thing that re-registers is opening the app —
+   so a home-screen PWA that just sits there goes quiet indefinitely, which is
+   exactly when notifications matter most. Re-subscribing here is what keeps a
+   rarely-opened install alive. */
+
+function b64ToBytes(b64) {
+  const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+async function syncToken() {
+  try {
+    const res = await (await caches.open(AUTH_CACHE)).match(TOKEN_URL);
+    return res ? await res.text() : null;
+  } catch { return null; }
+}
+
+async function pushApi(method, body, token) {
+  return fetch('/api/push', {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+}
+
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil((async () => {
+    const token = await syncToken();
+    if (!token) return; // sync not configured — nothing to register with
+
+    /* Some browsers hand over the replacement; others expect us to create it. */
+    let sub = event.newSubscription;
+    if (!sub) {
+      try {
+        sub = await self.registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: b64ToBytes(VAPID_PUBLIC_KEY),
+        });
+      } catch { return; }
+    }
+
+    /* An empty schedule is only a bootstrap — the Cron Worker overwrites it
+       with the server-derived plan on its next tick (see functions/api/push.js). */
+    try {
+      await pushApi('POST', { id: sub.endpoint.slice(-32), subscription: sub.toJSON(), schedule: [] }, token);
+    } catch { /* best effort — the app re-registers on next open */ }
+
+    /* Retire the dead row now rather than letting every tick waste a send on
+       it until the 30-day sweep. */
+    const old = event.oldSubscription;
+    if (old?.endpoint) {
+      try { await pushApi('DELETE', { id: old.endpoint.slice(-32) }, token); } catch {}
     }
   })());
 });

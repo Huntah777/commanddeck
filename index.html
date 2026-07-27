@@ -257,6 +257,9 @@ const TOKEN_KEY = 'madinah_token';
 const ENDPOINT = '/api/state';
 const UI_LOCAL_KEY = 'madinah_ui_local_v1';
 const DIRTY_KEY = 'madinah_dirty_v1';
+/* Must match sw.js */
+const SW_AUTH_CACHE = 'commanddeck-auth';
+const SW_TOKEN_URL  = '/__sync_token';
 
 /* view/selectedDate are per-device UI state, not real settings — kept out
    of the synced blob (see Sync.save) and mirrored here instead, so a
@@ -281,8 +284,19 @@ const Sync = {
       if (t) localStorage.setItem(TOKEN_KEY, t);
       else localStorage.removeItem(TOKEN_KEY);
     } catch (e) { console.warn('token write failed', e); }
+    this.mirrorTokenToSW(t);
   },
   configured() { return !!this.getToken(); },
+  /* Mirror the token into a cache the service worker can read. The SW has to
+     re-register a rotated push subscription while the app is closed and cannot
+     see localStorage — see the pushsubscriptionchange handler in sw.js. */
+  mirrorTokenToSW(token) {
+    try {
+      caches?.open(SW_AUTH_CACHE)
+        .then(c => (token ? c.put(SW_TOKEN_URL, new Response(token)) : c.delete(SW_TOKEN_URL)))
+        .catch(() => {});
+    } catch {}
+  },
   /* Last server version this device has seen, so an unchanged pull costs a
      304 instead of the whole blob. Kept in memory only — a fresh page load
      should always take one full copy. */
@@ -737,15 +751,37 @@ function notifEnabled() {
   return typeof Notification !== 'undefined' && Notification.permission === 'granted';
 }
 
+/* Does an existing subscription belong to the VAPID key we send with?
+   Unknown (older browsers don't expose options.applicationServerKey) counts as
+   a match — replacing a working subscription on a guess would be worse. */
+function subMatchesVapidKey(sub) {
+  const key = sub?.options?.applicationServerKey;
+  if (!key) return true;
+  const a = new Uint8Array(key);
+  const b = urlB64ToUint8Array(VAPID_PUBLIC_KEY);
+  return a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
 /* Subscribe this device to Web Push and send the schedule to the server.
    No-ops silently if push is unsupported or sync is not configured. */
 async function syncPushSchedule(notifications) {
   if (!Sync.configured() || !notifEnabled()) return;
   try {
+    /* Keep the SW's copy of the token current — this also back-fills devices
+       that were already connected before the mirror existed. */
+    Sync.mirrorTokenToSW(Sync.getToken());
+
     const reg = await navigator.serviceWorker?.ready;
     if (!reg?.pushManager) return;
 
     let sub = await reg.pushManager.getSubscription();
+    /* A subscription is bound to the VAPID key it was created with. If that
+       key is ever rotated the old subscription still looks healthy here but
+       every send is rejected, so replace it rather than trusting its presence. */
+    if (sub && !subMatchesVapidKey(sub)) {
+      try { await sub.unsubscribe(); } catch {}
+      sub = null;
+    }
     if (!sub) {
       sub = await reg.pushManager.subscribe({
         userVisibleOnly:    true,
@@ -1044,6 +1080,10 @@ function App() {
   /* Initial load */
   useEffect(() => { (async () => {
     const cache = Cache.read();
+    /* Back-fill the SW's copy of the token on every launch — it needs it to
+       re-register a rotated push subscription while the app is closed, and a
+       device connected before this existed would otherwise never have one. */
+    if (Sync.configured()) Sync.mirrorTokenToSW(Sync.getToken());
 
     if (!Sync.configured()) {
       const base = cache && cache.habits ? hydrate(cache) : SEED();

@@ -19,7 +19,7 @@
  *     delayed or skipped cron tick can never permanently lose one.
  *   · Cloudflare cron triggers are best-effort and routinely drift by minutes.
  *     A notification that came due while ticks were delayed is still sent,
- *     late, up to MAX_LATE_MS. Past that it is retired without sending — a
+ *     late, up to staleAfter(id). Past that it is retired without sending — a
  *     three-hours-late "time to pray" is worse than none.
  *   · Behaviour is deliberately NOT keyed off the cron expression string. Any
  *     trigger firing at least once a minute drives the whole system. Keying
@@ -37,8 +37,19 @@
 const VAPID_PUBLIC_KEY = 'BFbFmnxVUcx5X_6pUxHKVv-n8aX78p73b8vbe8WCLqLPSmq9ydXMWdBtKjjDCceMju1CerMDVsRWkzJiM6jrvYo';
 
 /* How late a notification may still be delivered before it is retired as
-   stale. Sized to absorb several consecutive missed or delayed cron ticks. */
-const MAX_LATE_MS = 10 * 60_000;
+   stale. Sized to absorb several consecutive missed or delayed cron ticks.
+
+   Split by kind, because "too late to be useful" is not one number. A prayer
+   time or a "starting in 5 min" warning is worse than useless once the moment
+   has passed. A habit, task or goal reminder is still actionable later, and
+   silently dropping one because the phone spent eleven minutes in a tunnel is
+   a miss — that is the case this split exists for. */
+const URGENT_LATE_MS  = 10 * 60_000;
+const RELAXED_LATE_MS = 2 * 60 * 60_000;
+
+/* Ids are stable and prefixed by kind — see buildTodaysSchedule. */
+const isUrgent  = (id) => id.startsWith('salah-') || id.startsWith('b-');
+export const staleAfter = (id) => (isUrgent(id) ? URGENT_LATE_MS : RELAXED_LATE_MS);
 
 /* A notification due within this window is sent on this tick rather than
    waiting for the next one — keeps sub-minute accuracy despite a 1-min cron. */
@@ -158,7 +169,7 @@ async function encryptWebPush(plaintext, subscription) {
 
 /* ── Send one Web Push ────────────────────────────────────────── */
 
-async function sendPush(subscription, payload, privateKeyB64u, subject) {
+async function sendPush(subscription, payload, privateKeyB64u, subject, ttlMs = URGENT_LATE_MS) {
   const jwt  = await makeVapidJWT(subscription.endpoint, privateKeyB64u, subject);
   const body = await encryptWebPush(JSON.stringify(payload), subscription);
 
@@ -168,12 +179,16 @@ async function sendPush(subscription, payload, privateKeyB64u, subject) {
       'Authorization':    `vapid t=${jwt},k=${VAPID_PUBLIC_KEY}`,
       'Content-Type':     'application/octet-stream',
       'Content-Encoding': 'aes128gcm',
-      /* Short TTL, matched to MAX_LATE_MS. A reminder the push service could
-         not hand to the device within that window is stale, and we already
-         refuse to send one that late — a 24h TTL is what makes a phone that
-         was off overnight buzz with the whole of yesterday on wake. */
-      'TTL':              String(Math.round(MAX_LATE_MS / 1000)),
-      'Urgency':          'high',
+      /* TTL matches how late we'd still be willing to deliver this kind of
+         notification. It is what covers a phone that is off or out of signal
+         at fire time: the push service holds the message and delivers it on
+         reconnect, up to this long. Too short and it is dropped; a blanket
+         24h is what makes a phone that was off overnight buzz with the whole
+         of yesterday on wake. */
+      'TTL':              String(Math.round(ttlMs / 1000)),
+      /* high = wake the device now. Reserved for the time-critical ones, so
+         the rest can be batched with whatever else the OS is delivering. */
+      'Urgency':          ttlMs <= URGENT_LATE_MS ? 'high' : 'normal',
     },
     body,
   });
@@ -226,9 +241,15 @@ const SALAH_NAMES = { // kept in sync by hand with index.html's SALAH_NAMES
    Callers depend on this being a pure function of (state, day), so it can be
    recomputed every tick and compared or replaced safely. What has actually
    been delivered lives in push_subs.sent, never in here. */
-async function buildTodaysSchedule(state, tz, parts) {
+export async function buildTodaysSchedule(state, tz, parts) {
   const schedule = [];
-  if (!state?.ui?.notif) return { schedule, ok: true };
+  if (!state) return { schedule, ok: true };
+
+  /* Deliberately NOT gated on state.ui.notif. That flag is synced, so one
+     device switching notifications off used to empty the plan for every
+     device sharing the state. Opting out is already per-device and stronger:
+     the toggle unsubscribes and deletes that device's push_subs row, so it
+     stops receiving regardless of what any other device does. */
 
   const { y, mo, d, dow, key: todayKey } = parts;
 
@@ -323,7 +344,7 @@ async function buildTodaysSchedule(state, tz, parts) {
 }
 
 /* Earliest not-yet-delivered entry, or 0 once the day is fully delivered. */
-function nextFireAt(schedule, sentSet) {
+export function nextFireAt(schedule, sentSet) {
   const pending = schedule.filter(n => !sentSet.has(n.id)).map(n => n.fireAt);
   return pending.length ? Math.min(...pending) : 0;
 }
@@ -389,13 +410,13 @@ async function tick(env) {
       const results = await Promise.allSettled(due.map(async n => {
         /* Too stale to be useful — retire it rather than buzz the user with a
            reminder whose moment has long passed. */
-        if (n.fireAt < now - MAX_LATE_MS) return 'stale';
+        if (n.fireAt < now - staleAfter(n.id)) return 'stale';
         return sendPush(sub, {
           title:   n.title,
           body:    n.body || '',
           tag:     n.id,
           isSalah: n.id.startsWith('salah-'),
-        }, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT);
+        }, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT, staleAfter(n.id));
       }));
 
       due.forEach((n, i) => {
@@ -416,7 +437,8 @@ async function tick(env) {
            subscription again — delete it rather than keep re-querying it. */
         if (s === 404 || s === 410) { subscriptionGone = true; return; }
         if (s >= 200 && s < 300) { sentSet.add(n.id); anySent = true; return; }
-        /* Any other non-2xx: leave unsent, retried each tick until MAX_LATE_MS. */
+        /* Any other non-2xx: leave unsent, retried every tick until it goes
+           stale — see staleAfter. */
       });
 
       if (subscriptionGone) {

@@ -13,6 +13,11 @@ compatibility_date = "2024-09-23"
 # ONE trigger is all this Worker needs. Every tick rebuilds today's plan from
 # D1 and sends whatever is due — see the design notes at the top of index.js.
 # Nothing keys off this exact string, so changing the interval is safe.
+#
+# Do NOT add a second trigger. Cloudflare fires each one separately, so adding
+# e.g. "*/15 * * * *" alongside this runs two concurrent ticks at :00/:15/:30/
+# :45. Both read the same `sent` ledger before either writes it, both conclude
+# the same notifications are due, and the user gets every one of them twice.
 [triggers]
 crons = ["* * * * *"]
 
