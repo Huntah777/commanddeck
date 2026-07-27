@@ -966,8 +966,19 @@ function App() {
     return merged;
   };
 
-  /* If landing directly on the Today tab, never show a stale persisted date */
+  /* If landing directly on the Today tab, never show a stale persisted date.
+     Initial load only — see keepLocalUi for why a mid-session sync must not
+     use this. */
   const landToday = (s) => s.ui.view === 'today' ? { ...s, ui: { ...s.ui, selectedDate: todayKey() } } : s;
+
+  /* Apply a remote/merged payload without disturbing which tab or day this
+     device is currently looking at. A sync round-trip fires ~800 ms after any
+     edit — including the date arrows themselves — so forcing today's date here
+     made stepping back to a previous day impossible. Reads the live state
+     rather than UiLocal so it can't race the localStorage mirror effect. */
+  const keepLocalUi = (prev, incoming) => prev
+    ? { ...incoming, ui: { ...incoming.ui, view: prev.ui.view, selectedDate: prev.ui.selectedDate } }
+    : incoming;
 
   /* Initial load */
   useEffect(() => { (async () => {
@@ -1032,13 +1043,20 @@ function App() {
 
   /* If the calendar day rolls over while the Today tab stays open, advance
      selectedDate on its own instead of showing yesterday indefinitely.
-     No-ops (same state reference) when the date hasn't actually changed. */
+     Triggers on the rollover itself, not on "selectedDate isn't today" —
+     otherwise it would drag the user back within 60 s of deliberately
+     stepping to a previous day. Only advances someone who was sitting on
+     the day that just ended. */
+  const lastTodayRef = useRef(todayKey());
   useEffect(() => {
     const iv = setInterval(() => {
+      const t = todayKey();
+      const dayThatEnded = lastTodayRef.current;
+      if (t === dayThatEnded) return;
+      lastTodayRef.current = t;
       setState(s => {
         if (!s || s.ui.view !== 'today') return s;
-        const t = todayKey();
-        return s.ui.selectedDate === t ? s : { ...s, ui: { ...s.ui, selectedDate: t } };
+        return s.ui.selectedDate === dayThatEnded ? { ...s, ui: { ...s.ui, selectedDate: t } } : s;
       });
     }, 60_000);
     return () => clearInterval(iv);
@@ -1092,8 +1110,10 @@ function App() {
            idempotent, so skipping this on no-op saves is just an optimization,
            not a correctness requirement. */
         if (result?.data) {
-          const merged = landToday(hydrate(result.data));
-          setState(prev => JSON.stringify(merged) === JSON.stringify(prev) ? prev : merged);
+          setState(prev => {
+            const merged = keepLocalUi(prev, hydrate(result.data));
+            return JSON.stringify(merged) === JSON.stringify(prev) ? prev : merged;
+          });
         }
       }
       catch (e) {
@@ -1118,7 +1138,7 @@ function App() {
       try {
         const remote = await Sync.load();
         if (remote && !remote.error) {
-          setState(landToday(hydrate(remote)));
+          setState(prev => keepLocalUi(prev, hydrate(remote)));
           setSyncStatus('synced');
           lastPulledAt.current = Date.now();
         }

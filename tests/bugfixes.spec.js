@@ -139,4 +139,57 @@ test.describe('Bug fixes', () => {
 
     await expect(page.locator('text=Pomodoro timer')).toBeVisible({ timeout: 10_000 });
   });
+
+  test('stepping back to a previous day is not undone by the day-rollover timer', async ({ page }) => {
+    // The rollover check used to re-assert todayKey() on every 60s tick
+    // whenever the Today tab was open, so a deliberate step backwards was
+    // dragged forward again within a minute.
+    await page.clock.install({ time: new Date('2026-07-25T12:00:00') });
+    await page.goto('/');
+    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
+
+    await page.locator('button').filter({ hasText: /^‹$/ }).first().click();
+
+    const readDate = () => page.evaluate(
+      () => JSON.parse(localStorage.getItem('madinah_v1') || '{}')?.ui?.selectedDate
+    );
+    await expect(async () => expect(await readDate()).toBe('2026-07-24')).toPass({ timeout: 10_000 });
+
+    // Several rollover ticks, but no midnight crossing — the date must hold.
+    await page.clock.fastForward('05:00');
+    await page.waitForTimeout(500);
+    expect(await readDate()).toBe('2026-07-24');
+  });
+
+  test('stepping back to a previous day survives the sync round-trip', async ({ page }) => {
+    // Changing the date triggers the debounced save; the merged payload the
+    // server hands back used to be run through landToday(), which forced
+    // selectedDate to today ~800ms after every click of the back arrow.
+    const blob = { habits: [{ id: 'h1', name: 'Read', pillar: 'deen', days: [0,1,2,3,4,5,6], created: 1 }], ui: {} };
+    await page.route('**/api/state', async (route) => {
+      const body = route.request().method() === 'PUT' ? { data: blob } : blob;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+    await page.addInitScript(() => localStorage.setItem('madinah_token', 'test-token'));
+    await page.goto('/');
+    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
+
+    const readDate = () => page.evaluate(
+      () => JSON.parse(localStorage.getItem('madinah_v1') || '{}')?.ui?.selectedDate
+    );
+    // The cache is only written on the first state change, so derive the
+    // expected day from the browser's own clock rather than reading it back.
+    const expected = await page.evaluate(() => {
+      const d = new Date();
+      d.setDate(d.getDate() - 1);
+      const p = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    });
+    await page.locator('button').filter({ hasText: /^‹$/ }).first().click();
+    await expect(async () => expect(await readDate()).toBe(expected)).toPass({ timeout: 10_000 });
+
+    // Well past the 800ms save debounce and its merged response.
+    await page.waitForTimeout(2_500);
+    expect(await readDate()).toBe(expected);
+  });
 });
