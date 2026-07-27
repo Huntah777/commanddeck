@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { classify, resolveDue, matchPerson, markers, fallbackExtract, daysBetween } from '../functions/api/parse.js';
+import { classify, resolveDue, matchPerson, matchList, markers, fallbackExtract, daysBetween } from '../functions/api/parse.js';
 
 /* Unit tests for natural-language task capture. No browser and no model:
    everything asserted here is the deterministic half of /api/parse — the
@@ -18,7 +18,12 @@ const PEOPLE = [
   { id: 'pp-mgr',  name: 'Dave',  aliases: ['manager', 'my boss'], weight: 2 },
   { id: 'pp-dave2', name: 'Dave Smith', aliases: [], weight: 5 },
 ];
-const LISTS = [{ id: 'l-inbox', name: 'Inbox' }, { id: 'l-work', name: 'Work' }];
+const LISTS = [
+  { id: 'l-inbox', name: 'Inbox', keywords: [] },
+  { id: 'l-work',  name: 'Work',  keywords: ['meeting', 'invoice', 'client'] },
+  { id: 'l-deen',  name: 'Deen',  keywords: ['prayer', 'quran', 'salah'] },
+  { id: 'l-life',  name: 'Life',  keywords: ['groceries', 'kids'] },
+];
 
 /* Shorthand: run the rules-only path, exactly as /api/parse does when the
    model is unavailable. */
@@ -93,6 +98,57 @@ test.describe('who it concerns', () => {
     const out = classify({ raw: 'book her a taxi', title: 'Book her a taxi', person: 'Aisha' },
       { today: TODAY, people: PEOPLE });
     expect(out.personId).toBe('pp-wife');
+  });
+});
+
+test.describe('which list', () => {
+  /* Not everything should default to Inbox. A keyword configured on a
+     list (Configuration → Task lists) routes a task there without the
+     text ever naming the list — same standing as a person's weight. */
+
+  test('a keyword routes the task without the list ever being named', () => {
+    expect(matchList('book the client meeting for thursday', LISTS)?.list.id).toBe('l-work');
+    expect(file('book the client meeting for thursday').listId).toBe('l-work');
+  });
+
+  test("the list's own name is itself always a match", () => {
+    expect(matchList('add this to deen', LISTS)?.list.id).toBe('l-deen');
+  });
+
+  test('matching is on whole words — "workshop" does not fire "work"', () => {
+    const workish = [{ id: 'l-work', name: 'Work', keywords: [] }];
+    expect(matchList('book the workshop', workish)).toBeFalsy();
+  });
+
+  test('the longer, more specific hit wins over a shorter one', () => {
+    const lists = [
+      { id: 'l-a', name: 'A', keywords: ['pray'] },
+      { id: 'l-b', name: 'B', keywords: ['pray for the trip'] },
+    ];
+    expect(matchList('remember to pray for the trip', lists)?.list.id).toBe('l-b');
+  });
+
+  test('nothing configured, nothing named → no match, not a guess', () => {
+    expect(matchList('sort out the loft', LISTS)).toBeFalsy();
+    expect(file('sort out the loft').listId).toBeNull();
+  });
+
+  test('a keyword match overrides the model\'s own guess', () => {
+    // Configured policy beats the model's judgement, same as person weight
+    // beating the model's sense of importance.
+    const out = classify(
+      { raw: 'sort the quran study plan', title: 'Sort the quran study plan', listId: 'l-work' },
+      { today: TODAY, people: PEOPLE, lists: LISTS },
+    );
+    expect(out.listId).toBe('l-deen');
+  });
+
+  test('the model\'s guess is used only when nothing configured matches', () => {
+    const out = classify(
+      { raw: 'sort the loft out', title: 'Sort the loft out', listId: 'l-life' },
+      { today: TODAY, people: PEOPLE, lists: LISTS },
+    );
+    expect(out.listId).toBe('l-life');
   });
 });
 

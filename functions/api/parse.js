@@ -26,7 +26,8 @@
 
    Everything here degrades: no AI binding, a model error, or a
    timeout all fall through to `fallbackExtract` (regex only), which
-   still resolves dates and matches people. Capture never fails.
+   still resolves dates, people and — via keyword matching against your
+   configured lists — which list a task belongs in. Capture never fails.
    ============================================================ */
 
 const MAX_TEXT       = 500;
@@ -150,6 +151,27 @@ export function matchPerson(text, people) {
   return best;
 }
 
+/* Same shape as matchPerson: longest hit wins across a list's own name
+   plus its configured keywords, so a list named "Work" with "meeting" as
+   a keyword catches both "add to work" and "book the client meeting"
+   without the text ever saying "work". A list with no keywords (Inbox,
+   by default) is only ever reached by its own name or as the code-side
+   catch-all below — never guessed at. */
+export function matchList(text, lists) {
+  const hay = ` ${norm(text)} `;
+  let best = null;
+  for (const l of lists || []) {
+    if (!l?.id) continue;
+    for (const term of [l.name, ...(Array.isArray(l.keywords) ? l.keywords : [])]) {
+      const n = norm(term);
+      if (n.length < 2) continue;
+      if (!hay.includes(` ${n} `)) continue;
+      if (!best || n.length > best.length) best = { list: l, length: n.length };
+    }
+  }
+  return best;
+}
+
 const clampWeight = (w) => {
   const n = Number(w);
   return Number.isFinite(n) ? Math.max(1, Math.min(5, Math.round(n))) : DEFAULT_WEIGHT;
@@ -172,6 +194,13 @@ export function classify(extract, ctx = {}) {
   const hit    = matchPerson(`${raw} ${extract?.person || ''}`, ctx.people);
   const weight = hit ? clampWeight(hit.person.weight) : DEFAULT_WEIGHT;
   const mark   = markers(raw);
+
+  /* Keyword hits are policy you configured (Configuration → Task lists),
+     same standing as a person's weight — they beat the model's own
+     semantic guess. Only when nothing configured matches does the
+     model's reading of the list get used at all. */
+  const listHit = matchList(raw, ctx.lists);
+  const listId  = listHit?.list.id ?? extract?.listId ?? null;
 
   const importance = Math.max(1, Math.min(5,
     weight + (mark.important ? 1 : 0) - (mark.trivial ? 1 : 0)));
@@ -200,6 +229,8 @@ export function classify(extract, ctx = {}) {
   const why = [];
   if (hit) why.push(`${hit.person.name} · weight ${weight}`);
   else     why.push('no one named · default weight 3');
+  if (listHit)               why.push(`filed under ${listHit.list.name}`);
+  else if (extract?.listId)  why.push('filed by AI guess');
   if (mark.important) why.push('flagged important');
   if (mark.trivial)   why.push('flagged low priority');
   why.push(important ? 'important' : 'not important');
@@ -215,7 +246,7 @@ export function classify(extract, ctx = {}) {
     due, quadrant, importance, important, urgent,
     personId:   hit?.person.id   ?? null,
     personName: hit?.person.name ?? null,
-    listId:     extract?.listId  ?? null,
+    listId,
     why,
   };
 }

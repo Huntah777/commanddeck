@@ -861,11 +861,15 @@ const SEED = () => ({
   /* logs: { 'YYYY-MM-DD': { habitId: true } } */
   logs: {},
   tasks: [],   /* { id, title, notes, due, quadrant, listId, done, doneAt, created } */
+  /* keywords: what routes a captured task here without it naming the list
+     outright — see matchList in functions/api/parse.js. Inbox is the
+     catch-all and deliberately has none: everything else is tried first,
+     and whatever matches nothing lands here. */
   lists: [
-    { id:'l-inbox',  name:'Inbox',     color:'#9a9788' },
-    { id:'l-work',   name:'Work',      color:'#22d3ee' },
-    { id:'l-deen',   name:'Deen',      color:'#10b981' },
-    { id:'l-life',   name:'Life',      color:'#a78bfa' },
+    { id:'l-inbox',  name:'Inbox',     color:'#9a9788', keywords: [] },
+    { id:'l-work',   name:'Work',      color:'#22d3ee', keywords: ['work','meeting','email','client','deadline','report','boss','office','call','invoice','presentation'] },
+    { id:'l-deen',   name:'Deen',      color:'#10b981', keywords: ['prayer','salah','quran','dua','masjid','mosque','fast','fasting','dhikr','deen','islamic','sadaqah','zakat'] },
+    { id:'l-life',   name:'Life',      color:'#a78bfa', keywords: ['home','family','groceries','house','kids','bills','shopping','birthday','doctor','car','clean','appointment'] },
   ],
   blocks: [],
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
@@ -1221,6 +1225,7 @@ function App() {
       pomodoroLogs: data?.pomodoroLogs || [],
       goals: data?.goals || [],
       people: (data?.people || []).map(p => ({ aliases: [], weight: 3, ...p })),
+      lists: (data?.lists || SEED().lists).map(l => ({ keywords: [], ...l })),
       habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, ...h })),
       tasks:  (data?.tasks  || []).map(t => ({ reminder: null, ...t })),
       blocks: data?.blocks || SEED().blocks,
@@ -2272,6 +2277,7 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
   };
 
   const filedQuad = filed && resolveQuads(state).find(q => q.id === filed.quadrant);
+  const filedList = filed && state.lists.find(l => l.id === filed.listId);
 
   return (
     <div className="card-soft mb-3 overflow-hidden">
@@ -2293,6 +2299,7 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
           <div className="flex-1 min-w-0">
             <div className="text-xs text-bone-100 truncate">
               <span className="font-semibold">{filedQuad?.title || filed.quadrant}</span>
+              {filedList && <span style={{ color: filedList.color }}> · {filedList.name}</span>}
               {filed.personName && <span className="text-bone-400"> · {filed.personName}</span>}
               {filed.due && <span className="text-bone-400 font-mono"> · {filed.due}</span>}
             </div>
@@ -3617,6 +3624,67 @@ function PersonRow({ p, expanded, onToggle, onUpdate, onDelete, movedCount }) {
 }
 
 /* ------------------------------------------------------------------
+   LIST ROW  — name/colour plus the keywords that route a captured task
+   here without it naming the list outright. Same chip pattern as a
+   person's aliases: type a word, Enter (or comma) commits it.
+------------------------------------------------------------------- */
+function ListRow({ l, onUpdate, onDelete, deletable }) {
+  const [kwInput, setKwInput] = useState('');
+  const keywords = l.keywords || [];
+
+  const addKeyword = () => {
+    const v = kwInput.trim();
+    if (!v) return setKwInput('');
+    if (keywords.some(k => k.toLowerCase() === v.toLowerCase())) return setKwInput('');
+    onUpdate({ keywords: [...keywords, v] });
+    setKwInput('');
+  };
+  const removeKeyword = (k) => onUpdate({ keywords: keywords.filter(x => x !== k) });
+
+  return (
+    <div data-testid="list-row" className="p-3 rounded-lg border border-ink-700 space-y-2">
+      <div className="flex items-center gap-2">
+        <input type="color" value={l.color}
+          onChange={e => onUpdate({ color: e.target.value })}
+          className="w-8 h-8 rounded cursor-pointer border-0 bg-transparent p-0 shrink-0"/>
+        <input value={l.name} placeholder="Name"
+          onChange={e => onUpdate({ name: e.target.value })}
+          className="flex-1 min-w-0 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-strategy/50"/>
+        {deletable && (
+          <button onClick={onDelete} aria-label={`Delete ${l.name || 'list'}`}
+            className="btn w-8 h-8 flex items-center justify-center rounded-lg border border-combat/40 text-combat hover:bg-combat/10 shrink-0">
+            <I.trash className="w-3.5 h-3.5"/>
+          </button>
+        )}
+      </div>
+
+      <div>
+        <div className="text-[10px] font-mono tracking-widest text-bone-500 mb-1.5">CAPTURE KEYWORDS</div>
+        <div className="flex flex-wrap gap-1.5 mb-1.5">
+          {keywords.map(k => (
+            <span key={k} className="inline-flex items-center gap-1 bg-ink-800 border border-ink-700 rounded-full pl-2.5 pr-1 py-1 text-xs text-bone-200">
+              {k}
+              <button onClick={() => removeKeyword(k)} aria-label={`Remove ${k}`}
+                className="btn w-4 h-4 rounded-full flex items-center justify-center text-bone-400 hover:text-combat hover:bg-ink-700">×</button>
+            </span>
+          ))}
+          {keywords.length === 0 && (
+            <span className="text-xs text-bone-400/60 italic py-1">
+              {l.id === 'l-inbox' ? "Inbox is the catch-all — nothing routes here on purpose" : 'None yet — only naming this list by name will match it'}
+            </span>
+          )}
+        </div>
+        <input value={kwInput} placeholder="meeting, invoice, client… — Enter to add"
+          onChange={e => setKwInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addKeyword(); } }}
+          onBlur={addKeyword}
+          className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-xs text-bone-300 focus:outline-none focus:border-strategy/50"/>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
    ADMIN CARD  — configure pillars, quadrants, lists, fasting days
 ------------------------------------------------------------------- */
 function AdminCard({ state, setState }) {
@@ -3818,22 +3886,16 @@ function AdminCard({ state, setState }) {
       {/* ── LISTS ── */}
       {tab === 'lists' && (
         <div className="space-y-2">
-          <p className="text-xs text-bone-400 mb-3">Rename, recolour or delete task lists. Deleting moves tasks to Inbox.</p>
+          <p className="text-xs text-bone-400 mb-3">
+            Rename, recolour or delete task lists. Deleting moves tasks to Inbox.
+            Keywords route a captured task here without it naming the list outright —
+            "meeting" on Work catches "book the client meeting" too.
+          </p>
           {state.lists.map(l => (
-            <div key={l.id} className="flex items-center gap-2">
-              <input type="color" value={l.color}
-                onChange={e => updateList(l.id, { color: e.target.value })}
-                className="w-8 h-8 rounded cursor-pointer border-0 bg-transparent p-0"/>
-              <input value={l.name}
-                onChange={e => updateList(l.id, { name: e.target.value })}
-                className="flex-1 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 focus:outline-none focus:border-strategy/50"/>
-              {l.id !== 'l-inbox' && (
-                <button onClick={() => deleteList(l.id)}
-                  className="btn w-8 h-8 flex items-center justify-center rounded-lg border border-combat/40 text-combat hover:bg-combat/10">
-                  <I.trash className="w-3.5 h-3.5"/>
-                </button>
-              )}
-            </div>
+            <ListRow key={l.id} l={l}
+              onUpdate={patch => updateList(l.id, patch)}
+              onDelete={() => deleteList(l.id)}
+              deletable={l.id !== 'l-inbox'}/>
           ))}
           <button onClick={addList}
             className="btn mt-2 px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm flex items-center gap-1.5">

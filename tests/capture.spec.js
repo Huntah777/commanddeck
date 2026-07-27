@@ -27,7 +27,7 @@ async function seed(page, extra = {}) {
   const STATE = {
     habits: [{ id: 'h-1', title: 'Fajr', pillar: 'deen', days: [0, 1, 2, 3, 4, 5, 6], created: 1 }],
     tasks: [], blocks: [], logs: {},
-    lists: [{ id: 'l-inbox', name: 'Inbox', color: '#9a9788' }],
+    lists: [{ id: 'l-inbox', name: 'Inbox', color: '#9a9788' }, { id: 'l-work', name: 'Work', color: '#22d3ee' }],
     people: [{ id: 'pp-mgr', name: 'Dave', aliases: ['manager'], weight: 2 }],
     /* The Tasks view, not Today — Today lists only what's due today, and
        a parsed due date would filter the task straight off the screen. */
@@ -120,6 +120,27 @@ test.describe('natural-language capture', () => {
     await expect(receipt).toContainText('Delegate');   // the quadrant's own label
     await expect(receipt).toContainText('Dave');
     await expect(receipt).toContainText('due in 2d');  // and why
+  });
+
+  test('a captured task can move off the default list, and the receipt says where it went', async ({ page }) => {
+    // Not everything should stay in Inbox — a keyword match on the server
+    // routes the task, and the receipt is where that becomes visible.
+    // `why` deliberately omits the word "Work" so the badge is the only
+    // possible source of that text — otherwise this test can't tell a
+    // real list badge from the reasoning line mentioning it in passing.
+    mockParse(page, { ...FILED, listId: 'l-work' });
+    await seed(page); // captured with the default listId of 'l-inbox'
+    await page.goto('/');
+    await boot(page);
+
+    await capture(page, 'dave needs the deck by friday');
+
+    await expect.poll(async () => (await tasks(page))[0]?.listId, { timeout: 10_000 }).toBe('l-work');
+    const receipt = page.getByTestId('parse-receipt');
+    await expect(receipt).toContainText('Work');
+    // Specifically the summary line (styled with the list's own colour),
+    // not just anywhere in the receipt's free-text reasoning.
+    await expect(receipt.locator('span').filter({ hasText: '· Work' })).toBeVisible();
   });
 
   test('undo restores exactly what was captured', async ({ page }) => {
