@@ -288,10 +288,10 @@ test.describe('learning between reviews', () => {
 });
 
 test.describe('reading the model reply', () => {
-  /* Workers AI does not document structured outputs on the Anthropic
-     pass-through. output_config is still sent — exact when honoured —
-     but a review must not 502 because an undocumented parameter was
-     dropped and the model replied in prose-wrapped JSON instead. */
+  /* Workers AI does not document structured-output support on the
+     Anthropic pass-through, so the shape is asked for in the prompt
+     instead and the reply is parsed defensively — a review must not
+     502 just because the model wrapped its JSON in prose or a fence. */
   const REVIEW = { headline: 'x', verdict: '', failing: [], actions: [], working: { area: 'a', evidence: 'b' }, note: 'n' };
 
   test('a clean JSON reply parses', () => {
@@ -404,5 +404,62 @@ test.describe('the handler itself never throws', () => {
     const body = await res.json();
     expect(body.review.headline).toBe('x');
     expect(body.cached).toBe(false);
+  });
+});
+
+test.describe('a failed AI call is self-diagnosing', () => {
+  /* The actual bug report this targets: every review was 502-ing with
+     no usable detail. The cause was here — when env.AI.run() resolves
+     to something with no text block, the whole response body used to
+     be discarded and replaced with a bare "NO_TEXT_BLOCK" label. If
+     Workers AI returns an error payload instead of throwing (common
+     for request-validation failures on partner models), that payload
+     contained the real reason and it was being thrown away. */
+
+  test('an error payload from Workers AI reaches the client, not a bare label', async () => {
+    const env = {
+      SYNC_TOKEN: 'test-token', DB: fakeD1(),
+      AI: fakeAI({ error: { message: 'output_config is not a supported parameter' } }),
+    };
+    const res = await onRequest({ request: coachRequest({ today: TODAY }), env });
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.detail).toContain('output_config is not a supported parameter');
+  });
+
+  test('a string-shaped error field is still surfaced', async () => {
+    const env = { SYNC_TOKEN: 'test-token', DB: fakeD1(), AI: fakeAI({ error: 'model not found' }) };
+    const res = await onRequest({ request: coachRequest({ today: TODAY }), env });
+    expect((await res.json()).detail).toContain('model not found');
+  });
+
+  test('a genuinely empty response still says something rather than nothing', async () => {
+    const env = { SYNC_TOKEN: 'test-token', DB: fakeD1(), AI: fakeAI(null) };
+    const res = await onRequest({ request: coachRequest({ today: TODAY }), env });
+    expect(res.status).toBe(502);
+    expect((await res.json()).detail).toContain('empty response');
+  });
+
+  test('a run() that throws outright is still caught and reported', async () => {
+    const env = {
+      SYNC_TOKEN: 'test-token', DB: fakeD1(),
+      AI: { run: async () => { throw new Error('3010: Invalid input parameters'); } },
+    };
+    const res = await onRequest({ request: coachRequest({ today: TODAY }), env });
+    expect(res.status).toBe(502);
+    expect((await res.json()).detail).toContain('3010');
+  });
+
+  test('a failed call spends neither money nor a weekly run', async () => {
+    // Confirms the ordering still holds now that askClaude's failure
+    // mode has changed shape: nothing is written and no run is
+    // recorded when the call fails, whatever form the failure takes.
+    const db = fakeD1();
+    const env = { SYNC_TOKEN: 'test-token', DB: db, AI: fakeAI({ error: 'quota exceeded' }) };
+    await onRequest({ request: coachRequest({ today: TODAY }), env });
+
+    const again = await onRequest({ request: coachRequest({ today: TODAY }), env: { ...env, AI: fakeAI(VALID_REPLY) } });
+    expect(again.status).toBe(200);
+    expect((await again.json()).cached).toBe(false); // not blocked by a phantom run
   });
 });
