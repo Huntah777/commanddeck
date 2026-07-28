@@ -188,7 +188,9 @@ async function askClaude(digest, notes, env) {
   const call = env.AI.run(MODEL, {
     max_tokens: MAX_TOKENS,
     /* Opus 5 calibrates its own reasoning per task; passing a fixed
-       budget is rejected outright on this model family. */
+       budget is rejected outright on this model family. Confirmed as a
+       supported capability on the model's own Workers AI page — unlike
+       output_config below, this isn't a guess. */
     thinking: { type: 'adaptive' },
     system: SYSTEM,
     messages: [{
@@ -202,7 +204,14 @@ async function askClaude(digest, notes, env) {
         JSON.stringify(digest, null, 1),
       ].join('\n'),
     }],
-    output_config: { format: { type: 'json_schema', schema: SCHEMA } },
+    /* NOT sent: Workers AI's documented request shape for this model is
+       messages / max_tokens / system / stream / metadata — output_config
+       isn't in it. An unrecognised top-level field being hard-rejected
+       (rather than silently ignored) is the leading suspect for every
+       review failing outright, so this leans on the belt instead: the
+       shape is stated in SYSTEM and extractJson() parses the reply
+       defensively. If Workers AI adds documented structured-output
+       support for partner models later, this is the line to restore. */
   });
 
   /* env.AI.run takes no abort signal, and a review is a foreground
@@ -216,7 +225,15 @@ async function askClaude(digest, notes, env) {
   /* Adaptive thinking puts a thinking block first, so find the text
      block rather than assuming index 0. */
   const text = body?.content?.find(c => c.type === 'text')?.text;
-  if (!text) throw new Error('NO_TEXT_BLOCK');
+  if (!text) {
+    /* Whatever body actually is — a Workers AI error payload, an empty
+       object, a differently-shaped success response — surface it rather
+       than discard it. This is the difference between every future
+       failure being self-diagnosing from the on-screen message and
+       every future failure being another guessing game. */
+    const reason = body?.error?.message || body?.error || (body ? JSON.stringify(body).slice(0, 300) : 'empty response');
+    throw new Error(`NO_TEXT_BLOCK: ${reason}`);
+  }
   return { review: extractJson(text), usage: body.usage || null };
 }
 
