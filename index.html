@@ -3782,10 +3782,17 @@ function CoachCard({ state, syncStatus, onRefreshed }) {
     setBusy(false);
 
     if (res?.error) {
-      setMsg(res.error === 'not_configured'
-        ? 'Not configured — add the Workers AI binding in Cloudflare, then redeploy.'
-        : res.error === 'timeout' ? 'The review timed out. Try again.'
-        : 'Could not reach the review service.');
+      /* Named failure modes get a plain-English fix; anything else still
+         surfaces the server's own error and detail rather than a single
+         catch-all string — a real 500 must not read the same as a dead
+         network, or the actual cause is invisible without opening the
+         browser console. */
+      const known = {
+        not_configured: 'Not configured — add the Workers AI binding in Cloudflare, then redeploy.',
+        timeout:        'The review timed out. Try again.',
+        network:        'Could not reach the review service — check your connection.',
+      };
+      setMsg(known[res.error] || `Review failed: ${res.error}${res.detail ? ` — ${res.detail}` : ''}`);
       return;
     }
     if (res?.cached && res.reason) setMsg(COACH_REFUSALS[res.reason]?.(dueLabel) || null);

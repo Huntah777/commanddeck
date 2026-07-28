@@ -197,4 +197,33 @@ test.describe('spend refusals read as information', () => {
     await expect(page.getByTestId('coach-msg')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByTestId('coach-review')).toContainText('slipped to 43%');
   });
+
+  test('an error the client has no specific copy for still shows the server\'s own words', async ({ page }) => {
+    // This was the actual bug: every failure that wasn't 'not_configured'
+    // or 'timeout' collapsed into one unhelpful "could not reach the
+    // service" string, indistinguishable from a dead network. The
+    // server's error and detail must reach the screen, not get thrown
+    // away in favour of a catch-all.
+    await seed(page);
+    mockCoach(page, { error: 'internal_error', detail: 'D1_WRITE_FAILED' }, { status: 500 });
+    await boot(page);
+    await runButton(page).click();
+
+    const msg = page.getByTestId('coach-msg');
+    await expect(msg).toContainText('internal_error', { timeout: 10_000 });
+    await expect(msg).toContainText('D1_WRITE_FAILED');
+  });
+
+  test('a response with no parseable body at all is reported as a network failure, not silently ignored', async ({ page }) => {
+    // The exact failure mode this whole fix targets: an unhandled
+    // exception makes Cloudflare return a bare error page instead of
+    // JSON. r.json() can't parse it, so the client must still say
+    // something rather than leave the button looking like nothing
+    // happened.
+    await page.route('**/api/coach', route => route.fulfill({ status: 500, contentType: 'text/plain', body: 'internal error' }));
+    await seed(page);
+    await boot(page);
+    await runButton(page).click();
+    await expect(page.getByTestId('coach-msg')).toBeVisible({ timeout: 10_000 });
+  });
 });

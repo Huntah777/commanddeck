@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { buildDigest, digestFingerprint, metricsOf } from '../functions/api/digest.js';
-import { checkAllowed, runsLeftIn, extractJson } from '../functions/api/coach.js';
+import { checkAllowed, runsLeftIn, extractJson, onRequest } from '../functions/api/coach.js';
 
 /* Unit tests for the coaching review. No browser and no model — and that
    is the whole design: the model is handed finished arithmetic and asked
@@ -311,5 +311,98 @@ test.describe('reading the model reply', () => {
   test('a reply with no JSON at all fails loudly rather than silently', () => {
     // Better a visible error than a blank review the user cannot explain.
     expect(() => extractJson('I am unable to help with that.')).toThrow(/NO_JSON/);
+  });
+});
+
+/* ── Minimal fake D1 / Workers AI, for calling onRequest directly ──
+   Playwright's Node runtime has global Request/Response (undici), so
+   the handler can be exercised exactly as Cloudflare would invoke it,
+   with no browser and no real bindings. */
+function fakeD1({ initialData = {}, throwOnRead = false, throwOnWrite = false } = {}) {
+  let row = { data: JSON.stringify(initialData), updated_at: 1 };
+  return {
+    prepare(sql) {
+      const stmt = {
+        bind(...args) { stmt._args = args; return stmt; },
+        async first() {
+          if (throwOnRead) throw new Error('D1_READ_FAILED');
+          return /SELECT/i.test(sql) ? row : null;
+        },
+        async run() {
+          if (throwOnWrite) throw new Error('D1_WRITE_FAILED');
+          if (!/UPDATE/i.test(sql)) return { meta: { changes: 0 } };
+          const [data, updated_at, expectedUpdatedAt] = stmt._args;
+          if (row.updated_at !== expectedUpdatedAt) return { meta: { changes: 0 } };
+          row = { data, updated_at };
+          return { meta: { changes: 1 } };
+        },
+      };
+      return stmt;
+    },
+  };
+}
+
+const fakeAI = (reply) => ({ run: async () => reply });
+const VALID_REPLY = { content: [{ type: 'text', text: JSON.stringify({
+  headline: 'x', verdict: '', failing: [], actions: [], working: { area: 'a', evidence: 'b' }, note: 'n',
+}) }], usage: {} };
+
+const coachRequest = (body, token = 'test-token') => new Request('https://x/api/coach', {
+  method: 'POST',
+  headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+});
+
+test.describe('the handler itself never throws', () => {
+  /* This is the regression the fix targets: an uncaught exception
+     anywhere in onRequest makes Cloudflare return a bare error page
+     instead of JSON. The client can't parse that, falls through every
+     named error case, and shows a useless "could not reach the
+     service" for what might be a one-line D1 error. Every path here
+     must come back as parseable JSON with an HTTP status, never a
+     thrown exception the test runner itself would catch. */
+
+  test('a D1 write failure comes back as JSON, not a crash', async () => {
+    const env = { SYNC_TOKEN: 'test-token', DB: fakeD1({ throwOnWrite: true }), AI: fakeAI(VALID_REPLY) };
+    const res = await onRequest({ request: coachRequest({ today: TODAY }), env });
+    expect(res).toBeInstanceOf(Response);
+    expect(res.ok).toBe(false);
+    const body = await res.json();
+    expect(body.error).toBeTruthy();
+  });
+
+  test('a D1 read failure comes back as JSON, not a crash', async () => {
+    const env = { SYNC_TOKEN: 'test-token', DB: fakeD1({ throwOnRead: true }), AI: fakeAI(VALID_REPLY) };
+    const res = await onRequest({ request: coachRequest({ today: TODAY }), env });
+    expect(res.ok).toBe(false);
+    expect((await res.json()).error).toBeTruthy();
+  });
+
+  test('a null entry in a synced array is tolerated, not just caught', async () => {
+    // A stray null used to reach t.done unguarded inside buildDigest and
+    // throw — silently swallowing it into a 500 would still leave a
+    // review request permanently broken for this account. It must
+    // actually succeed, with the real task counted alongside the null.
+    const env = {
+      SYNC_TOKEN: 'test-token',
+      DB: fakeD1({ initialData: { habits: 'not-an-array', tasks: [{ id: 't1', quadrant: 'do' }, null] } }),
+      AI: fakeAI(VALID_REPLY),
+    };
+    const res = await onRequest({ request: coachRequest({ today: TODAY }), env });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.digest.tasks.open).toBe(1);
+    expect(body.digest.tasks.openByQuadrant).toMatchObject({ do: 1 });
+  });
+
+  test('a genuinely well-formed request still succeeds end to end', async () => {
+    // The regression net above is only meaningful if the happy path
+    // through the same fakes actually works.
+    const env = { SYNC_TOKEN: 'test-token', DB: fakeD1(), AI: fakeAI(VALID_REPLY) };
+    const res = await onRequest({ request: coachRequest({ today: TODAY }), env });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.review.headline).toBe('x');
+    expect(body.cached).toBe(false);
   });
 });

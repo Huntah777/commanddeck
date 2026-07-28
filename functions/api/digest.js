@@ -68,8 +68,13 @@ function daysSinceDone(habit, today, logs, limit) {
 export function buildDigest(state = {}, today = keyOf(Date.now())) {
   if (!isDateKey(today)) today = keyOf(Date.now());
 
-  const habits = Array.isArray(state.habits) ? state.habits : [];
-  const tasks  = Array.isArray(state.tasks)  ? state.tasks  : [];
+  /* Guards the array itself, not what's in it — a stray null (a bad
+     merge, a client bug, a hand-edited D1 row) is real production risk
+     since this reads whatever is actually stored, spanning every
+     version of the app that has ever synced. */
+  const isRecord = (x) => x !== null && typeof x === 'object';
+  const habits = (Array.isArray(state.habits) ? state.habits : []).filter(isRecord);
+  const tasks  = (Array.isArray(state.tasks)  ? state.tasks  : []).filter(isRecord);
   const logs   = state.logs || {};
 
   const allKeys    = windowKeys(today, WINDOW_DAYS);

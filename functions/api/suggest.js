@@ -53,12 +53,20 @@ export async function onRequest({ request, env }) {
   let body = {};
   try { body = await request.json(); } catch { return json({ error: 'Bad JSON' }, 400); }
 
-  const tasks  = Array.isArray(body?.filedTasks) ? body.filedTasks.slice(0, 500) : [];
-  const lists  = Array.isArray(body?.lists)  ? body.lists.slice(0, 50)   : [];
-  const people = Array.isArray(body?.people) ? body.people.slice(0, 200) : [];
+  /* Client-supplied data of arbitrary age and shape feeds straight into
+     learn.js — an uncaught throw here would return a bare error page
+     instead of JSON, same failure mode fixed in coach.js. */
+  try {
+    const tasks  = Array.isArray(body?.filedTasks) ? body.filedTasks.slice(0, 500) : [];
+    const lists  = Array.isArray(body?.lists)  ? body.lists.slice(0, 50)   : [];
+    const people = Array.isArray(body?.people) ? body.people.slice(0, 200) : [];
 
-  return json({
-    keywords: suggestKeywords(tasks, lists),
-    weights:  suggestWeights(tasks, people),
-  });
+    return json({
+      keywords: suggestKeywords(tasks, lists),
+      weights:  suggestWeights(tasks, people),
+    });
+  } catch (err) {
+    console.error('suggest handler error:', err);
+    return json({ error: 'internal_error', detail: String(err?.message || err).slice(0, 200) }, 500);
+  }
 }
