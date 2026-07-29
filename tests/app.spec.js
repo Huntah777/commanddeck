@@ -13,16 +13,15 @@ test.describe('App smoke tests', () => {
     await expect(page).toHaveTitle(/Command Deck|Madinah/i);
   });
 
-  test('navigating to stats view works', async ({ page }) => {
+  test('navigating to the admin view works', async ({ page }) => {
     await page.goto('/');
     // Wait for the app to mount
     await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
-    // Click stats nav link
-    const statsLink = page.locator('a[href*="stats"], button').filter({ hasText: /stats/i }).first();
-    if (await statsLink.isVisible()) {
-      await statsLink.click();
-      await expect(page.locator('text=/theme|appearance/i').first()).toBeVisible({ timeout: 5_000 });
-    }
+
+    await page.locator('nav button').filter({ hasText: /^Admin$/ }).first().click();
+    await expect(page.getByTestId('admin-nav')).toBeVisible({ timeout: 5_000 });
+    await page.getByTestId('admin-nav').getByRole('button', { name: 'Appearance' }).click();
+    await expect(page.locator('text=/theme/i').first()).toBeVisible({ timeout: 5_000 });
   });
 
   test('background layers exist in DOM', async ({ page }) => {

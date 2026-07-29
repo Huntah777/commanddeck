@@ -339,6 +339,32 @@ test.describe('natural-language capture', () => {
     });
   });
 
+  test('what the call cost is kept with the task that caused it', async ({ page }) => {
+    /* The AI spend figure in Admin is a sum over calls this app made,
+       so each call has to leave its token count behind. Without this
+       the card can only ever estimate. */
+    mockParse(page, { ...FILED, usage: { i: 412, o: 58 } });
+    await seed(page);
+    await page.goto('/');
+    await boot(page);
+
+    await capture(page, 'dave needs the deck by friday');
+    await expect.poll(async () => (await tasks(page))[0]?.ai?.tok, { timeout: 10_000 })
+      .toEqual({ i: 412, o: 58 });
+  });
+
+  test('a model that reports no usage leaves no invented figure', async ({ page }) => {
+    // A missing token count and a free call are not the same claim.
+    mockParse(page, FILED);
+    await seed(page);
+    await page.goto('/');
+    await boot(page);
+
+    await capture(page, 'dave needs the deck by friday');
+    await expect.poll(async () => (await tasks(page))[0]?.ai?.raw, { timeout: 10_000 }).toBeTruthy();
+    expect((await tasks(page))[0]?.ai?.tok).toBeUndefined();
+  });
+
   test('editing a filed task leaves the disagreement legible', async ({ page }) => {
     mockParse(page, FILED);
     await seed(page);

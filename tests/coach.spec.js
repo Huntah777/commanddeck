@@ -170,6 +170,32 @@ test.describe('digest — resilience', () => {
     const d = buildDigest({}, 'not-a-date');
     expect(d.window.to).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
+
+  test('focus minutes are broken down by the pillar they were aimed at', () => {
+    /* A session can be aimed at a whole pillar or at one habit inside
+       it; a habit session carries its pillar too, so both count. This
+       is what lets the review say where the hours actually went rather
+       than only how many there were. */
+    const d = buildDigest({
+      pomodoroLogs: [
+        { id: 'p1', date: TODAY, mins: 25, pillarId: 'deen' },
+        { id: 'p2', date: TODAY, mins: 25, pillarId: 'deen', habitId: 'h-fajr' },
+        { id: 'p3', date: TODAY, mins: 50, pillarId: 'tech' },
+      ],
+    }, TODAY);
+    expect(d.focus.minutesByPillar).toEqual({ deen: 50, tech: 50 });
+    expect(d.focus.minutes).toBe(100);
+  });
+
+  test('sessions logged before targets existed are absent, not bucketed as "other"', () => {
+    // An "other: 300 minutes" row would read as a finding about how the
+    // time was spent. It is only a fact about when the log was written.
+    const d = buildDigest({
+      pomodoroLogs: [{ id: 'p1', date: TODAY, mins: 25, taskId: 't-1' }],
+    }, TODAY);
+    expect(d.focus.minutesByPillar).toEqual({});
+    expect(d.focus.sessions).toBe(1);
+  });
 });
 
 test.describe('spend guard', () => {
