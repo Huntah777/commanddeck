@@ -219,3 +219,86 @@ test.describe('notification plan — delivery safety', () => {
     expect(nextFireAt(schedule, new Set(['a', 'b', 'c']))).toBe(0);
   });
 });
+
+test.describe('habits on the calendar', () => {
+  /* A habit given a slot in the day is stored as an ordinary block
+     carrying a habitId. Everything the plan needs about it — name,
+     pillar, which days it runs — is read back off the habit rather than
+     copied onto the block, so the two can never drift apart. */
+
+  const slotted = (over = {}) => ({
+    habits: [habit({ reminder: null })],
+    blocks: [{ id: 'b-h1', habitId: 'h1', start: 6 * 60, end: 6 * 60 + 20 }],
+    ...over,
+  });
+
+  test('a scheduled habit gets the block alerts, named after the habit', async () => {
+    const { schedule } = await build(slotted());
+    // 06:00 BST is 05:00 UTC.
+    expect(find(schedule, 'b-b-h1-15').fireAt).toBe(Date.UTC(2026, 6, 15, 4, 45, 0));
+    expect(find(schedule, 'b-b-h1-5').fireAt).toBe(Date.UTC(2026, 6, 15, 4, 55, 0));
+    expect(find(schedule, 'b-b-h1-end').fireAt).toBe(Date.UTC(2026, 6, 15, 5, 15, 0));
+    expect(find(schedule, 'b-b-h1-15').body).toBe('Read Quran');
+  });
+
+  test('renaming the habit renames what the alert says', async () => {
+    /* The block stores no title of its own. If it did, this rename would
+       leave a stale twin buzzing the old name forever. */
+    const state = slotted();
+    state.habits[0].name = 'Read two pages';
+    const { schedule } = await build(state);
+    expect(find(schedule, 'b-b-h1-15').body).toBe('Read two pages');
+  });
+
+  test('a slot runs on the habit\'s days, not on days of its own', async () => {
+    const state = slotted();
+    state.habits[0].days = [0, 6];          // weekends only
+    state.blocks[0].every = [0,1,2,3,4,5,6]; // a stale copy, deliberately
+    const { schedule } = await build(state); // SUMMER is a Wednesday
+    expect(find(schedule, 'b-b-h1-15')).toBeUndefined();
+  });
+
+  test('a slot whose habit was deleted is not a notification', async () => {
+    const { schedule } = await build(slotted({ habits: [] }));
+    expect(schedule.filter(n => n.id.startsWith('b-b-h1'))).toEqual([]);
+  });
+
+  test('ticking the habit off silences its block for the rest of the day', async () => {
+    // The alerts exist to get it done. Buzzing about something already
+    // done is how people learn to ignore the buzzing.
+    const { schedule } = await build(slotted({ logs: { '2026-07-15': { h1: 1 } } }));
+    expect(schedule.filter(n => n.id.startsWith('b-b-h1'))).toEqual([]);
+  });
+
+  test('an ordinary block is unaffected by any of this', async () => {
+    const { schedule } = await build({
+      habits: [],
+      blocks: [{ id: 'b-work', title: 'Deep work', pillar: 'tech', start: 540, end: 660, every: [0,1,2,3,4,5,6] }],
+      logs: { '2026-07-15': { 'b-work': 1 } },  // not a habit id; must not silence it
+    });
+    expect(find(schedule, 'b-b-work-15').body).toBe('Deep work');
+  });
+
+  test('a habit on the calendar does not also fire its own reminder', async () => {
+    /* This is the point of the feature: the slot's three alerts replace
+       the reminder time. Firing both would mean four notifications for
+       one habit. */
+    const { schedule } = await build(slotted({ habits: [habit({ reminder: '07:00' })] }));
+    expect(find(schedule, 'h-h1')).toBeUndefined();
+    expect(find(schedule, 'b-b-h1-15')).toBeDefined();
+  });
+
+  test('a habit with no slot still gets its reminder', async () => {
+    const { schedule } = await build({ habits: [habit({ reminder: '07:00' })], blocks: [] });
+    expect(find(schedule, 'h-h1')).toBeDefined();
+  });
+
+  test('on a day the habit does not run, neither fires', async () => {
+    /* The slot takes its days from the habit, so the two can never
+       disagree about whether today counts. */
+    const state = slotted({ habits: [habit({ reminder: '07:00', days: [0] })] }); // Sundays
+    const { schedule } = await build(state);                                       // asked on a Wednesday
+    expect(find(schedule, 'h-h1')).toBeUndefined();
+    expect(find(schedule, 'b-b-h1-15')).toBeUndefined();
+  });
+});

@@ -47,6 +47,24 @@ const VAPID_PUBLIC_KEY = 'BFbFmnxVUcx5X_6pUxHKVv-n8aX78p73b8vbe8WCLqLPSmq9ydXMWd
 const URGENT_LATE_MS  = 10 * 60_000;
 const RELAXED_LATE_MS = 2 * 60 * 60_000;
 
+/* A habit given a slot in the day is stored as an ordinary block carrying a
+   `habitId` and nothing else of its own. Title, pillar and days are read back
+   off the habit rather than copied at save time, so a renamed or rescheduled
+   habit can't leave a stale twin in the plan; a block whose habit is gone
+   resolves to nothing.
+
+   MIRRORED from index.html, which builds the same plan client-side and must
+   reach identical conclusions. Change both. */
+export const resolveBlocks = (state) => {
+  const habits = state?.habits || [];
+  return (state?.blocks || []).flatMap(b => {
+    if (!b?.habitId) return b ? [b] : [];
+    const h = habits.find(x => x.id === b.habitId);
+    if (!h) return [];
+    return [{ ...b, title: h.name, pillar: h.pillar, every: Array.isArray(h.days) ? h.days : [] }];
+  });
+};
+
 /* Ids are stable and prefixed by kind — see buildTodaysSchedule. */
 const isUrgent  = (id) => id.startsWith('salah-') || id.startsWith('b-');
 export const staleAfter = (id) => (isUrgent(id) ? URGENT_LATE_MS : RELAXED_LATE_MS);
@@ -315,9 +333,17 @@ export async function buildTodaysSchedule(state, tz, parts) {
   }
 
   /* Calendar blocks — 3 notifications each, end anchored to next day if the
-     block crosses midnight (end <= start) */
-  for (const b of state.blocks || []) {
+     block crosses midnight (end <= start).
+
+     A block carrying a habitId is a habit that has been given a slot in the
+     day; its title, pillar and days come off the habit rather than being
+     copied onto the block (see resolveBlocks). Once that habit is ticked the
+     alerts are skipped — they exist to get it done, and buzzing about
+     something already done is how people learn to ignore the buzzing. */
+  const doneToday = state.logs?.[todayKey] || {};
+  for (const b of resolveBlocks(state)) {
     if (!b.every?.includes(dow)) continue;
+    if (b.habitId && doneToday[b.habitId]) continue;
     const s = zonedHmToUtcMs(y, mo, d, Math.floor(b.start / 60), b.start % 60, tz);
     let   e = zonedHmToUtcMs(y, mo, d, Math.floor(b.end   / 60), b.end   % 60, tz);
     if (b.end <= b.start) e += 24 * 60 * 60 * 1000;
@@ -326,9 +352,14 @@ export async function buildTodaysSchedule(state, tz, parts) {
     push(`b-${b.id}-end`, 'Ending in 5 min',    b.title, e -  5 * 60000);
   }
 
-  /* Habit reminders — skip if already logged today */
+  /* Habit reminders — the fallback for a habit with no slot in the day. One
+     that is on the calendar is already covered by the three alerts above, and
+     firing both would mean four notifications for one habit. */
+  const scheduled = new Set(
+    resolveBlocks(state).filter(b => b.habitId && b.every?.includes(dow)).map(b => b.habitId));
   for (const h of state.habits || []) {
-    if (!h.reminder || !h.days?.includes(dow) || state.logs?.[todayKey]?.[h.id]) continue;
+    if (!h.reminder || !h.days?.includes(dow) || doneToday[h.id]) continue;
+    if (scheduled.has(h.id)) continue;
     const [hh, mm] = h.reminder.split(':').map(Number);
     push(`h-${h.id}`, 'Habit reminder', h.name, zonedHmToUtcMs(y, mo, d, hh, mm, tz));
   }

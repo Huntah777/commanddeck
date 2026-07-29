@@ -924,6 +924,85 @@ function useSalahTimes(dKey, method, school, syncedLoc, offsets, onLocationConfi
 }
 
 /* ------------------------------------------------------------------
+   HABITS ON THE CALENDAR
+   ------------------------------------------------------------------
+   A habit given a slot in the day is stored as an ordinary block that
+   carries a `habitId` and nothing else of its own: just `{ id, habitId,
+   start, end }`. Its title, pillar and which days it runs are read back
+   off the habit here rather than copied at save time, so renaming a
+   habit, moving it to another pillar or changing its schedule can never
+   leave a stale twin sitting on the timeline. A block whose habit has
+   been deleted resolves to nothing.
+
+   Being a real block is the point: the timeline, the overlap layout and
+   — the reason for the whole feature — the 15-minutes-before,
+   5-minutes-before and 5-minutes-from-the-end alerts all already work
+   on blocks. A scheduled habit inherits all of it, and its own optional
+   reminder time stops being necessary.
+
+   MIRRORED in push-worker/index.js, which rebuilds the same plan
+   server-side and must reach identical conclusions. Change both.
+------------------------------------------------------------------- */
+const resolveBlocks = (state) => {
+  const habits = state?.habits || [];
+  return (state?.blocks || []).flatMap(b => {
+    if (!b?.habitId) return b ? [b] : [];
+    const h = habits.find(x => x.id === b.habitId);
+    if (!h) return [];
+    return [{ ...b, title: h.name, pillar: h.pillar, every: Array.isArray(h.days) ? h.days : [] }];
+  });
+};
+
+/* The slot a habit occupies, if it has one. */
+const slotForHabit = (state, habitId) =>
+  (state?.blocks || []).find(b => b?.habitId === habitId) || null;
+
+/* Write a habit and its calendar slot together. `slot` is { start, end },
+   or null for "not on the calendar". One transaction because the two are
+   only meaningful as a pair: a block pointing at a habit that didn't save
+   is a ghost on the timeline, and a habit whose block didn't save is a
+   promise the day never keeps. */
+function saveHabitWithSlot(s, habit, slot) {
+  const habits = s.habits.find(x => x.id === habit.id)
+    ? s.habits.map(x => x.id === habit.id ? habit : x)
+    : [...s.habits, habit];
+
+  const blocks = s.blocks || [];
+  const existing = blocks.find(b => b?.habitId === habit.id);
+
+  if (!slot) {
+    /* Removed from the calendar. Tombstoned, not merely dropped — the
+       sync merge reads an absent block as "this device hasn't heard about
+       it" and would hand it straight back. */
+    return existing
+      ? tomb({ ...s, habits, blocks: blocks.filter(b => b !== existing) }, existing.id)
+      : { ...s, habits };
+  }
+
+  const next = existing
+    ? { ...existing, ...slot, modifiedAt: Date.now() }
+    : { id: `b-${habit.id}`, habitId: habit.id, ...slot, modifiedAt: Date.now() };
+
+  return {
+    ...s, habits,
+    blocks: existing ? blocks.map(b => b === existing ? next : b) : [...blocks, next],
+  };
+}
+
+/* Deleting a habit takes its calendar slot with it — resolveBlocks would
+   hide the orphan anyway, but leaving it in state means it syncs to every
+   other device forever. */
+function deleteHabit(s, id) {
+  const orphan = (s.blocks || []).find(b => b?.habitId === id);
+  const gone = orphan ? [id, orphan.id] : [id];
+  return tomb({
+    ...s,
+    habits: s.habits.filter(x => x.id !== id),
+    blocks: (s.blocks || []).filter(b => b?.habitId !== id),
+  }, ...gone);
+}
+
+/* ------------------------------------------------------------------
    BLOCK LAYOUT  ─ column algorithm so overlapping events don't stack
 ------------------------------------------------------------------- */
 /* A block whose end <= start wraps past midnight — split it into the two
@@ -979,6 +1058,9 @@ const SEED = () => ({
     { id:'l-deen',   name:'Deen',      color:'#10b981', keywords: ['prayer','salah','quran','dua','masjid','mosque','fast','fasting','dhikr','deen','islamic','sadaqah','zakat'] },
     { id:'l-life',   name:'Life',      color:'#a78bfa', keywords: ['home','family','groceries','house','kids','bills','shopping','birthday','doctor','car','clean','appointment'] },
   ],
+  /* blocks: { id, title, pillar, start, end, every: [dow] } — or, for a
+     habit given a slot in the day, { id, habitId, start, end } with the
+     title/pillar/days read off the habit instead. See resolveBlocks. */
   blocks: [],
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
@@ -1135,6 +1217,104 @@ async function removePushSubscription() {
   } catch(e) {}
 }
 
+/* ── Reconnecting background push ─────────────────────────────────
+   Push dies quietly. The browser keeps handing back a healthy-looking
+   subscription object long after the row behind it is gone — cleaned up
+   as stale, dropped on a 404/410, lost with a restored database — and
+   from inside the app "working" and "dead for three weeks" look
+   identical, because both are an absence of notifications.
+
+   So the only honest check is a round trip: ask the browser what it has,
+   ask the server what IT has, and show where the chain breaks. And the
+   only reliable repair is to stop trying to work out which half is at
+   fault and rebuild both ends from scratch. ── */
+
+const pushLocalId = async () => {
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    const sub = await reg?.pushManager?.getSubscription();
+    return sub ? { id: sub.endpoint.slice(-32), sub } : null;
+  } catch { return null; }
+};
+
+/* The server's own view of this device. null means the question could
+   not be asked (offline, no sync) — deliberately distinct from
+   { registered: false }, which is a real and actionable answer. */
+async function pushServerStatus(id) {
+  if (!Sync.configured() || !id) return null;
+  try {
+    const r = await fetch(`/api/push?id=${encodeURIComponent(id)}`, {
+      headers: { Authorization: `Bearer ${Sync.getToken()}` },
+    });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+
+/* Tear the subscription down and build a new one, then re-register
+   today's plan against it. Deliberately unconditional: this is what you
+   press when it has stopped working and you don't know why, so it must
+   not depend on correctly guessing which part broke. */
+async function reconnectPush(state) {
+  if (!('serviceWorker' in navigator)) return { ok: false, reason: 'unsupported' };
+  if (!notifEnabled()) return { ok: false, reason: 'permission' };
+  if (!Sync.configured()) return { ok: false, reason: 'sync' };
+
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (!reg?.pushManager) return { ok: false, reason: 'unsupported' };
+
+    /* Drop the old registration at both ends before making a new one —
+       a device that reconnects repeatedly would otherwise leave a trail
+       of dead rows, each one getting retried every cron tick. */
+    const old = await reg.pushManager.getSubscription();
+    if (old) {
+      const oldId = old.endpoint.slice(-32);
+      try { await old.unsubscribe(); } catch {}
+      try {
+        await fetch('/api/push', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${Sync.getToken()}` },
+          body: JSON.stringify({ id: oldId }),
+        });
+      } catch {}
+    }
+
+    /* The POST below is made directly rather than through
+       syncPushSchedule, so the fingerprint cache cannot suppress it —
+       which is the point: this is the press that has to go out. Clearing
+       the keys is housekeeping, not the mechanism. They are keyed by
+       subscription id and the old one has just been retired, so without
+       this they would accumulate one dead entry per reconnect. */
+    try {
+      Object.keys(localStorage)
+        .filter(k => k.startsWith('push_fp_'))
+        .forEach(k => localStorage.removeItem(k));
+    } catch {}
+
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC_KEY),
+    });
+
+    Sync.mirrorTokenToSW(Sync.getToken());
+
+    const id = sub.endpoint.slice(-32);
+    const r = await fetch('/api/push', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${Sync.getToken()}` },
+      body: JSON.stringify({ id, subscription: sub.toJSON(), schedule: buildPlan(state) }),
+    });
+    if (!r.ok) return { ok: false, reason: 'server', status: r.status };
+
+    /* Read it back rather than trusting the 200 — the whole point of the
+       exercise is not believing either end on its own. */
+    return { ok: true, id, server: await pushServerStatus(id) };
+  } catch (e) {
+    return { ok: false, reason: 'subscribe', detail: String(e?.message || e).slice(0, 120) };
+  }
+}
+
 /* In PWA standalone mode new Notification() is blocked — always go through the SW */
 function showNotificationViaSW(title, body, tag) {
   if (!navigator.serviceWorker?.controller) return;
@@ -1171,9 +1351,10 @@ function zonedHmToUtcMs(y, mo, d, hh, mm, tz) {
   return guess - tzOffsetMs(new Date(guess), tz);
 }
 
-function scheduleNotifications(state) {
-  if (!notifEnabled() || !state?.ui?.notif) return;
-
+/* Today's whole notification plan. Split out from scheduleNotifications so
+   a reconnect can rebuild and re-post it without depending on something
+   else happening to call it first. */
+function buildPlan(state) {
   const tz = state.ui?.timezone || DEFAULT_TZ;
   const { y, mo, d: dayOfMonth, dow } = zonedPartsNow(tz);
   const atHm   = (hh, mm) => zonedHmToUtcMs(y, mo, dayOfMonth, hh, mm, tz);
@@ -1200,9 +1381,14 @@ function scheduleNotifications(state) {
     }
   } catch(e) {}
 
-  /* Calendar blocks — all blocks always fire 3 notifications */
-  (state.blocks || []).forEach(b => {
+  /* Calendar blocks — 3 notifications each. A block standing in for a
+     habit is skipped once that habit is ticked: the alerts exist to get
+     it done, and buzzing about something already done is how people
+     learn to ignore the buzzing. */
+  const doneToday = state.logs?.[todayKey()] || {};
+  resolveBlocks(state).forEach(b => {
     if (!b.every.includes(dow)) return;
+    if (b.habitId && doneToday[b.habitId]) return;
     const s = atMins(b.start);
     /* end <= start means the block crosses midnight — anchor the end to the next day */
     const e = atMins(b.end) + (b.end <= b.start ? 24 * 60 * 60000 : 0);
@@ -1211,9 +1397,14 @@ function scheduleNotifications(state) {
     push(`b-${b.id}-end`, 'Ending in 5 min',    b.title, e -  5 * 60000);
   });
 
-  /* Habit reminders */
+  /* Habit reminders — the fallback for a habit with no slot in the day.
+     One that has been put on the calendar is already covered by the
+     three alerts above, and firing both would mean four notifications
+     for one habit. */
+  const scheduled = new Set(resolveBlocks(state).filter(b => b.habitId && b.every.includes(dow)).map(b => b.habitId));
   (state.habits || []).forEach(h => {
-    if (!h.reminder || !h.days.includes(dow) || state.logs?.[todayKey()]?.[h.id]) return;
+    if (!h.reminder || !h.days.includes(dow) || doneToday[h.id]) return;
+    if (scheduled.has(h.id)) return;
     const [hr, mn] = h.reminder.split(':').map(Number);
     push(`h-${h.id}`, 'Habit reminder', h.name, atHm(hr, mn));
   });
@@ -1249,6 +1440,13 @@ function scheduleNotifications(state) {
     if (gr.on)        fireGoalReminders('goals-am', gr.time);
     if (gr.eveningOn) fireGoalReminders('goals-pm', gr.eveningTime);
   }
+
+  return notifications;
+}
+
+function scheduleNotifications(state) {
+  if (!notifEnabled() || !state?.ui?.notif) return;
+  const notifications = buildPlan(state);
 
   /* Server sync FIRST, and unconditionally. `controller` is null on the very
      first load after registration, and whenever iOS or Android has evicted the
@@ -2250,7 +2448,7 @@ function TodayView({ state, setState }) {
       {/* Habits */}
       <section className="col-span-12 lg:col-span-3">
         <SectionHeading kicker="03 / Discipline" title="Habits for today" sub={`${habitsToday.filter(h=>log[h.id]).length} / ${habitsToday.length} complete`}/>
-        <HabitChecklist habits={habitsToday} log={log} toggle={toggleHabit} state={state}/>
+        <HabitChecklist habits={habitsToday} log={log} toggle={toggleHabit} state={state} setState={setState}/>
       </section>
     </div>
   );
@@ -2278,7 +2476,25 @@ function Timeline({ state, setState, dow, dKey, sel }) {
   const startHour = 0, endHour = 24;
   const hours = endHour - startHour;
 
-  const blocks = useMemo(() => state.blocks.filter(b => b.every.includes(dow)), [state.blocks, dow]);
+  const blocks = useMemo(() => resolveBlocks(state).filter(b => b.every.includes(dow)), [state.blocks, state.habits, dow]);
+  const log = state.logs[dKey] || {};
+
+  /* Ticking a habit off its own block. Same write as the checklist's — see
+     TodayView.toggleHabit for why an un-tick has to be recorded rather than
+     just absent. */
+  const toggleHabit = (id) => setState(s => {
+    const on = (s.logs[dKey] || {})[id];
+    const at = Date.now();
+    const logs    = { ...(s.logs[dKey]      || {}) };
+    const logsOff = { ...(s.logsOff?.[dKey] || {}) };
+    if (on) { delete logs[id]; logsOff[id] = at; }
+    else    { logs[id] = at;   delete logsOff[id]; }
+    return {
+      ...s,
+      logs:    { ...s.logs,             [dKey]: logs },
+      logsOff: { ...(s.logsOff || {}),  [dKey]: logsOff },
+    };
+  });
   const [editing, setEditing] = useState(null);
   const [adding,  setAdding]  = useState(null);
   const [showManual, setShowManual] = useState(false);
@@ -2425,26 +2641,45 @@ function Timeline({ state, setState, dow, dKey, sel }) {
                 segments (one per segmentsOf()) so it visually splits across
                 the top/bottom of the grid instead of one wrongly-sized box */}
             {blocks.map(b => {
-              const p = pillarById(b.pillar);
+              const p = pillarByIdFromState(b.pillar, state);
               const { col=0, numCols=1 } = layouts[b.id] || {};
               const pct = 100 / numCols;
+              /* A habit's block is the habit — so it can be ticked from
+                 here rather than making you go and find the checklist. */
+              const done = b.habitId ? !!log[b.habitId] : false;
               return segmentsOf(b).map((seg, i) => (
-                <button key={`${b.id}-${i}`} onClick={()=>setEditing(b)}
-                  className="btn absolute text-left px-2.5 py-1.5 rounded-lg overflow-hidden"
+                <div key={`${b.id}-${i}`}
+                  data-testid={b.habitId ? 'habit-block' : 'time-block'}
+                  className="absolute rounded-lg overflow-hidden flex items-stretch"
                   style={{
                     top: blockTop(seg), height: blockHt(seg),
                     left: `${col * pct}%`, width: `calc(${pct}% - 3px)`,
                     background: `linear-gradient(90deg, ${p.color}1a 0%, #131317 60%)`,
                     border: `1px solid ${p.color}55`,
                     borderLeft: `3px solid ${p.color}`,
+                    opacity: done ? 0.55 : 1,
                     pointerEvents: 'auto',
                   }}>
-                  <div className="flex items-center justify-between gap-1">
-                    <div className="font-medium text-bone-100 truncate text-xs sm:text-sm">{b.title}</div>
-                    <div className="font-mono text-[9px] text-bone-400 whitespace-nowrap shrink-0">{toHM(b.start)}–{toHM(b.end)}</div>
-                  </div>
-                  <div className="text-[9px] font-mono tracking-wider uppercase mt-0.5" style={{ color: p.color }}>{p.name}</div>
-                </button>
+                  {b.habitId && (
+                    <button onClick={()=>toggleHabit(b.habitId)}
+                      aria-label={`${done ? 'Untick' : 'Tick'} ${b.title}`}
+                      className="btn shrink-0 pl-2 pr-1 flex items-start pt-1.5">
+                      <div className={`tick ${done?'on':''}`} style={done ? { background: p.color, borderColor: p.color } : {}}>
+                        {done && <I.check className="w-3 h-3" style={{color:'#0a0a0b'}}/>}
+                      </div>
+                    </button>
+                  )}
+                  <button onClick={()=>setEditing(b)}
+                    className="btn flex-1 min-w-0 text-left px-2.5 py-1.5">
+                    <div className="flex items-center justify-between gap-1">
+                      <div className={`font-medium truncate text-xs sm:text-sm ${done ? 'text-bone-400 line-through' : 'text-bone-100'}`}>{b.title}</div>
+                      <div className="font-mono text-[9px] text-bone-400 whitespace-nowrap shrink-0">{toHM(b.start)}–{toHM(b.end)}</div>
+                    </div>
+                    <div className="text-[9px] font-mono tracking-wider uppercase mt-0.5" style={{ color: p.color }}>
+                      {b.habitId ? `${p.name} · habit` : p.name}
+                    </div>
+                  </button>
+                </div>
               ));
             })}
 
@@ -2513,10 +2748,19 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
 
   const toggleDay = (d) => setDays(ds => ds.includes(d) ? ds.filter(x=>x!==d) : [...ds, d].sort());
 
+  /* A habit's slot. Its name, pillar and days belong to the habit, not to
+     the block — editing them here would either be ignored or silently
+     fork the two. Only the time is the block's own. */
+  const habit = block?.habitId ? (state.habits || []).find(h => h.id === block.habitId) : null;
+
   const save = () => {
-    if (!title.trim()) { setError('Give this block a title.'); return; }
     const startM = fromHM(start), endM = fromHM(end);
     if (endM === startM) { setError("Start and end can't be the same time."); return; }
+    if (habit) {
+      onSave({ ...block, start: startM, end: endM, modifiedAt: Date.now() });
+      return;
+    }
+    if (!title.trim()) { setError('Give this block a title.'); return; }
     onSave({
       id: block?.id || `b-${Date.now()}`,
       title: title.trim(), pillar,
@@ -2525,6 +2769,53 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
       modifiedAt: Date.now(),
     });
   };
+
+  if (habit) {
+    const p = pillarByIdFromState(habit.pillar, state);
+    return (
+      <Modal onClose={onClose} title="Habit on the calendar">
+        <div className="card-soft p-3 flex items-center gap-2.5">
+          <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: p.color }}/>
+          <div className="flex-1 min-w-0">
+            <div className="text-sm text-bone-100 truncate">{habit.name}</div>
+            <div className="text-[10px] font-mono tracking-wider text-bone-400 mt-0.5">
+              {p.name.toUpperCase()} · {(habit.days || []).map(d => DAY_SHORT[d].toUpperCase()).join(' ')}
+            </div>
+          </div>
+        </div>
+        <p className="text-[11px] text-bone-400">
+          The name, pillar and days come from the habit itself — edit those in Habits.
+          Here you only set when it sits in the day.
+        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Start">
+            <input type="time" value={start} onChange={e=>setStart(e.target.value)} aria-label="Start"
+              className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono"/>
+          </Field>
+          <Field label="End">
+            <input type="time" value={end} onChange={e=>setEnd(e.target.value)} aria-label="End"
+              className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono"/>
+          </Field>
+        </div>
+        <Field label="Notifications">
+          <div className="text-sm text-bone-400 flex items-start gap-2">
+            <span className="text-strategy">✓</span>
+            <span>15 min before · 5 min before · 5 min before the end — and nothing at all once you've ticked it off.</span>
+          </div>
+        </Field>
+        {error && <div className="text-xs text-combat">{error}</div>}
+        <div className="flex justify-between gap-2 pt-2">
+          <button onClick={()=>onDelete(block.id)}
+            className="btn px-3 py-2 rounded-lg text-combat border border-combat/30 hover:bg-combat/10 text-sm">
+            Take off calendar
+          </button>
+          <div className="flex-1"/>
+          <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Cancel</button>
+          <button onClick={save} className="btn px-4 py-2 rounded-lg bg-bone-100 text-ink-950 font-semibold text-sm">Save block</button>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal onClose={onClose} title={isNew ? 'New time block' : 'Edit block'}>
@@ -2875,7 +3166,49 @@ function TaskEditModal({ t, state, setState, onClose }) {
 /* ------------------------------------------------------------------
    HABIT CHECKLIST (Today view)
 ------------------------------------------------------------------- */
-function HabitChecklist({ habits, log, toggle, state }) {
+/* Inline time-and-length picker, for putting a habit on the day without
+   leaving the list you are looking at. The full editor in Habits does the
+   same thing alongside everything else about the habit. */
+function HabitSlotPicker({ habit, slot, onClose, onSave }) {
+  const [at,  setAt]  = useState(slot ? toHM(slot.start) : '07:00');
+  const [len, setLen] = useState(slot ? Math.max(5, slot.end - slot.start) : 30);
+
+  return (
+    <div data-testid="habit-slot-picker" className="mt-1 mb-1.5 mx-1.5 p-2 rounded-lg border border-ink-700 bg-ink-800/50 fadeUp">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <input type="time" value={at} aria-label={`Time for ${habit.name}`}
+          onChange={e=>setAt(e.target.value)}
+          className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-bone-100 font-mono min-w-0"/>
+        <select value={len} aria-label={`Length for ${habit.name}`} onChange={e=>setLen(Number(e.target.value))}
+          className="bg-ink-800 border border-ink-700 rounded px-1.5 py-1 text-xs text-bone-100">
+          {HABIT_SLOT_MINS.map(m => <option key={m} value={m}>{m}m</option>)}
+          {!HABIT_SLOT_MINS.includes(len) && <option value={len}>{len}m</option>}
+        </select>
+        <button onClick={()=>onSave({ start: fromHM(at), end: (fromHM(at) + len) % 1440 })}
+          className="btn px-2 py-1 rounded text-[10px] font-mono tracking-wider bg-strategy text-ink-950 font-semibold">
+          {slot ? 'MOVE' : 'ADD'}
+        </button>
+        {slot && (
+          <button onClick={()=>onSave(null)}
+            className="btn px-2 py-1 rounded text-[10px] font-mono tracking-wider border border-ink-700 text-bone-400 hover:text-combat">
+            OFF
+          </button>
+        )}
+        <button onClick={onClose} aria-label="Close" className="btn text-bone-400 hover:text-bone-100 ml-auto shrink-0">
+          <I.x className="w-3 h-3"/>
+        </button>
+      </div>
+      <div className="text-[9px] text-bone-400/70 mt-1.5 leading-snug">
+        Runs on every day this habit is scheduled. Alerts 15 and 5 minutes before.
+      </div>
+    </div>
+  );
+}
+
+function HabitChecklist({ habits, log, toggle, state, setState }) {
+  /* Which habit's time picker is open. One at a time — this sits in a
+     narrow column and two open at once would push the list around. */
+  const [scheduling, setScheduling] = useState(null);
   if (!habits.length) return <EmptyHint text="No habits scheduled for this day."/>;
   const grouped = resolvePillars(state).map(p => ({ pillar: p, items: habits.filter(h => h.pillar === p.id) })).filter(g => g.items.length);
 
@@ -2902,15 +3235,40 @@ function HabitChecklist({ habits, log, toggle, state }) {
             {g.items.map(h => {
               const on = !!log[h.id];
               const s = streakFor(h.id, h.days);
+              const slot = slotForHabit(state, h.id);
               return (
-                <button key={h.id} onClick={()=>toggle(h.id)}
-                  className="w-full flex items-center gap-2 text-left px-1.5 py-1 rounded hover:bg-ink-800/60 transition-colors">
-                  <div className={`tick ${on?'on':''}`} style={on ? { background: g.pillar.color, borderColor: g.pillar.color } : {}}>
-                    {on && <I.check className="w-3 h-3" style={{color:'#0a0a0b'}}/>}
+                <div key={h.id} data-testid="checklist-habit">
+                  <div className="w-full flex items-center gap-2 px-1.5 py-1 rounded hover:bg-ink-800/60 transition-colors">
+                    <button onClick={()=>toggle(h.id)} aria-label={`${on ? 'Untick' : 'Tick'} ${h.name}`}
+                      className="btn flex-1 min-w-0 flex items-center gap-2 text-left">
+                      <div className={`tick ${on?'on':''}`} style={on ? { background: g.pillar.color, borderColor: g.pillar.color } : {}}>
+                        {on && <I.check className="w-3 h-3" style={{color:'#0a0a0b'}}/>}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm text-bone-100 leading-tight truncate">{h.name}</div>
+                        {slot && (
+                          <div className="font-mono text-[9px] text-bone-400 mt-0.5">{toHM(slot.start)}–{toHM(slot.end)}</div>
+                        )}
+                      </div>
+                    </button>
+                    {s > 0 && <div className="font-mono text-[10px] text-bone-400 flex items-center gap-0.5 shrink-0"><I.flame className="w-3 h-3"/>{s}</div>}
+                    {/* Putting today's habits on the day, from where you
+                        actually look at them. */}
+                    {setState && (
+                      <button onClick={()=>setScheduling(id => id === h.id ? null : h.id)}
+                        aria-label={slot ? `Reschedule ${h.name}` : `Add ${h.name} to the calendar`}
+                        title={slot ? 'Change the time' : 'Put it on the calendar'}
+                        className={`btn shrink-0 w-6 h-6 rounded flex items-center justify-center ${slot ? '' : 'opacity-45 hover:opacity-100'}`}
+                        style={slot ? { color: g.pillar.color } : { color: '#9a9788' }}>
+                        <I.clock className="w-3.5 h-3.5"/>
+                      </button>
+                    )}
                   </div>
-                  <div className="flex-1 text-sm text-bone-100 leading-tight">{h.name}</div>
-                  {s > 0 && <div className="font-mono text-[10px] text-bone-400 flex items-center gap-0.5"><I.flame className="w-3 h-3"/>{s}</div>}
-                </button>
+                  {scheduling === h.id && setState && (
+                    <HabitSlotPicker habit={h} slot={slot} onClose={()=>setScheduling(null)}
+                      onSave={(next)=>{ setState(st => saveHabitWithSlot(st, h, next)); setScheduling(null); }}/>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -2960,14 +3318,11 @@ function HabitsView({ state, setState }) {
 
       {(adding || editing) && (
         <HabitModal habit={editing} state={state} onClose={()=>{ setAdding(false); setEditing(null); }}
-          onSave={(h)=>{
-            setState(s => {
-              const exists = s.habits.find(x => x.id === h.id);
-              return { ...s, habits: exists ? s.habits.map(x=>x.id===h.id?h:x) : [...s.habits, h] };
-            });
+          onSave={(h, slot)=>{
+            setState(s => saveHabitWithSlot(s, h, slot));
             setAdding(false); setEditing(null);
           }}
-          onDelete={(id)=>{ setState(s=>tomb({ ...s, habits: s.habits.filter(x=>x.id!==id) }, id)); setEditing(null); }}/>
+          onDelete={(id)=>{ setState(s=>deleteHabit(s, id)); setEditing(null); }}/>
       )}
     </div>
   );
@@ -3016,7 +3371,7 @@ function HabitCard({ h, state, setState, onEdit }) {
             {h.days.length === 7 ? 'DAILY' : h.days.map(d=>DAY_SHORT[d].toUpperCase()).join(' · ')}
           </div>
         </div>
-        <button onClick={onEdit} className="text-bone-400 hover:text-bone-100"><I.edit className="w-4 h-4"/></button>
+        <button onClick={onEdit} aria-label={`Edit ${h.name}`} className="text-bone-400 hover:text-bone-100"><I.edit className="w-4 h-4"/></button>
       </div>
       <div className="flex items-center gap-3 mb-2">
         <div className="flex-1 h-1.5 rounded-full bg-ink-700 overflow-hidden">
@@ -3042,6 +3397,8 @@ function HabitCard({ h, state, setState, onEdit }) {
   );
 }
 
+const HABIT_SLOT_MINS = [15, 20, 30, 45, 60, 90];
+
 function HabitModal({ habit, state, onClose, onSave, onDelete }) {
   const isNew = !habit;
   const [name, setName] = useState(habit?.name || '');
@@ -3050,12 +3407,27 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
   const [reminder, setReminder] = useState(habit?.reminder || '');
   const [error, setError] = useState('');
 
+  /* The habit's slot on the calendar, if it has one. Held as a time and a
+     length rather than start/end minutes because that is how you think
+     about it: "Fajr, 06:00, twenty minutes". */
+  const existingSlot = habit ? slotForHabit(state, habit.id) : null;
+  const [slotAt,  setSlotAt]  = useState(existingSlot ? toHM(existingSlot.start) : '');
+  const [slotFor, setSlotFor] = useState(existingSlot ? Math.max(5, existingSlot.end - existingSlot.start) : 30);
+
   const toggleDay = (d) => setDays(ds => ds.includes(d) ? ds.filter(x=>x!==d) : [...ds, d].sort());
 
   const save = () => {
     if (!name.trim()) { setError('Give this habit a name.'); return; }
     if (!days.length) { setError('Pick at least one day.'); return; }
-    onSave({ id: habit?.id || `h-${Date.now()}`, name: name.trim(), pillar, days, created: habit?.created || Date.now(), reminder: reminder || null, modifiedAt: Date.now() });
+    const id = habit?.id || `h-${Date.now()}`;
+    const start = slotAt ? fromHM(slotAt) : null;
+    onSave(
+      { id, name: name.trim(), pillar, days, created: habit?.created || Date.now(), reminder: reminder || null, modifiedAt: Date.now() },
+      /* The slot travels with the save so the habit and its block can never
+         be written apart — a block pointing at a habit that wasn't saved is
+         a ghost on the timeline. null means "not on the calendar". */
+      start === null ? null : { start, end: (start + slotFor) % 1440 },
+    );
   };
 
   return (
@@ -3091,12 +3463,40 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
           <button onClick={()=>setDays([1,4])} className="text-[10px] font-mono tracking-wider text-deen hover:text-bone-100">MON/THU (FAST)</button>
         </div>
       </Field>
-      <Field label="Daily reminder (optional)">
+      {/* A habit with a slot in the day is a block on the timeline, and
+          picks up the block alerts — 15 and 5 minutes before, 5 before
+          the end — without a reminder time of its own. */}
+      <Field label="On the calendar (optional)">
         <div className="flex items-center gap-2 flex-wrap">
-          <input type="time" value={reminder} onChange={e=>setReminder(e.target.value)}
+          <input type="time" value={slotAt} aria-label="Calendar time"
+            onChange={e=>setSlotAt(e.target.value)}
             className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono min-w-0"/>
-          {reminder && <button onClick={()=>setReminder('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat shrink-0">CLEAR</button>}
-          {!reminder && <span className="text-[10px] font-mono text-bone-400">Off</span>}
+          {slotAt && (
+            <select value={slotFor} aria-label="Length" onChange={e=>setSlotFor(Number(e.target.value))}
+              className="bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 text-sm">
+              {HABIT_SLOT_MINS.map(m => <option key={m} value={m}>{m} min</option>)}
+              {!HABIT_SLOT_MINS.includes(slotFor) && <option value={slotFor}>{slotFor} min</option>}
+            </select>
+          )}
+          {slotAt
+            ? <button onClick={()=>setSlotAt('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat shrink-0">REMOVE</button>
+            : <span className="text-[10px] font-mono text-bone-400">Not on the calendar</span>}
+        </div>
+        <div className="text-[10px] text-bone-400/80 mt-1.5">
+          {slotAt
+            ? 'Appears on the timeline every day this habit runs, and alerts 15 and 5 minutes before — no reminder time needed.'
+            : 'Give it a time and it shows up on your day, alongside blocks and prayer times.'}
+        </div>
+      </Field>
+      <Field label={slotAt ? 'Daily reminder (covered by the calendar slot)' : 'Daily reminder (optional)'}>
+        <div className="flex items-center gap-2 flex-wrap">
+          <input type="time" value={reminder} aria-label="Daily reminder"
+            onChange={e=>setReminder(e.target.value)}
+            disabled={!!slotAt}
+            className={'bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono min-w-0 ' + (slotAt ? 'opacity-40' : '')}/>
+          {reminder && !slotAt && <button onClick={()=>setReminder('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat shrink-0">CLEAR</button>}
+          {!reminder && !slotAt && <span className="text-[10px] font-mono text-bone-400">Off</span>}
+          {slotAt && <span className="text-[10px] font-mono text-bone-400">The block's alerts cover this</span>}
         </div>
       </Field>
       {error && <div className="text-xs text-combat">{error}</div>}
@@ -3844,10 +4244,19 @@ function SalahCard({ state, setState }) {
   );
 }
 
+/* How long a registration can go unconfirmed before it is more likely
+   dead than quiet. The Cron Worker bumps updated_at on every successful
+   send and gives up on a row entirely at 30 days, so anything past a
+   week without a confirmed delivery is worth flagging before the
+   cleanup silently removes it. */
+const PUSH_STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
 function NotificationsCard({ state, setState }) {
   const supported = typeof Notification !== 'undefined';
-  const [perm, setPerm]     = useState(supported ? Notification.permission : 'denied');
-  const [pushOk, setPushOk] = useState(false);
+  const [perm, setPerm]   = useState(supported ? Notification.permission : 'denied');
+  const [check, setCheck] = useState(null);   // null = not looked yet
+  const [busy, setBusy]   = useState(false);
+  const [msg, setMsg]     = useState(null);
   const enabled = state.ui?.notif && perm === 'granted';
   const syncOk  = Sync.configured();
 
@@ -3866,22 +4275,44 @@ function NotificationsCard({ state, setState }) {
     };
   }, [supported]);
 
-  /* Check if a push subscription already exists */
+  /* Both ends of the chain, together. Either half on its own is
+     misleading: the browser will happily report a subscription the push
+     service abandoned weeks ago, and the server can be holding a row for
+     a subscription this device has since replaced. */
+  const diagnose = useCallback(async () => {
+    const local = await pushLocalId();
+    const server = local ? await pushServerStatus(local.id) : null;
+    setCheck({
+      local: !!local,
+      keyOk: local ? subMatchesVapidKey(local.sub) : false,
+      server,
+      at: Date.now(),
+    });
+    return { local, server };
+  }, []);
+
+  useEffect(() => { if (enabled && syncOk) diagnose(); }, [enabled, syncOk, diagnose]);
+
+  /* Repair without being asked, but only for the one case that is
+     unambiguous and invisible: this device holds a live subscription and
+     the server has no row for it. Nothing else is safe to assume. */
+  const repaired = useRef(false);
   useEffect(() => {
+    if (!enabled || !syncOk || repaired.current) return;
+    if (!check || !check.local || check.server === null) return;
+    if (check.server.registered) return;
+    repaired.current = true;
     (async () => {
-      try {
-        const reg = await navigator.serviceWorker?.ready;
-        const sub = await reg?.pushManager?.getSubscription();
-        setPushOk(!!sub);
-      } catch {}
+      const r = await reconnectPush(state);
+      if (r.ok) { setMsg('Re-registered this device — the server had lost it.'); diagnose(); }
     })();
-  }, [enabled]);
+  }, [check, enabled, syncOk]);
 
   const toggle = async () => {
     if (enabled) {
       setState(s => ({ ...s, ui: { ...s.ui, notif: false } }));
       await removePushSubscription();
-      setPushOk(false);
+      setCheck(null); setMsg(null);
       return;
     }
     if (perm === 'denied') {
@@ -3900,11 +4331,34 @@ function NotificationsCard({ state, setState }) {
     /* Push subscription will be created by syncPushSchedule on next scheduleNotifications call */
   };
 
-  const pushStatus = !syncOk
-    ? 'Connect Cloudflare D1 sync to enable background push.'
-    : pushOk
-    ? 'Background push active — fires even when the app is closed.'
-    : 'Background push pending — will activate after first sync.';
+  const reconnect = async () => {
+    setBusy(true); setMsg(null);
+    const r = await reconnectPush(state);
+    if (r.ok) {
+      const n = r.server?.scheduled;
+      setMsg(Number.isFinite(n)
+        ? `Reconnected. The server has this device and ${n} alert${n === 1 ? '' : 's'} planned for today.`
+        : 'Reconnected — this device is registered again.');
+    } else {
+      setMsg({
+        unsupported: 'This browser has no push support to reconnect to.',
+        permission:  'Allow notifications first, then reconnect.',
+        sync:        'Connect sync first — push registrations live in the same database.',
+        server:      `The server refused the registration${r.status ? ` (HTTP ${r.status})` : ''}.`,
+        subscribe:   `The browser refused a new subscription${r.detail ? ` — ${r.detail}` : '.'}`,
+      }[r.reason] || 'Could not reconnect.');
+    }
+    await diagnose();
+    setBusy(false);
+  };
+
+  const testLocal = () => {
+    /* Proves this device can DISPLAY a notification — the service worker
+       is alive and permission is real. It deliberately does not claim to
+       prove delivery: nothing left the device. */
+    showNotificationViaSW('Command Deck', 'Notifications are working on this device.', 'test');
+    setMsg('Sent a notification to this device. If nothing appeared, the block is in your OS or browser settings, not here.');
+  };
 
   const statusLine = !supported
     ? 'Not supported in this browser.'
@@ -3916,22 +4370,84 @@ function NotificationsCard({ state, setState }) {
 
   const btnLabel = perm === 'denied' ? 'Recheck permission' : enabled ? 'Disable notifications' : 'Enable notifications';
 
+  /* One line per link in the chain, so a break is locatable rather than
+     just "notifications aren't working". */
+  const rows = [];
+  if (enabled) {
+    rows.push({
+      ok: check?.local && check?.keyOk,
+      label: 'This device',
+      detail: !check ? 'checking…'
+        : !check.local ? 'no subscription — reconnect to create one'
+        : !check.keyOk ? 'subscribed with an old key — reconnect to replace it'
+        : 'subscribed',
+    });
+    const srv = check?.server;
+    const staleBy = srv?.registered && srv.updatedAt ? Date.now() - srv.updatedAt : 0;
+    rows.push({
+      ok: !!srv?.registered && staleBy < PUSH_STALE_AFTER_MS,
+      label: 'The server',
+      detail: !syncOk ? 'sync not connected'
+        : !check ? 'checking…'
+        : srv === null ? "couldn't be reached"
+        : !srv.registered ? "doesn't have this device"
+        : staleBy >= PUSH_STALE_AFTER_MS ? `last confirmed ${agoLabel(srv.updatedAt)} — probably dead`
+        : `holds ${srv.scheduled} alert${srv.scheduled === 1 ? '' : 's'} for today, last confirmed ${agoLabel(srv.updatedAt)}`,
+    });
+    if (srv?.registered && srv.nextFireAt > 0) {
+      rows.push({ ok: true, label: 'Next alert', detail: new Date(srv.nextFireAt).toLocaleString() });
+    }
+  }
+
   return (
-    <div className="card p-5">
+    <div className="card p-5" data-testid="notifications-card">
       <div className="text-[10px] font-mono tracking-widest text-bone-400">BACKGROUND NOTIFICATIONS</div>
       <div className="font-display text-xl text-bone-100 mt-1 mb-1">Alerts & reminders</div>
       <div className="text-sm text-bone-400 mb-3">{statusLine}</div>
+
       {enabled && (
-        <div className={`text-xs font-mono mb-3 px-2 py-1.5 rounded-md border ${pushOk ? 'border-deen/30 text-deen bg-deen/10' : 'border-ink-700 text-bone-500'}`}>
-          {pushStatus}
+        <div data-testid="push-health" className="mb-3 rounded-lg border border-ink-700 divide-y divide-ink-700">
+          {rows.map(r => (
+            <div key={r.label} className="flex items-start gap-2 px-2.5 py-2">
+              <span className={`text-xs leading-5 shrink-0 ${r.ok ? 'text-deen' : 'text-strategy'}`}>{r.ok ? '✓' : '!'}</span>
+              <span className="text-[11px] font-mono tracking-wider text-bone-400 w-20 shrink-0 leading-5">{r.label.toUpperCase()}</span>
+              <span className={`text-xs leading-5 flex-1 min-w-0 ${r.ok ? 'text-bone-300' : 'text-bone-100'}`}>{r.detail}</span>
+            </div>
+          ))}
         </div>
       )}
-      {supported && (
-        <button onClick={toggle}
-          className={`btn px-3 py-2 rounded-lg text-sm ${enabled ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>
-          {btnLabel}
-        </button>
+
+      {msg && <div data-testid="push-msg" className="text-xs text-bone-300 mb-3 px-2.5 py-2 rounded-lg border border-ink-700">{msg}</div>}
+
+      <div className="flex flex-wrap gap-2">
+        {supported && (
+          <button onClick={toggle}
+            className={`btn px-3 py-2 rounded-lg text-sm ${enabled ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>
+            {btnLabel}
+          </button>
+        )}
+        {enabled && syncOk && (
+          <button onClick={reconnect} disabled={busy} data-testid="push-reconnect"
+            className="btn px-3 py-2 rounded-lg text-sm border border-strategy/40 text-strategy hover:bg-strategy/10 disabled:opacity-50">
+            {busy ? 'Reconnecting…' : 'Reconnect'}
+          </button>
+        )}
+        {enabled && (
+          <button onClick={testLocal} data-testid="push-test"
+            className="btn px-3 py-2 rounded-lg text-sm border border-ink-700 hover:bg-ink-800 text-bone-300">
+            Test on this device
+          </button>
+        )}
+      </div>
+
+      {enabled && (
+        <p className="text-[10px] text-bone-400/70 mt-3 leading-relaxed">
+          Reconnect throws away this device's subscription and builds a new one. Do it when alerts
+          have gone quiet — after reinstalling the app, clearing site data, or a long stretch with
+          the app closed. It is safe to press at any time and costs nothing.
+        </p>
       )}
+
       <div className="mt-3 pt-3 border-t border-ink-700">
         <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1.5">TIMEZONE</div>
         <select value={state.ui?.timezone || 'Europe/London'}

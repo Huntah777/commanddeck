@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS push_subs (
 -- consumed; what has actually gone out is tracked in `sent`, which resets when
 -- `plan_day` rolls over. That split is what lets a delayed or skipped cron tick
 -- still deliver, instead of silently dropping the notification.
+--
+-- GET /api/push?id=… reads this row back for the Alerts card. Push fails
+-- silently by nature — the browser keeps reporting a healthy subscription long
+-- after the row behind it is gone — so `updated_at` (last time this device was
+-- confirmed WORKING) is the only way the app can tell "delivering fine" from
+-- "dead for three weeks". See functions/api/push.js.
 
 -- Migrations — run once each if the table predates these columns:
 -- ALTER TABLE push_subs ADD COLUMN next_fire_at INTEGER NOT NULL DEFAULT 0;

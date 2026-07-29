@@ -85,7 +85,7 @@ test.describe('Bug fixes', () => {
     await page.goto('/');
     await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
 
-    const block = page.locator('button', { hasText: 'Early bird' });
+    const block = page.getByTestId('time-block').filter({ hasText: 'Early bird' });
     await expect(block).toBeVisible({ timeout: 10_000 });
     const top = await block.evaluate((el) => parseFloat(el.style.top));
     expect(top).toBeGreaterThanOrEqual(0);
@@ -102,7 +102,7 @@ test.describe('Bug fixes', () => {
     await page.goto('/');
     await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
 
-    const segments = page.locator('button', { hasText: 'Tahajjud' });
+    const segments = page.getByTestId('time-block').filter({ hasText: 'Tahajjud' });
     await expect(segments).toHaveCount(2, { timeout: 10_000 });
     const tops = await segments.evaluateAll((els) => els.map((el) => parseFloat(el.style.top)));
     for (const top of tops) expect(top).toBeGreaterThanOrEqual(0);

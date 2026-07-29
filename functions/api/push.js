@@ -1,10 +1,24 @@
 /* ============================================================
    Madinah · Command Deck — /api/push
    ------------------------------------------------------------
-   POST /api/push  → upsert push subscription + notification schedule
-   DELETE /api/push → remove subscription (unsubscribe)
+   GET    /api/push?id=…  → what the server actually holds for this device
+   POST   /api/push       → upsert push subscription + notification schedule
+   DELETE /api/push       → remove subscription (unsubscribe)
 
    Same auth as /api/state: Authorization: Bearer <SYNC_TOKEN>
+
+   ── Why GET exists ────────────────────────────────────────────
+   Background push fails silently by nature. The browser keeps
+   reporting a healthy-looking subscription object long after the row
+   backing it has gone — cleaned up as stale, dropped on a 404/410,
+   lost with a restored database — and the app has no way to tell the
+   difference between "delivering fine" and "dead for three weeks",
+   because both look like no notifications arriving.
+
+   So the client can't self-diagnose from what the browser tells it.
+   This returns the server's own view instead, which is the half it
+   cannot see: whether the row exists at all, when it was last
+   confirmed working, and how much of today's plan is still pending.
    ============================================================ */
 
 const json = (data, status = 200) =>
@@ -36,6 +50,32 @@ export async function onRequest({ request, env }) {
   if (!await tokenOk(request, env)) return json({ error: 'Unauthorized' }, 401);
 
   try {
+    if (request.method === 'GET') {
+      const id = new URL(request.url).searchParams.get('id');
+      if (!id) return json({ error: 'Missing id' }, 400);
+
+      const row = await env.DB.prepare(
+        'SELECT schedule, sent, plan_day, next_fire_at, updated_at FROM push_subs WHERE id = ?'
+      ).bind(id).first();
+
+      /* Not an error — "the server has never heard of this device" is a
+         perfectly good answer, and the one the reconnect flow acts on. */
+      if (!row) return json({ registered: false });
+
+      const parse = (s) => { try { const v = JSON.parse(s); return Array.isArray(v) ? v : []; } catch { return []; } };
+      const schedule = parse(row.schedule);
+      const sent     = parse(row.sent);
+
+      return json({
+        registered: true,
+        updatedAt:  row.updated_at ?? 0,
+        nextFireAt: row.next_fire_at ?? 0,
+        planDay:    row.plan_day || null,
+        scheduled:  schedule.length,
+        delivered:  sent.length,
+      });
+    }
+
     if (request.method === 'POST') {
       const { id, subscription, schedule } = await request.json();
       if (!id || !subscription) return json({ error: 'Missing id or subscription' }, 400);
