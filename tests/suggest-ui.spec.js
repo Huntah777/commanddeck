@@ -64,7 +64,7 @@ async function seed(page, suggestions = SUGGESTIONS) {
 const openTab = async (page, name) => {
   await page.goto('/');
   await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
-  await page.getByText('Configuration').scrollIntoViewIfNeeded();
+  await page.getByTestId('admin-nav').getByRole('button', { name: 'Setup' }).click();
   await page.getByRole('button', { name, exact: true }).click();
 };
 

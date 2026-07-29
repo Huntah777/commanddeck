@@ -40,9 +40,9 @@ test.describe('Bug fixes', () => {
     await page.goto('/');
     await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
 
-    // Navigate to Stats, where Import JSON lives.
-    const statsTab = page.locator('button, a').filter({ hasText: /^Stats$/i }).first();
-    await statsTab.click();
+    // Navigate to Admin → System, where Import JSON lives.
+    await page.locator('nav button').filter({ hasText: /^Admin$/i }).first().click();
+    await page.getByTestId('admin-nav').getByRole('button', { name: 'System' }).click();
 
     const fileInput = page.locator('input[type="file"]');
     await fileInput.setInputFiles({

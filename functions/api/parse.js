@@ -184,7 +184,13 @@ const clampWeight = (w) => {
    concerns; urgency comes from when it is due. Because they are
    independent, a request from someone who matters with no deadline
    lands in Schedule rather than being crowded out by whoever shouted
-   most recently — which is the entire point of the matrix. ── */
+   most recently — which is the entire point of the matrix.
+
+   Schedule is the resting place. Do and Eliminate are both verdicts —
+   "drop everything" and "cut this without guilt" — and neither is
+   something the parser should reach by default. Where the text gives
+   it nothing to go on, it files to Schedule: visible, actionable, and
+   not pretending to a certainty it doesn't have. ── */
 
 export function classify(extract, ctx = {}) {
   const today = isDateKey(ctx.today) ? ctx.today : keyOf(Date.now());
@@ -217,13 +223,23 @@ export function classify(extract, ctx = {}) {
   const urgent    = mark.urgent || (days !== null && days <= URGENT_WITHIN_DAYS);
   const important = importance >= IMPORTANT_AT;
 
-  /* Eliminate is a verdict, not a filing — it says "cut this without
-     guilt". Nothing the user gave a deadline to should land there
+  /* Do has to be earned. A near date is a fact about the calendar, not
+     evidence that something outranks everything else — and weight 3 is
+     what a task gets for naming nobody, which is the absence of a
+     signal rather than the presence of one. So Do needs the capture to
+     have actually said this is pressing: someone weighted above
+     neutral, or your own words. With neither, the parser is guessing,
+     and a guess belongs in Schedule — still visible, still dated, just
+     not jumping the queue ahead of the things you did call urgent. */
+  const stated = mark.urgent || mark.important || importance > DEFAULT_WEIGHT;
+
+  /* Eliminate is a verdict too — it says "cut this without guilt".
+     Nothing the user gave a deadline to should land there
      automatically, however little weight the person carries: stating a
      date is stating a commitment. A far-off low-priority ask is
      something to pass on, not something to bin. */
   const quadrant = important
-    ? (urgent ? 'do' : 'plan')
+    ? (urgent && stated ? 'do' : 'plan')
     : (urgent || due ? 'delegate' : 'eliminate');
 
   /* Say why, in the same terms the settings screen uses. A filing you
@@ -242,6 +258,9 @@ export function classify(extract, ctx = {}) {
   else if (days === 0)    why.push('due today');
   else if (days === 1)    why.push('due tomorrow');
   else                    why.push(`due in ${days}d`);
+  /* Say when the date alone was what stopped it reaching Do, so the
+     demotion reads as a rule rather than as the parser losing track. */
+  if (important && urgent && !stated) why.push('nothing marked it urgent · scheduled');
 
   return {
     title: extract?.title || raw,
@@ -347,7 +366,24 @@ async function aiExtract(text, ctx, env) {
     person: String(got.person || '').trim(),
     due: isDateKey(got.due) ? got.due : null,
     listId: listIdFor(got.list, ctx.lists),
+    /* What the call actually cost, in the only unit the API reports.
+       Handed back so the client can keep its own ledger — the running
+       total is arithmetic over calls this app made, not a number
+       scraped out of a billing dashboard. */
+    usage: tokensOf(out),
   };
+}
+
+/* Workers AI reports usage on some models and not others, and has used
+   more than one field name for it. Anything unrecognised is null rather
+   than zero: a missing figure and a free call are not the same claim. */
+export function tokensOf(out) {
+  const u = out?.usage;
+  if (!u || typeof u !== 'object') return null;
+  const i = Number(u.prompt_tokens ?? u.input_tokens);
+  const o = Number(u.completion_tokens ?? u.output_tokens);
+  if (!Number.isFinite(i) && !Number.isFinite(o)) return null;
+  return { i: Number.isFinite(i) ? i : 0, o: Number.isFinite(o) ? o : 0 };
 }
 
 export async function onRequest({ request, env }) {
@@ -388,5 +424,5 @@ export async function onRequest({ request, env }) {
     source = 'rules';
   }
 
-  return json({ ...classify(extract, ctx), source });
+  return json({ ...classify(extract, ctx), source, usage: extract.usage || null });
 }

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { classify, resolveDue, matchPerson, matchList, markers, fallbackExtract, daysBetween } from '../functions/api/parse.js';
+import { classify, resolveDue, matchPerson, matchList, markers, fallbackExtract, daysBetween, tokensOf } from '../functions/api/parse.js';
 
 /* Unit tests for natural-language task capture. No browser and no model:
    everything asserted here is the deterministic half of /api/parse — the
@@ -192,7 +192,44 @@ test.describe('quadrant assignment', () => {
 
   test('naming nobody is important by default — your own work is not background', () => {
     expect(file('write the quarterly plan').quadrant).toBe('plan');
-    expect(file('renew the car insurance tomorrow').quadrant).toBe('do');
+    expect(file('renew the car insurance tomorrow').important).toBe(true);
+  });
+
+  test('a date on its own schedules rather than promotes to Do', () => {
+    /* Do says "drop everything". A date is a fact about the calendar,
+       and weight 3 is what a task gets for naming nobody — the absence
+       of a signal, not the presence of one. With neither, the parser is
+       guessing, and Schedule is where a guess belongs. */
+    const out = file('renew the car insurance tomorrow');
+    expect(out.important).toBe(true);
+    expect(out.urgent).toBe(true);      // the date still reads as urgent
+    expect(out.quadrant).toBe('plan');  // it just isn't enough on its own
+    expect(out.due).toBe(THU);          // and the date is not lost
+  });
+
+  test('the demotion is stated in the receipt, not silent', () => {
+    // A filing you can't audit is one you stop trusting.
+    expect(file('renew the car insurance tomorrow').why.join(' ')).toContain('nothing marked it urgent');
+    expect(file('aisha needs the passports tomorrow').why.join(' ')).not.toContain('nothing marked it urgent');
+  });
+
+  test('saying it is urgent is enough on its own', () => {
+    // The parser is not guessing here — you said so.
+    expect(file('sort the invoices asap').quadrant).toBe('do');
+    expect(file('renew the car insurance tomorrow, this is critical').quadrant).toBe('do');
+  });
+
+  test('someone weighted above neutral is enough on its own', () => {
+    // Aisha is 5. The deadline supplies urgency, she supplies the reason.
+    expect(file('aisha needs the passports tomorrow').quadrant).toBe('do');
+  });
+
+  test('a deadline nobody vouched for still shows up on the day', () => {
+    /* The demotion is about priority, not visibility: Schedule is a
+       quadrant, the due date is what puts it in front of you. */
+    const out = file('renew the car insurance today');
+    expect(out.quadrant).toBe('plan');
+    expect(out.due).toBe(WED);
   });
 
   test('the same person always produces the same filing', () => {
@@ -277,5 +314,27 @@ test.describe('date arithmetic', () => {
     // the ±1h shift from rounding a day boundary the wrong way.
     expect(daysBetween('2026-10-24', '2026-10-26')).toBe(2);
     expect(daysBetween('2026-03-28', '2026-03-30')).toBe(2);
+  });
+});
+
+test.describe('what the call cost', () => {
+  /* Feeds the AI spend figure in Admin. Workers AI reports usage on
+     some models and not others, and has used more than one field name
+     for it, so this is read defensively. */
+  test('the two naming conventions both read', () => {
+    expect(tokensOf({ usage: { prompt_tokens: 400, completion_tokens: 60 } })).toEqual({ i: 400, o: 60 });
+    expect(tokensOf({ usage: { input_tokens: 400, output_tokens: 60 } })).toEqual({ i: 400, o: 60 });
+  });
+
+  test('no usage reported is null, not zero', () => {
+    // A missing figure and a free call are not the same claim, and a
+    // ledger that treats them alike understates the bill.
+    expect(tokensOf({ response: 'x' })).toBe(null);
+    expect(tokensOf({ usage: {} })).toBe(null);
+    expect(tokensOf(null)).toBe(null);
+  });
+
+  test('half a reading is still a reading', () => {
+    expect(tokensOf({ usage: { prompt_tokens: 400 } })).toEqual({ i: 400, o: 0 });
   });
 });

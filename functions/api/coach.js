@@ -171,11 +171,10 @@ const SCHEMA = {
 };
 
 /* Structured outputs are not part of Workers AI's documented
-   pass-through of the Anthropic messages format. `output_config` is
-   still sent — if it is honoured the reply is schema-exact — but the
-   shape is also stated in the prompt and the text is parsed
-   defensively, so the review works either way rather than 502-ing on
-   an undocumented parameter being dropped. */
+   pass-through of the Anthropic messages format, so `output_config` is
+   not sent (see askClaude). The shape is stated in the prompt instead
+   and the reply parsed defensively — a code fence or a sentence of
+   preamble costs nothing rather than losing the whole review. */
 export function extractJson(text) {
   try { return JSON.parse(text); } catch {}
   const start = text.indexOf('{');
@@ -323,6 +322,11 @@ export async function onRequest({ request, env }) {
         note: review.note,
         actions: (review.actions || []).map(a => a.action),
         metrics: metricsOf(digest),
+        /* What this one cost, in tokens. Opus is the only thing in this
+           app billed at real rates, so the spend ledger in the Admin
+           view is built from these — measured, not estimated from an
+           assumed prompt size. */
+        usage: usage ? { i: Number(usage.input_tokens) || 0, o: Number(usage.output_tokens) || 0 } : null,
       }].slice(-MAX_HISTORY),
     }));
 

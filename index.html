@@ -187,6 +187,11 @@ tailwind.config = {
   .scrollbar::-webkit-scrollbar-thumb { background: var(--s4); border-radius: 8px; }
   .scrollbar::-webkit-scrollbar-track { background: transparent; }
 
+  /* A horizontal tab strip that scrolls on a narrow phone — the bar
+     itself would be taller than the tabs it sits under. */
+  .no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+
   .btn { transition: all 160ms ease; }
   .btn:hover { transform: translateY(-1px); }
   .glow-deen      { box-shadow: 0 0 0 1px rgba(16,185,129,.25),  0 8px 24px -12px rgba(16,185,129,.45);  }
@@ -283,6 +288,66 @@ const UiLocal = {
   write(view, selectedDate) {
     try { localStorage.setItem(UI_LOCAL_KEY, JSON.stringify({ view, selectedDate })); }
     catch (e) { console.warn('ui-local write failed', e); }
+  },
+};
+
+/* ── The running Pomodoro session ─────────────────────────────────
+   Device-local, like the view above: a timer is a fact about where you
+   are sitting, not a setting. Syncing it would start a countdown on the
+   iPad because you started one at the desk.
+
+   Stored as the INSTANT THE PHASE ENDS rather than as seconds
+   remaining. A decrementing counter only moves while something is
+   ticking it, and nothing ticks reliably once you look away: browsers
+   throttle background timers to roughly once a minute, and a
+   backgrounded PWA is frozen outright — on iOS often within seconds.
+   Against a deadline, "how long is left" is arithmetic on the clock. It
+   is right the moment you look at it however long the app was asleep,
+   it survives a reload, and it survives the OS killing the app and you
+   reopening it. Completion is likewise detected by comparing now
+   against the deadline, so a session that finished while the phone was
+   in a pocket is finished when you take it out — not paused at the
+   second the freeze began. ── */
+const TIMER_KEY = 'madinah_timer_v1';
+
+const PHASES = [
+  { id: 'work',  label: 'Focus',       color: '#ef4444' },
+  { id: 'short', label: 'Short break', color: '#10b981' },
+  { id: 'long',  label: 'Long break',  color: '#22d3ee' },
+];
+const phaseMins = (cfg, i) => Math.max(1, Number([cfg.workMins, cfg.shortMins, cfg.longMins][i]) || 25);
+
+const IDLE_SESSION = { phase: 0, endsAt: null, leftMs: null, running: false, doneCount: 0, target: null };
+
+/* 'stats' was this tab's name before it grew into the place everything
+   is configured. Manifest shortcuts, bookmarks, and any device that
+   synced its view before the rename still say it, so it is accepted
+   forever and resolved in one place rather than five. */
+const VIEW_ALIASES = { stats: 'admin' };
+const normaliseView = (v) => VIEW_ALIASES[v] || v;
+const VALID_VIEWS = ['today','habits','tasks','matrix','admin','stats','focus','goals'];
+
+const TimerStore = {
+  read() {
+    try {
+      const v = JSON.parse(localStorage.getItem(TIMER_KEY) || 'null');
+      if (!v || typeof v !== 'object') return null;
+      /* Anything persisted is a whole version old at best — take only
+         the fields we understand, with the idle defaults behind them. */
+      return {
+        ...IDLE_SESSION,
+        phase:     [0, 1, 2].includes(v.phase) ? v.phase : 0,
+        endsAt:    Number.isFinite(v.endsAt) ? v.endsAt : null,
+        leftMs:    Number.isFinite(v.leftMs) ? v.leftMs : null,
+        running:   v.running === true,
+        doneCount: Number.isFinite(v.doneCount) ? v.doneCount : 0,
+        target:    v.target && typeof v.target === 'object' ? v.target : null,
+      };
+    } catch { return null; }
+  },
+  write(s) {
+    try { localStorage.setItem(TIMER_KEY, JSON.stringify(s)); }
+    catch (e) { console.warn('timer write failed', e); }
   },
 };
 
@@ -449,6 +514,7 @@ const I = {
   refresh: (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>,
   target:  (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor" strokeWidth="0"/></svg>,
   flag:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>,
+  sliders: (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="6" r="2.2" fill="var(--s0,#0a0a0b)"/><circle cx="15" cy="12" r="2.2" fill="var(--s0,#0a0a0b)"/><circle cx="8" cy="18" r="2.2" fill="var(--s0,#0a0a0b)"/></svg>,
 };
 
 /* ------------------------------------------------------------------
@@ -1230,6 +1296,216 @@ function playAdhan() {
 /* ------------------------------------------------------------------
    APP
 ------------------------------------------------------------------- */
+/* ------------------------------------------------------------------
+   POMODORO ENGINE
+   ------------------------------------------------------------------
+   The timer used to live inside the Focus view, which meant switching
+   to any other tab in the app unmounted it and threw the session away.
+   It is mounted at the app root now; the Focus view is only a face for
+   it. See TimerStore above for why the countdown is a deadline rather
+   than a number that gets decremented.
+------------------------------------------------------------------- */
+
+/* What a session is aimed at. A pomodoro pointed at nothing is just a
+   countdown — pointed at a pillar or a habit it becomes evidence about
+   where the hours actually went, which is the only reason to log them.
+   { kind: 'free'|'task'|'pillar'|'habit', id, pillarId, label, color } */
+const targetLabel = (t) => t && t.kind && t.kind !== 'free' ? (t.label || '') : '';
+
+function usePomodoro(state, setState) {
+  const cfg = useMemo(() => {
+    const raw = state?.pomodoro || SEED().pomodoro;
+    return { ...raw, longAfter: Math.max(1, Number(raw.longAfter) || 4) };
+  }, [state?.pomodoro]);
+
+  const [session, setSession] = useState(() => TimerStore.read() || IDLE_SESSION);
+  useEffect(() => { TimerStore.write(session); }, [session]);
+
+  /* One AudioContext, opened on the click that starts the timer. A
+     context created later — inside a completion firing in a hidden tab
+     — is born suspended by the autoplay policy and never makes a
+     sound, which is exactly the case that needs to be audible. */
+  const audioRef = useRef(null);
+  const primeAudio = () => {
+    try {
+      if (!audioRef.current) audioRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioRef.current.state === 'suspended') audioRef.current.resume();
+    } catch (e) {}
+  };
+  const beep = () => {
+    try {
+      primeAudio();
+      const ctx = audioRef.current;
+      if (!ctx) return;
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.frequency.value = 880; osc.type = 'sine';
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.8);
+      osc.start(); osc.stop(ctx.currentTime + 0.8);
+    } catch (e) {}
+  };
+
+  /* Latest values for handlers that outlive the render that made them:
+     interval callbacks and window listeners both fire long after. */
+  const live = useRef({});
+  live.current = { session, cfg, state, setState };
+
+  /* End the current phase. `atMs` is when it actually ended — for a
+     natural completion that is the deadline, which may be well before
+     we noticed if the device was asleep. */
+  const finish = useCallback((atMs, workedMs) => {
+    const { session: s, cfg: c, state: st, setState: set } = live.current;
+    if (!st) return;
+    /* Stop the clock in the ref as well as in React state: another
+       interval tick can arrive before the re-render lands, and it must
+       not settle the same deadline twice. */
+    live.current.session = { ...s, running: false, endsAt: null, leftMs: null };
+
+    const isWork = PHASES[s.phase].id === 'work';
+    beep();
+    if (notifEnabled() && st.ui?.notif) {
+      showNotificationViaSW(
+        isWork ? 'Focus session complete' : `${PHASES[s.phase].label} over — back to work`,
+        targetLabel(s.target),
+        'pomodoro',
+      );
+    }
+
+    if (isWork) {
+      const mins = Math.round(workedMs / 60_000);
+      /* Skipping out after two minutes should not bank a full session —
+         log what was actually sat through, and nothing at all below a
+         minute. */
+      if (mins >= 1) {
+        const t = s.target || {};
+        set(prev => ({
+          ...prev,
+          pomodoroLogs: [...(prev.pomodoroLogs || []), {
+            id: `p-${atMs}`,
+            date: fmtKey(new Date(atMs)),
+            /* taskId/taskTitle predate pillar and habit targets and are
+               what every stored log and the coaching digest already
+               read, so they keep their exact old meaning rather than
+               being folded into something generic. */
+            taskId:     t.kind === 'task'  ? t.id : null,
+            taskTitle:  t.kind === 'task'  ? (t.label || null) : null,
+            targetKind: t.kind || 'free',
+            pillarId:   t.pillarId || null,
+            habitId:    t.kind === 'habit' ? t.id : null,
+            label:      t.label || null,
+            mins,
+            completedAt: atMs,
+          }],
+        }));
+      }
+      const done = s.doneCount + 1;
+      setSession(cur => ({ ...cur, doneCount: done, phase: done % c.longAfter === 0 ? 2 : 1, running: false, endsAt: null, leftMs: null }));
+    } else {
+      setSession(cur => ({ ...cur, phase: 0, running: false, endsAt: null, leftMs: null }));
+    }
+  }, []);
+
+  /* Has the deadline passed? Asked on a timer while the app is awake,
+     and again the moment it wakes up. */
+  const check = useCallback(() => {
+    const { session: s, cfg: c } = live.current;
+    if (!s.running || !Number.isFinite(s.endsAt)) return;
+    if (Date.now() >= s.endsAt) finish(s.endsAt, phaseMins(c, s.phase) * 60_000);
+  }, [finish]);
+  const checkRef = useRef(check);
+  checkRef.current = check;
+
+  /* Deliberately does not repaint anything — the digits are drawn from
+     the deadline by whoever is displaying them (see useCountdown), so
+     this interval being throttled to once a minute in a hidden tab
+     costs nothing but a slightly late completion. */
+  useEffect(() => {
+    if (!session.running) return;
+    const id = setInterval(() => checkRef.current(), 500);
+    return () => clearInterval(id);
+  }, [session.running]);
+
+  /* Coming back is the moment that matters. Whatever the browser did to
+     our timers while we were hidden, the deadline is still the deadline. */
+  useEffect(() => {
+    const wake = () => checkRef.current();
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('focus', wake);
+    window.addEventListener('pageshow', wake);
+    return () => {
+      document.removeEventListener('visibilitychange', wake);
+      window.removeEventListener('focus', wake);
+      window.removeEventListener('pageshow', wake);
+    };
+  }, []);
+
+  /* A session whose deadline passed while the app was closed outright
+     is settled as soon as there is state to log it into. Belt to the
+     braces above: `pageshow` and the interval both reach the same
+     conclusion a moment later, but only if they win their respective
+     races against React mounting. */
+  const ready = !!state;
+  useEffect(() => { if (ready) checkRef.current(); }, [ready]);
+
+  /* Changing a duration resets an idle timer to the new length, but
+     never yanks one that is mid-run. Keyed rather than dependency-
+     triggered so a reload doesn't read as a change and wipe the
+     remainder of a paused session. */
+  const cfgKey = `${cfg.workMins}/${cfg.shortMins}/${cfg.longMins}`;
+  const lastCfgKey = useRef(cfgKey);
+  useEffect(() => {
+    if (lastCfgKey.current === cfgKey) return;
+    lastCfgKey.current = cfgKey;
+    setSession(s => s.running ? s : { ...s, endsAt: null, leftMs: null });
+  }, [cfgKey]);
+
+  const start = () => {
+    primeAudio();
+    setSession(s => {
+      if (s.running) return s;
+      const left = Number.isFinite(s.leftMs) ? s.leftMs : phaseMins(live.current.cfg, s.phase) * 60_000;
+      return { ...s, running: true, endsAt: Date.now() + left, leftMs: null };
+    });
+  };
+  const pause = () => setSession(s => s.running
+    ? { ...s, running: false, leftMs: Math.max(0, (s.endsAt || 0) - Date.now()), endsAt: null }
+    : s);
+  const reset      = () => setSession(s => ({ ...s, running: false, endsAt: null, leftMs: null }));
+  const goToPhase  = (i) => setSession(s => ({ ...s, phase: i, running: false, endsAt: null, leftMs: null }));
+  const setTarget  = (target) => setSession(s => ({ ...s, target: target || null }));
+  const skip = () => {
+    const { session: s, cfg: c } = live.current;
+    const totalMs = phaseMins(c, s.phase) * 60_000;
+    const left = s.running
+      ? Math.max(0, (s.endsAt || 0) - Date.now())
+      : (Number.isFinite(s.leftMs) ? s.leftMs : totalMs);
+    finish(Date.now(), totalMs - left);
+  };
+
+  return { session, cfg, start, pause, reset, skip, goToPhase, setTarget };
+}
+
+/* How much is left, repainted where it is shown rather than at the
+   root — a countdown in the header must not re-render the whole app
+   once a second. */
+function useCountdown(session, cfg) {
+  const [, repaint] = useState(0);
+  useEffect(() => {
+    if (!session.running) return;
+    const id = setInterval(() => repaint(n => n + 1), 250);
+    return () => clearInterval(id);
+  }, [session.running]);
+
+  const totalMs = phaseMins(cfg, session.phase) * 60_000;
+  const leftMs = session.running
+    ? Math.max(0, (session.endsAt || 0) - Date.now())
+    : (Number.isFinite(session.leftMs) ? session.leftMs : totalMs);
+  return { secsLeft: Math.ceil(leftMs / 1000), totalSecs: Math.round(totalMs / 1000) };
+}
+
+const fmtClock = (s) => `${String(Math.floor(s / 60)).padStart(2,'0')}:${String(s % 60).padStart(2,'0')}`;
+
 function App() {
   const [state, setState] = useState(null);
   const [loaded, setLoaded] = useState(false);
@@ -1249,9 +1525,8 @@ function App() {
   const changeBg = pref => { BackgroundPref.set(pref); setBackground(pref); };
 
   /* Respect ?view= param from manifest shortcuts */
-  const VALID_VIEWS = ['today','habits','tasks','matrix','stats','focus'];
   const urlView = new URLSearchParams(location.search).get('view');
-  const startView = VALID_VIEWS.includes(urlView) ? urlView : null;
+  const startView = VALID_VIEWS.includes(urlView) ? normaliseView(urlView) : null;
 
   /* Merge helper so we never lose new SEED keys when DB shape evolves */
   const hydrate = (data) => {
@@ -1299,6 +1574,7 @@ function App() {
       };
     }
     if (startView) merged.ui = { ...merged.ui, view: startView };
+    merged.ui.view = normaliseView(merged.ui.view);
     return merged;
   };
 
@@ -1600,14 +1876,19 @@ function App() {
     };
   }, []);
 
+  /* Above the loading gate on purpose: hooks cannot be conditional, and
+     more to the point a session that ended while the app was shut needs
+     settling on the way in, not once someone visits the Focus tab. */
+  const pomo = usePomodoro(state, setState);
+
   if (!loaded || !state) {
     return <div className="min-h-screen flex items-center justify-center text-bone-400 font-display italic">Loading the command deck…</div>;
   }
 
-  const setView = (view) => setState(s => ({
-    ...s,
-    ui: { ...s.ui, view, selectedDate: view === 'today' ? todayKey() : s.ui.selectedDate },
-  }));
+  const setView = (v) => setState(s => {
+    const view = normaliseView(v);
+    return { ...s, ui: { ...s.ui, view, selectedDate: view === 'today' ? todayKey() : s.ui.selectedDate } };
+  });
   const setDate = (k)    => setState(s => ({ ...s, ui: { ...s.ui, selectedDate: k }}));
 
   const connectWithToken = async (token) => {
@@ -1657,17 +1938,17 @@ function App() {
   return (
     <div className="min-h-screen">
       <Header state={state} setState={setState} setView={setView} setDate={setDate}
-        syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onSyncNow={syncNow} />
+        syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onSyncNow={syncNow} pomo={pomo} />
       <main className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 pb-24">
         {state.ui.view === 'today'  && <TodayView state={state} setState={setState} />}
         {state.ui.view === 'habits' && <HabitsView state={state} setState={setState} />}
         {state.ui.view === 'tasks'  && <TasksView state={state} setState={setState} />}
         {state.ui.view === 'matrix' && <MatrixView state={state} setState={setState} />}
-        {state.ui.view === 'stats'  && <StatsView state={state} setState={setState} hydrate={hydrate}
+        {state.ui.view === 'admin'  && <AdminView state={state} setState={setState} hydrate={hydrate}
             theme={theme} setTheme={setTheme} background={background} changeBg={changeBg}
             syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}
             onSyncNow={syncNow}/>}
-        {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState}/>}
+        {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState} pomo={pomo}/>}
         {state.ui.view === 'goals'  && <GoalsView state={state} setState={setState}/>}
       </main>
       <footer className="text-center pb-8 text-xs text-ink-500 font-mono tracking-wide">
@@ -1746,7 +2027,26 @@ function InstallBanner() {
 /* ------------------------------------------------------------------
    HEADER  ─ date, view tabs, quick add
 ------------------------------------------------------------------- */
-function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync, onSyncNow }) {
+/* Proof the timer is still going while you are on another tab. Its own
+   component so the once-a-second repaint stays here and doesn't drag
+   the whole header — streak, habits and all — around with it. */
+function TimerPill({ pomo, onClick, active }) {
+  const { session, cfg } = pomo;
+  const { secsLeft } = useCountdown(session, cfg);
+  if (!session.running || active) return null;
+  const phase = PHASES[session.phase];
+  return (
+    <button onClick={onClick} data-testid="timer-pill" title={`${phase.label} — ${fmtClock(secsLeft)} left`}
+      className="btn flex items-center gap-1.5 px-2.5 h-8 rounded-lg border font-mono text-xs tracking-wider shrink-0"
+      style={{ borderColor: `${phase.color}55`, background: `${phase.color}18`, color: phase.color }}>
+      <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: phase.color }}/>
+      {fmtClock(secsLeft)}
+      <span className="hidden md:inline opacity-70">{targetLabel(session.target) || phase.label}</span>
+    </button>
+  );
+}
+
+function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync, onSyncNow, pomo }) {
   const today = new Date();
   const sel = parseKey(state.ui.selectedDate || todayKey());
   const dayName = DAY_NAMES[sel.getDay()];
@@ -1774,18 +2074,34 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
     return s;
   }, [state.logs, state.habits, state.ui.selectedDate]);
 
+  /* Publish the header's real height so anything else that wants to
+     stick below it lands in the right place. Measured rather than
+     assumed: this bar is two rows on a phone, one plus an install
+     banner on Android, and grows when the sync badge wraps. */
+  const hdrRef = useRef(null);
+  useEffect(() => {
+    const el = hdrRef.current;
+    if (!el) return;
+    const publish = () => document.documentElement.style.setProperty('--header-h', `${el.offsetHeight}px`);
+    publish();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(publish);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const tabs = [
     { id:'today',  label:'Today',    icon:I.clock },
     { id:'habits', label:'Habits',   icon:I.flame },
     { id:'tasks',  label:'Tasks',    icon:I.list  },
     { id:'matrix', label:'Matrix',   icon:I.grid  },
-    { id:'stats',  label:'Stats',    icon:I.bar   },
+    { id:'admin',  label:'Admin',    icon:I.sliders },
     { id:'focus',  label:'Focus',    icon:I.timer  },
     { id:'goals',  label:'Goals',    icon:I.target },
   ];
 
   return (
-    <header className="sticky top-0 z-30 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700">
+    <header ref={hdrRef} className="sticky top-0 z-30 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700">
       <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between gap-4 py-4">
           <div className="flex items-center gap-3 min-w-0">
@@ -1804,6 +2120,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
           </div>
 
           <div className="hidden sm:flex items-center gap-3">
+            {pomo && <TimerPill pomo={pomo} active={state.ui.view === 'focus'} onClick={()=>setView('focus')}/>}
             <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
             {syncStatus !== 'local' && (
               <button onClick={onSyncNow} title="Sync now"
@@ -1850,6 +2167,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             <span className="sm:hidden flex items-center gap-1">
+              {pomo && <TimerPill pomo={pomo} active={state.ui.view === 'focus'} onClick={()=>setView('focus')}/>}
               <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
               {syncStatus !== 'local' && (
                 <button onClick={onSyncNow} title="Sync now"
@@ -2332,6 +2650,10 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
     const ai = { raw: text, title: r.title || null, quadrant: r.quadrant || null, personId: r.personId || null, at: Date.now() };
     if (!held?.due)    ai.due    = r.due    || null;
     if (!held?.listId) ai.listId = r.listId || null;
+    /* What this capture cost in tokens, when the model reported it.
+       Two small numbers per task, and they are what makes the spend
+       figure in Admin a measurement rather than a guess. */
+    if (r.usage) ai.tok = r.usage;
 
     setState(s => ({
       ...s,
@@ -2937,7 +3259,8 @@ const STAT_RANGES = [
   { value: 730, label: '2yr' },
 ];
 
-function StatsView({ state, setState, hydrate, theme, setTheme, background, changeBg, syncStatus, onConfigureSync, onDisconnect, onSyncNow }) {
+/* The numbers half of Admin. Reads state; changes nothing about it. */
+function AdminOverview({ state, syncStatus, onSyncNow }) {
   const [statsRange, setStatsRange] = useState(30);
 
   /* Pillar performance over selected range */
@@ -3020,9 +3343,9 @@ function StatsView({ state, setState, hydrate, theme, setTheme, background, chan
   const rangeLabel = STAT_RANGES.find(r => r.value === statsRange)?.label ?? `${statsRange}d`;
 
   return (
-    <div className="pt-6 fadeUp space-y-6">
+    <div className="space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
-        <SectionHeading kicker="Stats" title="The numbers don't lie" sub={`${rangeLabel} view across the five pillars`}/>
+        <SectionHeading kicker="Admin · 01" title="The numbers don't lie" sub={`${rangeLabel} view across the five pillars`}/>
         <div className="flex items-center gap-1.5 flex-wrap">
           {STAT_RANGES.map(r => (
             <button key={r.value} onClick={() => setStatsRange(r.value)}
@@ -3132,15 +3455,99 @@ function StatsView({ state, setState, hydrate, theme, setTheme, background, chan
         </div>
       )}
 
-      <ThemeCard theme={theme} setTheme={setTheme}/>
-      <BackgroundCard background={background} changeBg={changeBg} theme={theme}/>
-      <SalahCard state={state} setState={setState}/>
-      <NotificationsCard state={state} setState={setState}/>
-      <GoalReminderCard state={state} setState={setState}/>
-      <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect}/>
-      <AppZone />
-      <AdminCard state={state} setState={setState}/>
-      <DangerZone state={state} setState={setState} hydrate={hydrate}/>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+   ADMIN VIEW  ─ the numbers, and everything that configures them
+   ------------------------------------------------------------------
+   This was the Stats tab, and it had become a single column of eleven
+   unrelated cards — the habit chart, then the theme picker, then prayer
+   calculation, then the wipe-everything button. Scrolling was the only
+   way to find anything and there was no way to tell where you were.
+
+   Five sections, one on screen at a time. Nothing was removed; it is
+   the same cards, grouped by what you came here to do. The old ?view=
+   =stats link still lands here (see normaliseView).
+------------------------------------------------------------------- */
+const ADMIN_SECTIONS = [
+  { id: 'overview', label: 'Overview',   kicker: 'Admin · 01', title: 'The numbers don\'t lie',  sub: 'Habits, tasks and the weekly review' },
+  { id: 'setup',    label: 'Setup',      kicker: 'Admin · 02', title: 'How things get filed',     sub: 'Pillars, quadrants, people, lists, prayer times' },
+  { id: 'alerts',   label: 'Alerts',     kicker: 'Admin · 03', title: 'What interrupts you',      sub: 'Notifications and reminders' },
+  { id: 'look',     label: 'Appearance', kicker: 'Admin · 04', title: 'How it looks',             sub: 'Theme and background' },
+  { id: 'system',   label: 'System',     kicker: 'Admin · 05', title: 'Under the bonnet',         sub: 'Sync, AI spend, the app itself, your data' },
+];
+
+const ADMIN_TAB_KEY = 'madinah_admin_tab_v1';
+
+function AdminView({ state, setState, hydrate, theme, setTheme, background, changeBg, syncStatus, onConfigureSync, onDisconnect, onSyncNow }) {
+  /* Device-local, like the view itself: coming back to Admin should
+     land where you left it, and which panel you had open is not a
+     setting worth syncing to the other devices. */
+  const [tab, setTab] = useState(() => {
+    try { return ADMIN_SECTIONS.some(s => s.id === localStorage.getItem(ADMIN_TAB_KEY)) ? localStorage.getItem(ADMIN_TAB_KEY) : 'overview'; }
+    catch { return 'overview'; }
+  });
+  const go = (id) => { setTab(id); try { localStorage.setItem(ADMIN_TAB_KEY, id); } catch {} };
+  const section = ADMIN_SECTIONS.find(s => s.id === tab) || ADMIN_SECTIONS[0];
+
+  return (
+    <div className="pt-6 fadeUp">
+      {/* Sticky so the way out of a long panel is always on screen —
+          the old page made you scroll back to the top to go anywhere. */}
+      <div style={{ top: 'var(--header-h, 140px)' }}
+        className="sticky z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-2 mb-5 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700">
+        <nav data-testid="admin-nav" className="flex gap-1.5 overflow-x-auto no-scrollbar">
+          {ADMIN_SECTIONS.map(s => (
+            <button key={s.id} onClick={() => go(s.id)}
+              aria-current={tab === s.id ? 'page' : undefined}
+              className={`btn px-3.5 py-1.5 rounded-lg text-xs font-mono tracking-wider whitespace-nowrap ${tab === s.id ? 'bg-bone-100 text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
+              {s.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      <div className="space-y-6">
+        {tab === 'overview' && (
+          <AdminOverview state={state} syncStatus={syncStatus} onSyncNow={onSyncNow}/>
+        )}
+
+        {tab === 'setup' && (
+          <>
+            <SectionHeading kicker={section.kicker} title={section.title} sub={section.sub}/>
+            <AdminCard state={state} setState={setState}/>
+            <SalahCard state={state} setState={setState}/>
+          </>
+        )}
+
+        {tab === 'alerts' && (
+          <>
+            <SectionHeading kicker={section.kicker} title={section.title} sub={section.sub}/>
+            <NotificationsCard state={state} setState={setState}/>
+            <GoalReminderCard state={state} setState={setState}/>
+          </>
+        )}
+
+        {tab === 'look' && (
+          <>
+            <SectionHeading kicker={section.kicker} title={section.title} sub={section.sub}/>
+            <ThemeCard theme={theme} setTheme={setTheme}/>
+            <BackgroundCard background={background} changeBg={changeBg} theme={theme}/>
+          </>
+        )}
+
+        {tab === 'system' && (
+          <>
+            <SectionHeading kicker={section.kicker} title={section.title} sub={section.sub}/>
+            <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect}/>
+            <AiSpendCard state={state}/>
+            <AppZone />
+            <DangerZone state={state} setState={setState} hydrate={hydrate}/>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -4266,6 +4673,203 @@ function AdminCard({ state, setState }) {
   );
 }
 
+/* ------------------------------------------------------------------
+   AI SPEND
+   ------------------------------------------------------------------
+   Two bills that work differently enough that one number would be a
+   lie.
+
+   Capture (/api/parse) runs a Workers AI model, billed in Neurons
+   against an allowance that resets daily and does not roll over.
+   Reviews (/api/coach) run Claude Opus 5 as a partner model, billed
+   through Cloudflare's Unified Billing at Anthropic's own per-token
+   rates — real money from the first token.
+
+   Everything here is computed from calls THIS APP made and the token
+   counts the APIs handed back, not scraped from a billing page. So it
+   is exact wherever usage was reported and openly an estimate where it
+   wasn't, instead of being uniformly approximate. Cloudflare's
+   dashboard stays the authority; this is for knowing before you look.
+
+   Rates: developers.cloudflare.com/workers-ai/platform/pricing/ and
+   the Claude Opus 5 model page. Checked 2026-07; they will move.
+------------------------------------------------------------------- */
+const AI_RATES = {
+  /* Neurons per million tokens. Published for
+     llama-3.1-8b-instruct-fp8-fast; /api/parse runs the -fast variant,
+     which Cloudflare doesn't price separately — hence "estimate". */
+  neuronsPerMIn:  4_119,
+  neuronsPerMOut: 34_868,
+  usdPerKNeuron:  0.011,
+  freeNeuronsPerDay: 10_000,
+  /* Claude Opus 5, per million tokens. Thinking bills as output. */
+  opusUsdPerMIn:  5,
+  opusUsdPerMOut: 25,
+  /* Cloudflare's surcharge on every credit top-up that funds the above. */
+  topUpFee: 0.05,
+  usdToGbp: 0.79,
+};
+
+/* Assumed cost of a review whose token count predates this being
+   recorded — the observed shape of a digest prompt and a ~600-word
+   reply with thinking. Only ever applied to old rows, and the card
+   says how many. */
+const OPUS_ASSUMED = { i: 1_400, o: 1_100 };
+
+function aiSpend(state, days = 30) {
+  const since = Date.now() - days * 86_400_000;
+  const sum = (xs, f) => xs.reduce((a, x) => a + (Number(f(x)) || 0), 0);
+
+  /* ── Capture ── one Workers AI call per task the parser filed, and
+     every one of those tasks still carries the moment it happened. */
+  const filed   = (state.tasks || []).filter(t => Number(t.ai?.at) >= since);
+  const metered = filed.filter(t => t.ai?.tok);
+  const avg = metered.length
+    ? { i: sum(metered, t => t.ai.tok.i) / metered.length, o: sum(metered, t => t.ai.tok.o) / metered.length }
+    : { i: 0, o: 0 };
+  const neuronsFor = (t) => {
+    const tok = t.ai?.tok || avg;
+    return (Number(tok.i) || 0) / 1e6 * AI_RATES.neuronsPerMIn
+         + (Number(tok.o) || 0) / 1e6 * AI_RATES.neuronsPerMOut;
+  };
+
+  /* The allowance is per day and doesn't carry over, so a month's total
+     against thirty allowances would hide a single expensive day.
+     Charged day by day, which is how Cloudflare actually charges it. */
+  const byDay = {};
+  filed.forEach(t => {
+    const k = fmtKey(new Date(t.ai.at));
+    byDay[k] = (byDay[k] || 0) + neuronsFor(t);
+  });
+  const neurons   = sum(Object.values(byDay), n => n);
+  const overage   = sum(Object.values(byDay), n => Math.max(0, n - AI_RATES.freeNeuronsPerDay));
+  const workersUsd = overage / 1000 * AI_RATES.usdPerKNeuron;
+  const todayNeurons = byDay[todayKey()] || 0;
+
+  /* ── Reviews ── */
+  const runs = (state.coach?.history || []).filter(h => Number(h.at) >= since);
+  const opusIn  = sum(runs, h => h.usage?.i ?? OPUS_ASSUMED.i);
+  const opusOut = sum(runs, h => h.usage?.o ?? OPUS_ASSUMED.o);
+  const opusUsd = opusIn / 1e6 * AI_RATES.opusUsdPerMIn + opusOut / 1e6 * AI_RATES.opusUsdPerMOut;
+
+  const totalUsd = (workersUsd + opusUsd) * (1 + AI_RATES.topUpFee);
+  const gbp = (usd) => usd * AI_RATES.usdToGbp;
+
+  return {
+    days,
+    workers: {
+      calls: filed.length,
+      metered: metered.length,
+      neurons, overage, todayNeurons,
+      gbp: gbp(workersUsd),
+      freePerDay: AI_RATES.freeNeuronsPerDay,
+    },
+    unified: {
+      runs: runs.length,
+      assumed: runs.filter(h => !h.usage).length,
+      tokIn: opusIn, tokOut: opusOut,
+      gbp: gbp(opusUsd),
+    },
+    totalGbp: gbp(totalUsd),
+    /* Straight-line from what has actually happened. Reviews are capped
+       weekly and capture tracks how much you capture, so the rate is
+       the honest thing to extrapolate — not a modelled budget. */
+    perYearGbp: gbp(totalUsd) / days * 365,
+  };
+}
+
+const money = (n) => n < 0.005 && n > 0 ? '<£0.01' : `£${n.toFixed(2)}`;
+const compact = (n) => n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(Math.round(n));
+
+function AiSpendCard({ state }) {
+  const [days, setDays] = useState(30);
+  const s = useMemo(() => aiSpend(state, days), [state.tasks, state.coach, days]);
+  const nothingYet = s.workers.calls === 0 && s.unified.runs === 0;
+
+  return (
+    <div className="card p-5" data-testid="ai-spend">
+      <div className="flex items-start justify-between gap-3 flex-wrap mb-1">
+        <div>
+          <div className="text-[10px] font-mono tracking-widest text-bone-400">AI SPEND</div>
+          <div className="font-display text-xl text-bone-100 mt-1">What the models cost</div>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {[30, 90, 365].map(d => (
+            <button key={d} onClick={() => setDays(d)}
+              className={`btn px-2.5 py-1 rounded-lg border text-[10px] font-mono tracking-wider ${days === d ? 'bg-bone-100 text-ink-950 font-semibold border-transparent' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
+              {d === 365 ? '1YR' : `${d}D`}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {nothingYet ? (
+        <p className="text-xs text-bone-400 mt-3">
+          Nothing spent in this window — no captures parsed and no reviews run.
+        </p>
+      ) : (
+        <>
+          <div className="flex items-baseline gap-2.5 mt-3 mb-5">
+            <span data-testid="spend-total" className="font-display text-4xl text-bone-100 leading-none">{money(s.totalGbp)}</span>
+            <span className="text-xs font-mono text-bone-400">
+              last {days === 365 ? 'year' : `${days} days`} · ≈{money(s.perYearGbp)}/yr at this rate
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Workers AI */}
+            <div className="p-3.5 rounded-lg border border-ink-700">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[10px] font-mono tracking-widest text-tech">WORKERS AI</span>
+                <span className="font-mono text-sm text-bone-100">{money(s.workers.gbp)}</span>
+              </div>
+              <div className="text-xs text-bone-300">Task capture · {s.workers.calls} parsed</div>
+              <div className="text-[11px] text-bone-400 mt-1.5">
+                ≈{compact(s.workers.neurons)} neurons.{' '}
+                {s.workers.overage > 0
+                  ? <span className="text-strategy">{compact(s.workers.overage)} over the free {compact(s.workers.freePerDay)}/day.</span>
+                  : <span>Inside the free {compact(s.workers.freePerDay)}/day allowance every day.</span>}
+              </div>
+              <div className="text-[11px] text-bone-400/70 mt-1">
+                {compact(s.workers.todayNeurons)} used today.
+                {s.workers.metered < s.workers.calls && (
+                  <> {s.workers.calls - s.workers.metered} older captures estimated from the average.</>
+                )}
+              </div>
+            </div>
+
+            {/* Unified billing */}
+            <div className="p-3.5 rounded-lg border border-ink-700">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[10px] font-mono tracking-widest text-strategy">UNIFIED BILLING</span>
+                <span className="font-mono text-sm text-bone-100">{money(s.unified.gbp)}</span>
+              </div>
+              <div className="text-xs text-bone-300">Weekly review · {s.unified.runs} run{s.unified.runs === 1 ? '' : 's'} · Claude Opus 5</div>
+              <div className="text-[11px] text-bone-400 mt-1.5">
+                {compact(s.unified.tokIn)} tokens in · {compact(s.unified.tokOut)} out (thinking counts as out).
+              </div>
+              <div className="text-[11px] text-bone-400/70 mt-1">
+                {s.unified.assumed > 0
+                  ? <>{s.unified.assumed} run{s.unified.assumed === 1 ? '' : 's'} predate token logging — estimated.</>
+                  : <>Measured from what the API reported.</>}
+              </div>
+            </div>
+          </div>
+
+          <p className="text-[10px] text-bone-400/70 mt-4 leading-relaxed">
+            Totals include Cloudflare's {Math.round(AI_RATES.topUpFee * 100)}% credit top-up fee, converted at
+            ${' '}1 = £{AI_RATES.usdToGbp}. Call counts and token counts are measured; the neuron
+            figure is converted from them at Cloudflare's rate for the nearest priced variant of
+            the model, and the dashboard's own number can come out materially higher. Your{' '}
+            <a href="https://dash.cloudflare.com/?to=/:account/ai/workers-ai" target="_blank" rel="noopener noreferrer"
+              className="underline hover:text-bone-200">Cloudflare dashboard</a> is the authority.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function DangerZone({ state, setState, hydrate }) {
   const exportData = () => {
     const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
@@ -4312,161 +4916,96 @@ function DangerZone({ state, setState, hydrate }) {
 }
 
 /* ------------------------------------------------------------------
-   POMODORO VIEW  ─ Focus timer with customisable durations + task logging
+   POMODORO VIEW  ─ the face of the timer in usePomodoro()
+   ------------------------------------------------------------------
+   No clock lives here. The engine runs at the app root so the session
+   survives switching tabs, backgrounding the PWA and reloading; this
+   view reads it, draws it, and offers the controls.
 ------------------------------------------------------------------- */
-function PomodoroView({ state, setState }) {
-  const rawPomodoro = state.pomodoro ?? { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 };
-  const cfg = { ...rawPomodoro, longAfter: Math.max(1, Number(rawPomodoro.longAfter) || 4) };
 
-  const PHASES = [
-    { id: 'work',  label: 'Focus',       color: '#ef4444' },
-    { id: 'short', label: 'Short break', color: '#10b981' },
-    { id: 'long',  label: 'Long break',  color: '#22d3ee' },
-  ];
+/* Everything a session can be aimed at, flattened into one list so the
+   log, the roll-up and the picker all agree on what a target is. */
+function focusTargets(state) {
+  const pillars = resolvePillars(state);
+  const byPillar = pillars.map(p => ({
+    pillar: p,
+    habits: (state.habits || []).filter(h => h.pillar === p.id),
+  }));
+  const tasks = (state.tasks || []).filter(t => !t.done);
+  return { pillars, byPillar, tasks };
+}
 
-  const [phase,     setPhase]     = useState(0);
-  const [secsLeft,  setSecsLeft]  = useState(cfg.workMins * 60);
-  const [running,   setRunning]   = useState(false);
-  const [doneCount, setDoneCount] = useState(0);
-  const [taskId,    setTaskId]    = useState('');
-  const [showCfg,   setShowCfg]   = useState(false);
+function PomodoroView({ state, setState, pomo }) {
+  const { session, cfg, start, pause, reset, skip, goToPhase, setTarget } = pomo;
+  const { secsLeft, totalSecs } = useCountdown(session, cfg);
+  const [showCfg, setShowCfg] = useState(false);
 
-  /* Mutable refs so interval/doComplete always read the latest values */
-  const itvRef    = useRef(null);
-  const secsRef   = useRef(cfg.workMins * 60);
-  const phaseRef  = useRef(0);
-  const doneRef   = useRef(0);
-  const taskIdRef = useRef('');
-  const cfgRef    = useRef(cfg);
-  const tasksRef  = useRef(state.tasks);
+  const target = session.target || { kind: 'free' };
+  /* Which picker is open. Derived from the target rather than held
+     separately, so a session restored from a reload opens on the right
+     one instead of resetting to Free. */
+  const [kind, setKind] = useState(target.kind || 'free');
+  const [pillarId, setPillarId] = useState(target.pillarId || null);
 
-  phaseRef.current  = phase;
-  doneRef.current   = doneCount;
-  taskIdRef.current = taskId;
-  cfgRef.current    = cfg;
-  tasksRef.current  = state.tasks;
+  const { pillars, byPillar, tasks: openTasks } = focusTargets(state);
+  const pillarHabits = pillarId ? (byPillar.find(b => b.pillar.id === pillarId)?.habits || []) : [];
 
-  useEffect(() => () => clearInterval(itvRef.current), []);
-
-  /* Reset timer whenever phase changes or durations change */
-  useEffect(() => {
-    clearInterval(itvRef.current);
-    setRunning(false);
-    const secs = [cfg.workMins, cfg.shortMins, cfg.longMins][phase] * 60;
-    secsRef.current = secs;
-    setSecsLeft(secs);
-  }, [phase, cfg.workMins, cfg.shortMins, cfg.longMins]);
-
-  const beep = () => {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.frequency.value = 880; osc.type = 'sine';
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.8);
-      osc.start(); osc.stop(ctx.currentTime + 0.8);
-    } catch(e) {}
+  const chooseFree   = () => { setKind('free'); setPillarId(null); setTarget(null); };
+  const chooseTask   = (id) => {
+    const t = openTasks.find(x => x.id === id);
+    setTarget(t ? { kind: 'task', id: t.id, label: t.title, color: '#ef4444' } : null);
+  };
+  const choosePillar = (p) => {
+    setPillarId(p.id);
+    setTarget({ kind: 'pillar', id: p.id, pillarId: p.id, label: p.name, color: p.color });
+  };
+  const chooseHabit  = (id) => {
+    const p = pillars.find(x => x.id === pillarId);
+    if (!id) return choosePillar(p);
+    const h = pillarHabits.find(x => x.id === id);
+    /* A habit carries its pillar so the pillar roll-up counts habit
+       sessions too — an hour on Fajr is an hour on Deen. */
+    if (h) setTarget({ kind: 'habit', id: h.id, pillarId: p.id, label: h.name, color: p.color });
   };
 
-  const notifRef = useRef(false);
-  notifRef.current = state?.ui?.notif;
+  const cur   = PHASES[session.phase];
+  const pct   = totalSecs > 0 ? (totalSecs - secsLeft) / totalSecs : 0;
+  const fmtMins = (m) => m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
 
-  /* Called when a phase naturally completes */
-  const doComplete = () => {
-    const ph    = phaseRef.current;
-    const dc    = doneRef.current;
-    const tid   = taskIdRef.current;
-    const c     = cfgRef.current;
-    const tasks = tasksRef.current;
-    beep();
-    if (notifEnabled() && notifRef.current) {
-      const isWork = PHASES[ph].id === 'work';
-      const task   = tasks.find(t => t.id === tid);
-      showNotificationViaSW(
-        isWork ? 'Focus session complete' : `${PHASES[ph].label} over — back to work`,
-        task?.title || '',
-        'pomodoro'
-      );
-    }
-    if (PHASES[ph].id === 'work') {
-      const task = tasks.find(t => t.id === tid);
-      setState(s => ({
-        ...s,
-        pomodoroLogs: [...(s.pomodoroLogs || []), {
-          id: `p-${Date.now()}`,
-          date: todayKey(),
-          taskId:    tid  || null,
-          taskTitle: task?.title || null,
-          mins: c.workMins,
-          completedAt: Date.now(),
-        }],
-      }));
-      const next = dc + 1;
-      setDoneCount(next);
-      setPhase(next % c.longAfter === 0 ? 2 : 1);
-    } else {
-      setPhase(0);
-    }
-  };
+  const R = 88, CX = 110, circ = 2 * Math.PI * R;
 
-  const start = () => {
-    if (running) return;
-    setRunning(true);
-    itvRef.current = setInterval(() => {
-      secsRef.current -= 1;
-      if (secsRef.current <= 0) {
-        secsRef.current = 0;
-        clearInterval(itvRef.current);
-        setRunning(false);
-        setSecsLeft(0);
-        doComplete();
-      } else {
-        setSecsLeft(secsRef.current);
-      }
-    }, 1000);
-  };
-
-  const pause = () => { clearInterval(itvRef.current); setRunning(false); };
-
-  const reset = () => {
-    pause();
-    const secs = [cfgRef.current.workMins, cfgRef.current.shortMins, cfgRef.current.longMins][phase] * 60;
-    secsRef.current = secs;
-    setSecsLeft(secs);
-  };
-
-  const skip = () => { pause(); doComplete(); };
-
-  const cur      = PHASES[phase];
-  const total    = [cfg.workMins, cfg.shortMins, cfg.longMins][phase] * 60;
-  const pct      = total > 0 ? (total - secsLeft) / total : 0;
-  const fmtT     = (s) => `${String(Math.floor(s / 60)).padStart(2,'0')}:${String(s % 60).padStart(2,'0')}`;
-  const fmtMins  = (m) => m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
-
-  const R    = 88;
-  const CX   = 110;
-  const circ = 2 * Math.PI * R;
-
-  const openTasks    = state.tasks.filter(t => !t.done);
   const todayLogs    = (state.pomodoroLogs || []).filter(l => l.date === todayKey());
-  const totalFocused = todayLogs.reduce((a, l) => a + l.mins, 0);
+  const totalFocused = todayLogs.reduce((a, l) => a + (Number(l.mins) || 0), 0);
 
-  const byTask = {};
+  /* Group the day by what each session was aimed at. Old logs carry
+     only taskId/taskTitle, so they fall through to the same shape. */
+  const byTarget = {};
   todayLogs.forEach(l => {
-    const key = l.taskId || '__none__';
-    if (!byTask[key]) byTask[key] = { label: l.taskTitle || '(No task)', mins: 0, count: 0 };
-    byTask[key].mins  += l.mins;
-    byTask[key].count += 1;
+    const key = l.habitId || l.pillarId || l.taskId || '__none__';
+    if (!byTarget[key]) byTarget[key] = {
+      label: l.label || l.taskTitle || 'Free focus',
+      color: pillars.find(p => p.id === l.pillarId)?.color || '#ef4444',
+      mins: 0, count: 0,
+    };
+    byTarget[key].mins  += Number(l.mins) || 0;
+    byTarget[key].count += 1;
   });
 
+  /* Where the hours went, by pillar. The point of aiming a timer at
+     something is being able to read this back. */
+  const pillarMins = pillars.map(p => ({
+    pillar: p,
+    mins: todayLogs.filter(l => l.pillarId === p.id).reduce((a, l) => a + (Number(l.mins) || 0), 0),
+  })).filter(x => x.mins > 0);
+
   const updateCfg = (next) => setState(s => ({ ...s, pomodoro: next }));
-  const cyclePos  = doneCount % cfg.longAfter;
+  const cyclePos  = session.doneCount % cfg.longAfter;
+
+  const KIND_BTN = (k) => `btn px-3 py-1.5 rounded-lg text-[11px] font-mono tracking-wider ${kind === k ? 'bg-bone-100 text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400 hover:bg-ink-800'}`;
 
   return (
     <div className="max-w-4xl mx-auto pt-6 fadeUp">
-      <SectionHeading kicker="04 / Focus" title="Pomodoro timer" sub="Customisable · task-logged · auditory cues on completion"/>
+      <SectionHeading kicker="04 / Focus" title="Pomodoro timer" sub="Aimed at a pillar, a habit or a task · runs in the background"/>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 mt-2">
 
@@ -4476,15 +5015,15 @@ function PomodoroView({ state, setState }) {
           {/* Phase pills */}
           <div className="flex items-center gap-2 flex-wrap">
             {PHASES.map((p, i) => (
-              <button key={p.id} onClick={() => { if (!running) setPhase(i); }}
+              <button key={p.id} onClick={() => { if (!session.running) goToPhase(i); }}
                 className="btn px-3 sm:px-4 py-1.5 rounded-full text-xs font-mono tracking-wider"
-                style={phase === i
+                style={session.phase === i
                   ? { background: `${p.color}20`, color: p.color, border: `1px solid ${p.color}55` }
                   : { color: '#9a9788', border: '1px solid #1f1f24' }}>
                 {p.label.toUpperCase()}
               </button>
             ))}
-            <span className="font-mono text-[10px] text-bone-400 ml-auto">SESSION #{doneCount + 1}</span>
+            <span className="font-mono text-[10px] text-bone-400 ml-auto">SESSION #{session.doneCount + 1}</span>
           </div>
 
           {/* Ring + clock */}
@@ -4496,13 +5035,19 @@ function PomodoroView({ state, setState }) {
                   stroke={cur.color} strokeWidth="10" strokeLinecap="round"
                   strokeDasharray={circ}
                   strokeDashoffset={circ * (1 - pct)}
-                  style={{ transition: running ? 'stroke-dashoffset 1s linear' : 'none' }}/>
+                  style={{ transition: session.running ? 'stroke-dashoffset 1s linear' : 'none' }}/>
               </svg>
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-1">
-                <div className="font-mono text-5xl font-semibold" style={{ color: cur.color, letterSpacing: '-0.02em' }}>
-                  {fmtT(secsLeft)}
+                <div data-testid="pomodoro-clock" className="font-mono text-5xl font-semibold" style={{ color: cur.color, letterSpacing: '-0.02em' }}>
+                  {fmtClock(secsLeft)}
                 </div>
                 <div className="text-[10px] font-mono tracking-[0.2em] text-bone-400">{cur.label.toUpperCase()}</div>
+                {targetLabel(session.target) && (
+                  <div data-testid="focus-target" className="text-[11px] mt-0.5 truncate max-w-[170px] text-center"
+                    style={{ color: session.target.color || '#9a9788' }}>
+                    {targetLabel(session.target)}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -4516,8 +5061,8 @@ function PomodoroView({ state, setState }) {
                 </svg>
               </button>
 
-              {running
-                ? <button onClick={pause}
+              {session.running
+                ? <button onClick={pause} aria-label="Pause"
                     className="btn w-16 h-16 rounded-full flex items-center justify-center"
                     style={{ background: cur.color, boxShadow: `0 0 32px ${cur.color}55` }}>
                     <svg className="w-7 h-7" viewBox="0 0 24 24" fill="#0a0a0b">
@@ -4525,7 +5070,7 @@ function PomodoroView({ state, setState }) {
                       <rect x="14" y="4" width="4" height="16" rx="1"/>
                     </svg>
                   </button>
-                : <button onClick={start}
+                : <button onClick={start} aria-label="Start"
                     className="btn w-16 h-16 rounded-full flex items-center justify-center"
                     style={{ background: cur.color, boxShadow: `0 0 24px ${cur.color}44` }}>
                     <svg className="w-7 h-7" viewBox="0 0 24 24" fill="#0a0a0b">
@@ -4551,21 +5096,73 @@ function PomodoroView({ state, setState }) {
                            boxShadow: i < cyclePos ? '0 0 6px #ef4444aa' : 'none' }}/>
               ))}
             </div>
+
+            {session.running && (
+              <div className="text-[10px] font-mono tracking-wider text-bone-400/70 text-center px-6">
+                KEEPS RUNNING IF YOU SWITCH TABS OR CLOSE THE APP
+              </div>
+            )}
           </div>
 
-          {/* Task selector */}
-          <div className="card-soft p-4">
-            <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-2">FOCUS ON</div>
-            <select value={taskId} onChange={e => setTaskId(e.target.value)}
-              className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2.5 text-bone-100 text-sm">
-              <option value="">— Free focus (no specific task) —</option>
-              {openTasks.map(t => (
-                <option key={t.id} value={t.id}>{t.title}</option>
-              ))}
-            </select>
-            {taskId && (
-              <div className="mt-2 text-[11px] text-bone-400 italic">
-                Focus time is logged to this task each time a work session completes.
+          {/* Target picker */}
+          <div className="card-soft p-4" data-testid="focus-picker">
+            <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-2.5">FOCUS ON</div>
+
+            <div className="flex gap-1.5 flex-wrap mb-3">
+              <button onClick={chooseFree}     className={KIND_BTN('free')}>FREE</button>
+              <button onClick={()=>setKind('task')}   className={KIND_BTN('task')}>TASK</button>
+              <button onClick={()=>setKind('pillar')} className={KIND_BTN('pillar')}>PILLAR</button>
+            </div>
+
+            {kind === 'free' && (
+              <p className="text-[11px] text-bone-400 italic">
+                Not aimed at anything — the minutes are logged, just not attributed.
+              </p>
+            )}
+
+            {kind === 'task' && (
+              openTasks.length === 0
+                ? <p className="text-[11px] text-bone-400 italic">No open tasks to point at.</p>
+                : <select value={target.kind === 'task' ? target.id : ''} aria-label="Task"
+                    onChange={e => chooseTask(e.target.value)}
+                    className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2.5 text-bone-100 text-sm">
+                    <option value="">— Pick a task —</option>
+                    {openTasks.map(t => <option key={t.id} value={t.id}>{t.title}</option>)}
+                  </select>
+            )}
+
+            {kind === 'pillar' && (
+              <div className="space-y-2.5">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                  {pillars.map(p => {
+                    const on = pillarId === p.id;
+                    return (
+                      <button key={p.id} onClick={() => choosePillar(p)} data-testid="pillar-choice"
+                        className="btn px-2.5 py-2 rounded-lg text-xs truncate"
+                        style={on
+                          ? { background: `${p.color}22`, color: p.color, border: `1px solid ${p.color}66` }
+                          : { color: '#9a9788', border: '1px solid #1f1f24' }}>
+                        {p.name}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Narrowing to one habit is the whole reason pillars are
+                    here — "an hour on Deen" is useful, "an hour on Fajr"
+                    is actionable. */}
+                {pillarId && (
+                  pillarHabits.length === 0
+                    ? <p className="text-[11px] text-bone-400 italic">
+                        No habits under {pillars.find(p => p.id === pillarId)?.name} yet — the whole pillar it is.
+                      </p>
+                    : <select value={target.kind === 'habit' ? target.id : ''} aria-label="Habit"
+                        onChange={e => chooseHabit(e.target.value)}
+                        className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2.5 text-bone-100 text-sm">
+                        <option value="">Whole pillar</option>
+                        {pillarHabits.map(h => <option key={h.id} value={h.id}>{h.name}</option>)}
+                      </select>
+                )}
               </div>
             )}
           </div>
@@ -4587,15 +5184,15 @@ function PomodoroView({ state, setState }) {
               </div>
             </div>
 
-            {Object.keys(byTask).length === 0
+            {Object.keys(byTarget).length === 0
               ? <EmptyHint text="No sessions yet — start the timer!"/>
               : (
                 <div>
-                  {Object.entries(byTask).map(([key, { label, mins, count }]) => (
+                  {Object.entries(byTarget).map(([key, { label, color, mins, count }]) => (
                     <div key={key} className="py-2.5 border-b border-ink-700 last:border-0">
                       <div className="flex items-center justify-between gap-2 mb-1.5">
                         <div className="flex-1 min-w-0 text-sm text-bone-100 truncate">{label}</div>
-                        <div className="font-mono text-sm font-semibold whitespace-nowrap" style={{ color: '#ef4444' }}>
+                        <div className="font-mono text-sm font-semibold whitespace-nowrap" style={{ color }}>
                           {fmtMins(mins)}
                         </div>
                       </div>
@@ -4603,10 +5200,10 @@ function PomodoroView({ state, setState }) {
                         <div className="flex-1 h-1 rounded-full bg-ink-700 overflow-hidden">
                           <div className="h-full rounded-full" style={{
                             width: `${totalFocused ? (mins / totalFocused) * 100 : 0}%`,
-                            background: '#ef4444',
+                            background: color,
                           }}/>
                         </div>
-                        <div className="text-[10px] font-mono text-bone-400 whitespace-nowrap">{count}×{cfg.workMins}m</div>
+                        <div className="text-[10px] font-mono text-bone-400 whitespace-nowrap">{count}×</div>
                       </div>
                     </div>
                   ))}
@@ -4618,6 +5215,22 @@ function PomodoroView({ state, setState }) {
               )
             }
           </div>
+
+          {/* Where the hours landed */}
+          {pillarMins.length > 0 && (
+            <div className="card p-4" data-testid="focus-by-pillar">
+              <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-3">BY PILLAR</div>
+              <div className="space-y-2">
+                {pillarMins.sort((a, b) => b.mins - a.mins).map(({ pillar, mins }) => (
+                  <div key={pillar.id} className="flex items-center gap-2.5">
+                    <div className="w-2 h-2 rounded-full shrink-0" style={{ background: pillar.color }}/>
+                    <span className="flex-1 min-w-0 text-sm text-bone-200 truncate">{pillar.name}</span>
+                    <span className="font-mono text-xs" style={{ color: pillar.color }}>{fmtMins(mins)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Settings */}
           <div className="card p-4">

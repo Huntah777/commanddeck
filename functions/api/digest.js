@@ -193,6 +193,16 @@ export function buildDigest(state = {}, today = keyOf(Date.now())) {
     focus: {
       sessions: pomo.length,
       minutes: pomo.reduce((a, p) => a + (Number(p.mins) || 0), 0),
+      /* Which pillars the hours were actually spent on. Sessions can be
+         aimed at a pillar or at one habit inside it; a habit session
+         carries its pillar too, so both land here. Logs predating
+         targets carry no pillar and are simply absent — deliberately
+         not bucketed as "other", which would read as a finding. */
+      minutesByPillar: pomo.reduce((a, p) => {
+        if (!p.pillarId) return a;
+        a[p.pillarId] = (a[p.pillarId] || 0) + (Number(p.mins) || 0);
+        return a;
+      }, {}),
     },
     goals: {
       active: goals.length,

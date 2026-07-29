@@ -16,7 +16,7 @@ const seed = async (page, people) => page.addInitScript((people) => {
 const goToPeopleTab = async (page) => {
   await page.goto('/?view=stats');
   await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
-  await page.getByText('Configuration').scrollIntoViewIfNeeded();
+  await page.getByTestId('admin-nav').getByRole('button', { name: 'Setup' }).click();
   await page.getByRole('button', { name: 'People' }).click();
 };
 
