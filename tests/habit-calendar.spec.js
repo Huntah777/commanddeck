@@ -20,6 +20,11 @@ const STATE = (over = {}) => ({
 });
 
 const boot = async (page, state = STATE()) => {
+  /* The Today tab always resets selectedDate to the real today() on load
+     (landToday) — so without pinning the clock, these fixtures silently
+     stop matching "today" the day after they're written and the logs
+     asserted on end up keyed to the wrong date entirely. */
+  await page.clock.install({ time: new Date('2026-07-29T09:00:00') });
   await page.addInitScript((s) => {
     if (!localStorage.getItem('madinah_v1')) localStorage.setItem('madinah_v1', JSON.stringify(s));
   }, state);

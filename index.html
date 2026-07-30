@@ -2244,6 +2244,11 @@ function TimerPill({ pomo, onClick, active }) {
   );
 }
 
+/* A day counts towards the streak at 74% of scheduled habits done, not
+   100% — with a lot of habits on the same day, one slip shouldn't wipe out
+   the whole day's effort. */
+const STREAK_THRESHOLD = 0.74;
+
 function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync, onSyncNow, pomo }) {
   const today = new Date();
   const sel = parseKey(state.ui.selectedDate || todayKey());
@@ -2257,7 +2262,11 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
   const log = state.logs[dayKey] || {};
   const pct = dayHabits.length ? Math.round(dayHabits.filter(h => log[h.id]).length / dayHabits.length * 100) : 0;
 
-  /* current streak — consecutive days back from selected where >=80% habits done */
+  /* current streak — consecutive days back from selected where enough habits
+     were done. The bar is STREAK_THRESHOLD, not 100%: with a lot of habits
+     scheduled on the same day, missing one shouldn't erase the whole day's
+     effort. Per-habit streaks (HabitCard, HabitChecklist) are unaffected —
+     those track one habit at a time, where "done" has no percentage to miss. */
   const streak = useMemo(() => {
     let s = 0, cursor = new Date(sel);
     while (true) {
@@ -2266,7 +2275,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
       const l = state.logs[k] || {};
       if (!h.length) break;
       const r = h.filter(x => l[x.id]).length / h.length;
-      if (r >= 0.8) { s++; cursor = addDays(cursor, -1); } else break;
+      if (r >= STREAK_THRESHOLD) { s++; cursor = addDays(cursor, -1); } else break;
       if (s > 365) break;
     }
     return s;
