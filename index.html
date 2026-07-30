@@ -1005,6 +1005,24 @@ function deleteHabit(s, id) {
 /* ------------------------------------------------------------------
    BLOCK LAYOUT  ─ column algorithm so overlapping events don't stack
 ------------------------------------------------------------------- */
+/* Timeline geometry, shared between the overlap check below and the
+   Timeline component's own rendering (blockHt) — the two must agree on
+   how tall a block actually draws, or the layout columns and the pixels
+   on screen disagree. */
+const HOUR_PX      = 56; // vertical px per hour on the timeline
+const MIN_BLOCK_PX = 24; // floor on a block's rendered height, however short its slot
+const BLOCK_GAP_PX = 4;  // breathing room between vertically adjacent blocks
+
+const blockHt = (b) => Math.max(MIN_BLOCK_PX, ((b.end - b.start) / 60) * HOUR_PX - BLOCK_GAP_PX);
+
+/* The shortest slot whose natural height already clears MIN_BLOCK_PX.
+   Below it, the rendered box is taller than the time it actually covers
+   — a 15-minute block still draws at ~24px tall. Overlap detection has
+   to use this instead of the raw duration, or a block starting right
+   after such a short one is judged clear of it and drawn on top instead
+   of alongside it (see blocksOverlap). */
+const MIN_VISUAL_MINS = Math.ceil((MIN_BLOCK_PX + BLOCK_GAP_PX) / HOUR_PX * 60);
+
 /* A block whose end <= start wraps past midnight — split it into the two
    real-clock-time segments it actually occupies for overlap/layout purposes. */
 const segmentsOf = (b) => b.end > b.start
@@ -1012,7 +1030,12 @@ const segmentsOf = (b) => b.end > b.start
   : [{ start: b.start, end: 1440 }, { start: 0, end: b.end }];
 
 const blocksOverlap = (a, b) => {
-  const segsA = segmentsOf(a), segsB = segmentsOf(b);
+  /* Widened to at least MIN_VISUAL_MINS long — matching the rendered
+     box, not the raw time slot — so two blocks whose real times are
+     merely close, rather than truly overlapping, still land in separate
+     columns if the first one's box is tall enough to reach the second. */
+  const widen = (s) => ({ start: s.start, end: Math.min(1440, Math.max(s.end, s.start + MIN_VISUAL_MINS)) });
+  const segsA = segmentsOf(a).map(widen), segsB = segmentsOf(b).map(widen);
   return segsA.some(sa => segsB.some(sb => sa.start < sb.end && sb.start < sa.end));
 };
 
@@ -2481,7 +2504,6 @@ function EmptyHint({ text }) {
    TIMELINE  (Structured-style vertical day plan)
 ------------------------------------------------------------------- */
 function Timeline({ state, setState, dow, dKey, sel }) {
-  const HOUR_PX = 56;
   const startHour = 0, endHour = 24;
   const hours = endHour - startHour;
 
@@ -2536,7 +2558,9 @@ function Timeline({ state, setState, dow, dKey, sel }) {
   const showNow = isToday && nowMin >= startHour*60 && nowMin <= endHour*60;
 
   const blockTop = (b) => ((b.start - startHour*60) / 60) * HOUR_PX;
-  const blockHt  = (b) => Math.max(24, ((b.end - b.start) / 60) * HOUR_PX - 4);
+  /* blockHt itself is shared with layoutBlocks's overlap check (top of
+     file) — same MIN_BLOCK_PX floor, so a short block's column and its
+     drawn height never disagree. */
 
   return (
     <div className="card relative overflow-hidden">
