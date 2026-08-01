@@ -291,6 +291,19 @@ const UiLocal = {
   },
 };
 
+/* How much of the calendar the Today tab shows: one day, one week or one
+   month. Device-local for the same reason as the view above — the zoom
+   level you left the deck on is a fact about this screen, not a setting
+   worth pushing to the phone. Kept out of state.ui entirely so it can
+   never be dragged around by a sync merge. */
+const TODAY_SCOPE_KEY = 'madinah_today_scope_v1';
+const TODAY_SCOPES = ['day', 'week', 'month'];
+const readTodayScope = () => {
+  try { const v = localStorage.getItem(TODAY_SCOPE_KEY); return TODAY_SCOPES.includes(v) ? v : 'day'; }
+  catch { return 'day'; }
+};
+const writeTodayScope = (scope) => { try { localStorage.setItem(TODAY_SCOPE_KEY, scope); } catch {} };
+
 /* ── The running Pomodoro session ─────────────────────────────────
    Device-local, like the view above: a timer is a fact about where you
    are sitting, not a setting. Syncing it would start a countdown on the
@@ -647,6 +660,49 @@ const todayKey = () => fmtKey(new Date());
 const toHM = (mins) => `${String(Math.floor(mins/60)).padStart(2,'0')}:${String(mins%60).padStart(2,'0')}`;
 const fromHM = (s) => { const [h,m] = s.split(':').map(Number); return (h||0)*60 + (m||0); };
 
+/* ── WEEK AND MONTH GEOMETRY ──────────────────────────────────────
+   Day-of-week indices stay JS-native everywhere else in the app — 0 is
+   Sunday, which is what habit.days and block.every store, and what
+   DAY_NAMES/DAY_SHORT are indexed by. WEEK_START_DOW decides one thing
+   only: which column a day lands in, so a week reads Monday→Sunday and
+   the weekend stays together instead of being split across both ends. */
+const WEEK_START_DOW = 1;
+/* Column order for a week grid — [1,2,3,4,5,6,0] on a Monday start. */
+const WEEK_DOWS = Array.from({ length: 7 }, (_, i) => (WEEK_START_DOW + i) % 7);
+
+const startOfWeek = (d) => addDays(d, -(((d.getDay() - WEEK_START_DOW) + 7) % 7));
+const weekDays    = (d) => { const s = startOfWeek(d); return Array.from({ length: 7 }, (_, i) => addDays(s, i)); };
+
+const daysInMonth  = (y, m) => new Date(y, m + 1, 0).getDate();
+const startOfMonth = (d) => new Date(d.getFullYear(), d.getMonth(), 1);
+/* Clamped to the target month's length, so stepping off the 31st lands
+   on the last day of a shorter month rather than skidding into the one
+   after it — new Date(2026, 1, 31) is 3 March, not 28 February. */
+const addMonths = (d, n) => {
+  const r = new Date(d.getFullYear(), d.getMonth() + n, 1);
+  r.setDate(Math.min(d.getDate(), daysInMonth(r.getFullYear(), r.getMonth())));
+  return r;
+};
+/* The whole weeks that cover a month. The leading and trailing cells
+   belong to the neighbouring months — real dates, drawn dimmed — so
+   every row is seven wide and no week is ever cut in half. */
+const monthGridDays = (d) => {
+  const last = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+  const out = [];
+  for (let cur = startOfWeek(startOfMonth(d)); cur <= last || out.length % 7; cur = addDays(cur, 1)) out.push(cur);
+  return out;
+};
+
+/* "28 Jul – 3 Aug 2026", collapsed where the two ends agree. */
+const weekLabel = (d) => {
+  const s = startOfWeek(d), e = addDays(s, 6);
+  const sM = MONTHS[s.getMonth()].slice(0, 3), eM = MONTHS[e.getMonth()].slice(0, 3);
+  const sameYear = s.getFullYear() === e.getFullYear();
+  if (sameYear && s.getMonth() === e.getMonth()) return `${s.getDate()}–${e.getDate()} ${eM} ${e.getFullYear()}`;
+  return `${s.getDate()} ${sM}${sameYear ? '' : ` ${s.getFullYear()}`} – ${e.getDate()} ${eM} ${e.getFullYear()}`;
+};
+const monthLabel = (d) => `${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+
 /* ------------------------------------------------------------------
    SALAH TIMES  ─ Aladhan API (free, no key required)
 ------------------------------------------------------------------- */
@@ -785,12 +841,27 @@ async function fetchSalahMonth({ lat, lon, y, mo, method, school }) {
   throw lastErr;
 }
 
+/* The location this device last confirmed. Synced state wins when it has
+   one (state.ui.salahLoc); this is the offline/first-paint fallback. */
+const readSalahLoc = () => {
+  try { return JSON.parse(localStorage.getItem(SALAH_LOC_KEY)); } catch { return null; }
+};
+
+/* One day's Aladhan timings → timeline blocks. Shared by the day strip
+   and the week grid so both draw prayer at the same place, with the same
+   per-prayer offsets applied. */
+function salahBlocksFrom(timings, offsets) {
+  if (!timings) return [];
+  return Object.entries(SALAH_NAMES).map(([key, names]) => {
+    const start = salahMinutes(timings[key], offsets?.[key] || 0);
+    if (start == null) return null;
+    return { id:`salah-${key}`, title:names.en, subtitle:names.ar, pillar:'deen', start, end: start + SALAH_DURATION, isSalah:true };
+  }).filter(Boolean);
+}
+
 function useSalahTimes(dKey, method, school, syncedLoc, offsets, onLocationConfirmed) {
   const [timings, setTimings]   = useState(null);
-  const [location, setLocation] = useState(() => {
-    if (syncedLoc) return syncedLoc;
-    try { return JSON.parse(localStorage.getItem(SALAH_LOC_KEY)); } catch { return null; }
-  });
+  const [location, setLocation] = useState(() => syncedLoc || readSalahLoc());
   /* One object rather than loose loading/error flags, so the UI can always say
      something definite: what happened, when, and whether it came from the
      network or the cache. "fetching…" with no resolution was the whole problem. */
@@ -911,16 +982,58 @@ function useSalahTimes(dKey, method, school, syncedLoc, offsets, onLocationConfi
   useEffect(() => { if (location) load(location, dKey, method, school); },
     [location, dKey, method, school, load]);
 
-  const salahBlocks = useMemo(() => {
-    if (!timings) return [];
-    return Object.entries(SALAH_NAMES).map(([key, names]) => {
-      const start = salahMinutes(timings[key], offsets?.[key] || 0);
-      if (start == null) return null;
-      return { id:`salah-${key}`, title:names.en, subtitle:names.ar, pillar:'deen', start, end: start + SALAH_DURATION, isSalah:true };
-    }).filter(Boolean);
-  }, [timings, offsets]);
+  const salahBlocks = useMemo(() => salahBlocksFrom(timings, offsets), [timings, offsets]);
 
   return { salahBlocks, location, status, resyncLocation, setManualLocation, retry };
+}
+
+/* Prayer times for a run of days, for the week grid.
+   Read-only on purpose. useSalahTimes above owns the location, the
+   permission prompt, the retry and every bit of status the day view puts
+   in its strip; duplicating that here would give the same errors two
+   places to disagree. This reuses the same month cache and the same
+   fetch, and where a month is genuinely unavailable it simply returns no
+   prayer blocks for those days — a quiet gap in a week overview beats a
+   second error surface for something the day view already reports.
+
+   A week can straddle two months, so it loads by month key rather than
+   assuming one covers the range. */
+function useSalahWeek(dayKeys, method, school, loc, offsets) {
+  const [months, setMonths] = useState({});      // 'YYYY-MM' → { 'YYYY-MM-DD': timings }
+  const keysId = dayKeys.join(',');
+  const wanted = useMemo(() => [...new Set(dayKeys.map(k => k.slice(0, 7)))].sort(), [keysId]);
+
+  useEffect(() => {
+    if (!loc || !Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)) return;
+    let live = true;
+    (async () => {
+      for (const ym of wanted) {
+        const [y, mo] = ym.split('-').map(Number);
+        let days = null;
+        try { days = JSON.parse(localStorage.getItem(monthCacheKey(loc.lat, loc.lon, y, mo, method, school)) || 'null')?.days || null; } catch {}
+        /* Not cached — fetch, but don't write it back. The day view's own
+           load() prunes the cache down to the months it cares about, so a
+           week's write would only be evicted on the next day-view render. */
+        if (!days) { try { days = await fetchSalahMonth({ lat: loc.lat, lon: loc.lon, y, mo, method, school }); } catch { continue; } }
+        if (!live) return;
+        /* Keep only the months still on screen, so paging through a year
+           of weeks doesn't accumulate twelve timetables in memory. */
+        setMonths(prev => {
+          const next = {};
+          for (const m of wanted) if (prev[m]) next[m] = prev[m];
+          next[ym] = days;
+          return next;
+        });
+      }
+    })();
+    return () => { live = false; };
+  }, [wanted, loc?.lat, loc?.lon, method, school]);
+
+  return useMemo(() => {
+    const out = {};
+    for (const k of dayKeys) out[k] = salahBlocksFrom(months[k.slice(0, 7)]?.[k], offsets);
+    return out;
+  }, [months, keysId, offsets]);
 }
 
 /* ------------------------------------------------------------------
@@ -1001,6 +1114,15 @@ function deleteHabit(s, id) {
     blocks: (s.blocks || []).filter(b => b?.habitId !== id),
   }, ...gone);
 }
+
+/* Block writes, shared by every calendar scope. A block edited from the
+   week grid has to land in state identically to one edited from the day
+   view — same upsert, same tombstone on delete. */
+const upsertBlock = (s, b) => ({
+  ...s,
+  blocks: s.blocks.find(x => x.id === b.id) ? s.blocks.map(x => x.id === b.id ? b : x) : [...s.blocks, b],
+});
+const removeBlock = (s, id) => tomb({ ...s, blocks: s.blocks.filter(x => x.id !== id) }, id);
 
 /* ------------------------------------------------------------------
    BLOCK LAYOUT  ─ column algorithm so overlapping events don't stack
@@ -2421,12 +2543,29 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
 }
 
 /* ------------------------------------------------------------------
-   TODAY VIEW  ─ Structured-style timeline + tasks + habits
+   TODAY VIEW  ─ Structured-style calendar + tasks + habits
+   ------------------------------------------------------------------
+   The calendar zooms: one day (the original timeline), one week, or one
+   month. All three read the same blocks and the same logs off the same
+   selected date — the scope only decides how much of the calendar is
+   drawn around it, so stepping out to the week and tapping a day lands
+   you exactly where the day view would have been.
+
+   Week and month go full width and push tasks and habits below them;
+   seven columns squeezed into half a screen is not a week you can read.
 ------------------------------------------------------------------- */
 function TodayView({ state, setState }) {
   const sel = parseKey(state.ui.selectedDate);
   const dow = sel.getDay();
   const dKey = state.ui.selectedDate;
+
+  const [scope, setScopeState] = useState(readTodayScope);
+  const setScope = (s) => { setScopeState(s); writeTodayScope(s); };
+  const setDate  = (k) => setState(s => ({ ...s, ui: { ...s.ui, selectedDate: k } }));
+  /* Tapping a day anywhere in the week or month grid means "show me this
+     day" — select it AND zoom in, rather than leaving you to find the
+     scope switch yourself. */
+  const openDay  = (k) => { setDate(k); setScope('day'); };
 
   const habitsToday = state.habits.filter(h => h.days.includes(dow));
   const log = state.logs[dKey] || {};
@@ -2453,16 +2592,42 @@ function TodayView({ state, setState }) {
   const tasksToday = state.tasks.filter(t => !t.done && (!t.due || t.due === dKey));
   const overdue    = state.tasks.filter(t => !t.done && t.due && t.due < dKey);
 
+  const wide = scope !== 'day';
+  const heading = {
+    day:   { title: 'The day, blocked',  sub: 'Structured-style timeline · click an hour to drop a block' },
+    week:  { title: 'The week, blocked', sub: 'Seven days side by side · tap a date to open it' },
+    month: { title: 'The month, mapped', sub: 'Blocks, habits and due tasks per day · tap a day to open it' },
+  }[scope];
+
   return (
     <div className="grid grid-cols-12 gap-4 lg:gap-6 pt-6 fadeUp">
-      {/* Timeline */}
-      <section className="col-span-12 lg:col-span-6">
-        <SectionHeading kicker="01 / Time" title="The day, blocked" sub="Structured-style timeline · click an hour to drop a block"/>
-        <Timeline state={state} setState={setState} dow={dow} dKey={dKey} sel={sel}/>
+      {/* Calendar — day, week or month */}
+      <section className={wide ? 'col-span-12' : 'col-span-12 lg:col-span-6'}>
+        <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
+          <SectionHeading kicker="01 / Time" title={heading.title} sub={heading.sub} className=""/>
+          <div className="flex items-center gap-2 flex-wrap">
+            {scope === 'week' && (
+              <PeriodNav label={weekLabel(sel)}
+                onPrev={()=>setDate(fmtKey(addDays(sel, -7)))}
+                onNext={()=>setDate(fmtKey(addDays(sel,  7)))}
+                onToday={()=>setDate(todayKey())}/>
+            )}
+            {scope === 'month' && (
+              <PeriodNav label={monthLabel(sel)}
+                onPrev={()=>setDate(fmtKey(addMonths(sel, -1)))}
+                onNext={()=>setDate(fmtKey(addMonths(sel,  1)))}
+                onToday={()=>setDate(todayKey())}/>
+            )}
+            <ScopeSwitch scope={scope} setScope={setScope}/>
+          </div>
+        </div>
+        {scope === 'day'   && <Timeline state={state} setState={setState} dow={dow} dKey={dKey} sel={sel}/>}
+        {scope === 'week'  && <WeekCalendar state={state} setState={setState} sel={sel} setDate={setDate} onOpenDay={openDay}/>}
+        {scope === 'month' && <MonthCalendar state={state} sel={sel} onOpenDay={openDay}/>}
       </section>
 
       {/* Tasks */}
-      <section className="col-span-12 lg:col-span-3">
+      <section className={wide ? 'col-span-12 md:col-span-6' : 'col-span-12 lg:col-span-3'}>
         <SectionHeading kicker="02 / Tasks" title="What needs doing" sub="Quick-capture, prioritise, ship"/>
         <QuickAddTask state={state} setState={setState} defaultDate={dKey}/>
         {overdue.length > 0 && (
@@ -2478,7 +2643,7 @@ function TodayView({ state, setState }) {
       </section>
 
       {/* Habits */}
-      <section className="col-span-12 lg:col-span-3">
+      <section className={wide ? 'col-span-12 md:col-span-6' : 'col-span-12 lg:col-span-3'}>
         <SectionHeading kicker="03 / Discipline" title="Habits for today" sub={`${habitsToday.filter(h=>log[h.id]).length} / ${habitsToday.length} complete`}/>
         <HabitChecklist habits={habitsToday} log={log} toggle={toggleHabit} state={state} setState={setState}/>
       </section>
@@ -2486,12 +2651,43 @@ function TodayView({ state, setState }) {
   );
 }
 
-function SectionHeading({ kicker, title, sub }) {
+function SectionHeading({ kicker, title, sub, className = 'mb-3' }) {
   return (
-    <div className="mb-3">
+    <div className={className}>
       <div className="text-[10px] font-mono tracking-[0.18em] text-strategy mb-1">{kicker}</div>
       <h2 className="font-display text-2xl sm:text-3xl text-bone-100 leading-tight">{title}</h2>
       {sub && <div className="text-xs text-bone-400 mt-0.5">{sub}</div>}
+    </div>
+  );
+}
+
+/* Day / Week / Month. */
+function ScopeSwitch({ scope, setScope }) {
+  return (
+    <div role="group" aria-label="Calendar scope" data-testid="scope-switch"
+      className="flex items-center gap-0.5 p-0.5 rounded-lg border border-ink-700 bg-ink-900/50">
+      {TODAY_SCOPES.map(s => (
+        <button key={s} onClick={()=>setScope(s)} data-testid={`scope-${s}`} aria-pressed={scope === s}
+          className={`btn px-2.5 py-1 rounded-md text-[11px] font-mono tracking-wider uppercase ${scope === s ? 'bg-bone-100 text-ink-950 font-semibold' : 'text-bone-400 hover:text-bone-100'}`}>
+          {s}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* Step a whole period at a time. The header's own arrows move one day,
+   which is the wrong unit once you are looking at a month. */
+function PeriodNav({ label, onPrev, onNext, onToday }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <button onClick={onPrev} aria-label="Previous period" data-testid="period-prev"
+        className="btn w-7 h-7 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-300">‹</button>
+      <div data-testid="period-label" className="font-mono text-[11px] tracking-wider text-bone-300 px-1 whitespace-nowrap">{label}</div>
+      <button onClick={onNext} aria-label="Next period" data-testid="period-next"
+        className="btn w-7 h-7 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-300">›</button>
+      <button onClick={onToday} data-testid="period-today"
+        className="btn px-2 h-7 rounded-lg border border-ink-700 hover:bg-ink-800 text-[10px] font-mono tracking-wider text-bone-300">TODAY</button>
     </div>
   );
 }
@@ -2749,20 +2945,273 @@ function Timeline({ state, setState, dow, dKey, sel }) {
           adding={adding}
           state={state}
           onClose={()=>{ setEditing(null); setAdding(null); }}
-          onSave={(b)=>{
-            setState(s => {
-              const exists = s.blocks.find(x => x.id === b.id);
-              return { ...s, blocks: exists ? s.blocks.map(x=>x.id===b.id?b:x) : [...s.blocks, b] };
-            });
-            setEditing(null); setAdding(null);
-          }}
-          onDelete={(id)=>{
-            setState(s => tomb({ ...s, blocks: s.blocks.filter(x => x.id !== id) }, id));
-            setEditing(null);
-          }}
+          onSave={(b)=>{ setState(s => upsertBlock(s, b)); setEditing(null); setAdding(null); }}
+          onDelete={(id)=>{ setState(s => removeBlock(s, id)); setEditing(null); }}
           currentDow={dow}
         />
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+   WEEK CALENDAR  ─ the day grid, seven columns wide
+   ------------------------------------------------------------------
+   Built on the day timeline's geometry rather than a second set of
+   numbers: HOUR_PX, blockHt, segmentsOf and layoutBlocks are all the
+   same ones the day view uses, so a 09:00 block sits at the same height
+   and overlapping blocks fan into the same columns in both. Only the
+   horizontal axis is new.
+
+   No horizontal scrolling. On a phone the columns get narrow and the
+   titles truncate, which is the honest trade — a week at a glance is
+   about shape and density, and the day is one tap away for the detail.
+------------------------------------------------------------------- */
+const WEEK_GUTTER_PX = 38;   // hour labels down the left
+
+function WeekCalendar({ state, setState, sel, setDate, onOpenDay }) {
+  const weekId = fmtKey(startOfWeek(sel));
+  const days    = useMemo(() => weekDays(sel), [weekId]);
+  const dayKeys = useMemo(() => days.map(fmtKey), [days]);
+
+  const resolved = useMemo(() => resolveBlocks(state), [state.blocks, state.habits]);
+  const offsets  = useMemo(() => salahOffsets(state.ui), [state.ui.salahOffsets]);
+  const salahLoc = state.ui?.salahLoc ?? readSalahLoc();
+  const salahByDay = useSalahWeek(dayKeys, state.ui?.salahMethod ?? 3, state.ui?.salahSchool ?? 0, salahLoc, offsets);
+
+  /* One column of the grid, laid out independently — two blocks on
+     different days never collide, so overlap is resolved per day. */
+  const columns = useMemo(() => days.map((d, i) => {
+    const k = dayKeys[i];
+    const blocks = resolved.filter(b => (b.every || []).includes(d.getDay()));
+    const salah  = salahByDay[k] || [];
+    const habits = state.habits.filter(h => h.days.includes(d.getDay()));
+    const log    = state.logs[k] || {};
+    return {
+      d, k, blocks, salah, log,
+      layouts: layoutBlocks([...blocks, ...salah]),
+      pct: habits.length ? Math.round(habits.filter(h => log[h.id]).length / habits.length * 100) : null,
+    };
+  }), [days, dayKeys, resolved, salahByDay, state.habits, state.logs]);
+
+  const [editing, setEditing] = useState(null);
+  const [adding,  setAdding]  = useState(null);
+
+  const [nowMin, setNowMin] = useState(() => { const n = new Date(); return n.getHours()*60 + n.getMinutes(); });
+  useEffect(() => {
+    const t = setInterval(() => { const n = new Date(); setNowMin(n.getHours()*60 + n.getMinutes()); }, 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  const hours = 24;
+  const now = new Date();
+  const blockTop = (b) => (b.start / 60) * HOUR_PX;
+
+  return (
+    <div className="card overflow-hidden" data-testid="week-calendar">
+
+      {/* Day headers — the date, and how much of that day's habits are done */}
+      <div className="flex border-b border-ink-700">
+        <div className="shrink-0" style={{ width: WEEK_GUTTER_PX }}/>
+        {columns.map(({ d, k, pct }) => {
+          const isToday = sameDay(d, now);
+          const isSel   = sameDay(d, sel);
+          return (
+            <button key={k} onClick={()=>onOpenDay(k)} data-testid="week-day-header"
+              aria-label={`Open ${DAY_NAMES[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`}
+              className={`btn flex-1 min-w-0 px-0.5 py-1.5 border-l border-ink-700 ${isSel ? 'bg-ink-800/70' : 'hover:bg-ink-800/40'}`}>
+              <div className="font-mono text-[9px] tracking-widest text-bone-400">{DAY_SHORT[d.getDay()].toUpperCase()}</div>
+              <div className={`font-display text-base leading-none mt-0.5 ${isToday ? 'text-strategy' : 'text-bone-100'}`}>{d.getDate()}</div>
+              <div className="h-1 mt-1 mx-1 rounded-full bg-ink-700 overflow-hidden" title={pct == null ? 'No habits scheduled' : `${pct}% of habits done`}>
+                {pct != null && <div className="h-full rounded-full" style={{ width: `${pct}%`, background: '#10b981' }}/>}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="relative scrollbar overflow-y-auto" style={{ maxHeight: '68vh' }}>
+        <div className="relative" style={{ height: hours * HOUR_PX + 24 }}>
+
+          {/* Hour lines, labelled once down the gutter */}
+          {Array.from({length: hours}).map((_,h) => (
+            <div key={h} className="absolute left-0 right-0 border-t border-ink-700" style={{ top: h*HOUR_PX }}>
+              <span className="absolute left-1 top-0.5 font-mono text-[9px] text-bone-400 tracking-wider">{String(h).padStart(2,'0')}</span>
+            </div>
+          ))}
+
+          <div className="absolute flex" style={{ left: WEEK_GUTTER_PX, right: 0, top: 0, bottom: 0 }}>
+            {columns.map(({ d, k, blocks, salah, log, layouts }) => (
+              <div key={k} className="relative flex-1 min-w-0 border-l border-ink-700">
+
+                {/* Click an hour to drop a block on THAT day — the modal
+                    opens pre-set to this column's weekday, not the
+                    selected one. */}
+                {Array.from({length: hours}).map((_,h) => (
+                  <button key={h} onClick={()=>setAdding({ start: h*60, end: h*60+60, dow: d.getDay() })}
+                    aria-label={`Add block on ${DAY_SHORT[d.getDay()]} at ${String(h).padStart(2,'0')}:00`}
+                    className="absolute left-0 right-0 hover:bg-ink-800/40 transition-colors"
+                    style={{ top: h*HOUR_PX, height: HOUR_PX }}/>
+                ))}
+
+                {/* Now line, on today's column only */}
+                {sameDay(d, now) && (
+                  <div className="absolute left-0 right-0 pointer-events-none"
+                    style={{ top: (nowMin/60)*HOUR_PX, height: 2, background: '#ef4444', zIndex: 5 }}/>
+                )}
+
+                {blocks.map(b => {
+                  const p = pillarByIdFromState(b.pillar, state);
+                  const { col=0, numCols=1 } = layouts[b.id] || {};
+                  const pct = 100 / numCols;
+                  const done = b.habitId ? !!log[b.habitId] : false;
+                  return segmentsOf(b).map((seg, i) => (
+                    <button key={`${b.id}-${i}`}
+                      data-testid={b.habitId ? 'week-habit-block' : 'week-time-block'}
+                      onClick={()=>{ setDate(k); setEditing(b); }}
+                      title={`${b.title} · ${toHM(b.start)}–${toHM(b.end)}`}
+                      className="btn absolute rounded-md overflow-hidden text-left px-1 py-0.5"
+                      style={{
+                        top: blockTop(seg), height: blockHt(seg),
+                        left: `calc(${col * pct}% + 1px)`, width: `calc(${pct}% - 3px)`,
+                        background: `linear-gradient(90deg, ${p.color}22 0%, #131317 70%)`,
+                        border: `1px solid ${p.color}55`,
+                        borderLeft: `3px solid ${p.color}`,
+                        opacity: done ? 0.5 : 1,
+                      }}>
+                      <div className={`text-[10px] leading-tight truncate ${done ? 'text-bone-400 line-through' : 'text-bone-100'}`}>{b.title}</div>
+                      <div className="font-mono text-[8px] text-bone-400 truncate">{toHM(b.start)}</div>
+                    </button>
+                  ));
+                })}
+
+                {/* Salah — an overlay, as in the day view. pointer-events
+                    off so the hour targets underneath stay clickable. */}
+                {salah.map(b => {
+                  const { col=0, numCols=1 } = layouts[b.id] || {};
+                  const pct = 100 / numCols;
+                  return (
+                    <div key={b.id} data-testid="week-salah-block"
+                      className="absolute rounded-md overflow-hidden px-1 pointer-events-none"
+                      style={{
+                        top: blockTop(b), height: blockHt(b),
+                        left: `calc(${col * pct}% + 1px)`, width: `calc(${pct}% - 3px)`,
+                        background: 'rgba(16,185,129,0.10)',
+                        border: '1px solid rgba(16,185,129,0.45)',
+                        borderLeft: '3px solid #10b981',
+                      }}>
+                      <div className="text-[9px] leading-tight text-deen truncate">{b.title}</div>
+                      <div className="font-mono text-[8px] text-deen/60 truncate">{toHM(b.start)}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {(editing || adding) && (
+        <BlockModal
+          block={editing}
+          adding={adding}
+          state={state}
+          onClose={()=>{ setEditing(null); setAdding(null); }}
+          onSave={(b)=>{ setState(s => upsertBlock(s, b)); setEditing(null); setAdding(null); }}
+          onDelete={(id)=>{ setState(s => removeBlock(s, id)); setEditing(null); }}
+          currentDow={adding?.dow ?? sel.getDay()}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+   MONTH CALENDAR  ─ the shape of a month, not its detail
+   ------------------------------------------------------------------
+   Deliberately not a scaled-down timeline. At month scale the useful
+   questions are "what recurs on this day", "did the habits get done"
+   and "what's due" — so each cell answers those three and hands off to
+   the day view for anything finer.
+------------------------------------------------------------------- */
+function MonthCalendar({ state, sel, onOpenDay }) {
+  const monthId = `${sel.getFullYear()}-${sel.getMonth()}`;
+  const cells = useMemo(() => monthGridDays(sel), [monthId]);
+  const resolved = useMemo(() => resolveBlocks(state), [state.blocks, state.habits]);
+  const now = new Date();
+
+  return (
+    <div className="card overflow-hidden" data-testid="month-calendar">
+      <div className="grid grid-cols-7 border-b border-ink-700">
+        {WEEK_DOWS.map((dw, i) => (
+          <div key={dw} className={`px-1 py-1.5 text-center font-mono text-[9px] tracking-widest text-bone-400 ${i ? 'border-l border-ink-700' : ''}`}>
+            {DAY_SHORT[dw].toUpperCase()}
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-7">
+        {cells.map((d, i) => {
+          const k = fmtKey(d);
+          const dow = d.getDay();
+          const inMonth = d.getMonth() === sel.getMonth();
+          const blocks  = resolved.filter(b => (b.every || []).includes(dow)).sort((a,b) => a.start - b.start);
+          const habits  = state.habits.filter(h => h.days.includes(dow));
+          const log     = state.logs[k] || {};
+          const doneN   = habits.filter(h => log[h.id]).length;
+          const dueN    = state.tasks.filter(t => !t.done && t.due === k).length;
+          const isToday = sameDay(d, now);
+          const isSel   = sameDay(d, sel);
+          return (
+            <button key={k} onClick={()=>onOpenDay(k)} data-testid="month-day" data-date={k}
+              data-habits={habits.length ? `${doneN}/${habits.length}` : undefined}
+              aria-label={`Open ${DAY_NAMES[dow]} ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`}
+              className={`btn relative text-left p-1.5 flex flex-col gap-1 min-h-[78px] sm:min-h-[104px] border-t border-ink-700 ${i % 7 ? 'border-l' : ''} ${inMonth ? '' : 'opacity-40'} ${isSel ? 'bg-ink-800/70' : 'hover:bg-ink-800/40'}`}>
+
+              <div className="flex items-center justify-between gap-1">
+                <span className={`font-mono text-[11px] leading-none ${isToday ? 'px-1.5 py-1 rounded-md bg-strategy/20 text-strategy border border-strategy/40' : 'text-bone-300'}`}>
+                  {d.getDate()}
+                </span>
+                {dueN > 0 && (
+                  <span data-testid="month-due" title={`${dueN} task${dueN === 1 ? '' : 's'} due`}
+                    className="font-mono text-[9px] leading-none px-1 py-0.5 rounded bg-ink-700 text-bone-300">{dueN}</span>
+                )}
+              </div>
+
+              {/* Names where there is room for them, colour alone where
+                  there isn't — a phone gives each cell about 50px. */}
+              {blocks.length > 0 && <>
+                <div className="hidden sm:flex flex-col gap-0.5 min-w-0">
+                  {blocks.slice(0,3).map(b => {
+                    const p = pillarByIdFromState(b.pillar, state);
+                    return (
+                      <div key={b.id} className="flex items-center gap-1 min-w-0" title={`${b.title} · ${toHM(b.start)}–${toHM(b.end)}`}>
+                        <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: p.color }}/>
+                        <span className="text-[10px] leading-tight text-bone-300 truncate">{b.title}</span>
+                      </div>
+                    );
+                  })}
+                  {blocks.length > 3 && <div className="font-mono text-[9px] text-bone-400">+{blocks.length - 3}</div>}
+                </div>
+                <div className="flex sm:hidden flex-wrap gap-0.5">
+                  {blocks.slice(0,8).map(b => (
+                    <span key={b.id} className="w-1.5 h-1.5 rounded-full" style={{ background: pillarByIdFromState(b.pillar, state).color }}/>
+                  ))}
+                </div>
+              </>}
+
+              {habits.length > 0 && (
+                <div className="mt-auto flex items-center gap-1" title={`${doneN} of ${habits.length} habits done`}>
+                  <div className="flex-1 h-1 rounded-full bg-ink-700 overflow-hidden">
+                    <div className="h-full rounded-full" style={{ width: `${Math.round(doneN / habits.length * 100)}%`, background: '#10b981' }}/>
+                  </div>
+                  <span className="hidden sm:block font-mono text-[8px] text-bone-400">{doneN}/{habits.length}</span>
+                </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
