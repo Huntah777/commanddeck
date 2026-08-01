@@ -258,3 +258,113 @@ test.describe('what gets logged', () => {
     expect(await sessions(page)).toHaveLength(1);
   });
 });
+
+test.describe('editing the timer settings', () => {
+  /* Reported bug: clearing a field to type a new value snapped it to 1,
+     then any further typing composed against that resurrected "1"
+     instead of what was actually being typed — landing on 10 (the max
+     for "long after") and refusing to move past it. Root cause: the
+     field clamped on every keystroke, and clamp('') read as 0, and 0 is
+     falsy, so `0 || lo` reset it to the minimum before the next digit
+     ever landed. */
+
+  const openSettings = async (page) => {
+    await page.getByText('TIMER SETTINGS').click();
+  };
+  const longAfterField = (page) => page.getByLabel('Long after (×)');
+  const longBreakField = (page) => page.getByLabel('Long break (min)');
+  const applyBtn = (page) => page.getByRole('button', { name: 'Apply settings' });
+
+  test('clearing a field and typing a fresh value keeps exactly what was typed', async ({ page }) => {
+    await boot(page);
+    await openSettings(page);
+
+    const input = longAfterField(page);
+    await input.fill('');
+    await input.pressSequentially('6');
+    await expect(input).toHaveValue('6');   // not '1', not '16', not clamped mid-edit
+  });
+
+  test('a field can be moved through several different values in one sitting', async ({ page }) => {
+    // The exact symptom reported: stuck unable to change past a value
+    // the clamp had forced it to.
+    await boot(page);
+    await openSettings(page);
+    const input = longAfterField(page);
+
+    for (const v of ['3', '7', '2', '9']) {
+      await input.fill('');
+      await input.pressSequentially(v);
+      await expect(input).toHaveValue(v);
+    }
+  });
+
+  test('an out-of-range value is only clamped once you leave the field, not while typing', async ({ page }) => {
+    // Typing "10" one digit at a time passes through "1" — clamping that
+    // intermediate "1" against a max of 10 is harmless, but clamping the
+    // final, in-range "10" mid-edit is exactly what broke this.
+    await boot(page);
+    await openSettings(page);
+    const input = longAfterField(page);
+
+    await input.fill('');
+    await input.pressSequentially('10');
+    await expect(input).toHaveValue('10');
+
+    await input.blur();
+    await expect(input).toHaveValue('10'); // still 10 — in range, so blur leaves it alone
+  });
+
+  test('blur resets an empty or invalid field to the minimum, not to nothing', async ({ page }) => {
+    await boot(page);
+    await openSettings(page);
+    const input = longAfterField(page);
+
+    await input.fill('');
+    await input.blur();
+    await expect(input).toHaveValue('1');
+  });
+
+  test('blur clamps a value above the maximum back into range', async ({ page }) => {
+    await boot(page);
+    await openSettings(page);
+    const input = longAfterField(page);
+
+    await input.fill('');
+    await input.pressSequentially('99');
+    await input.blur();
+    await expect(input).toHaveValue('10'); // longAfter's max
+  });
+
+  test('Apply settings saves the typed value, including one never blurred', async ({ page }) => {
+    await boot(page);
+    await openSettings(page);
+
+    const input = longBreakField(page);
+    await input.fill('');
+    await input.pressSequentially('22');
+    await applyBtn(page).click();          // clicking Apply blurs the field itself
+
+    await expect.poll(async () => {
+      const s = JSON.parse(await page.evaluate(() => localStorage.getItem('madinah_v1')) || '{}');
+      return s.pomodoro?.longMins;
+    }, { timeout: 10_000 }).toBe(22);
+  });
+
+  test('Apply settings clamps rather than saving garbage', async ({ page }) => {
+    // Defence in depth: Apply must not trust an unblurred field to
+    // already be in range.
+    await boot(page);
+    await openSettings(page);
+
+    const input = longAfterField(page);
+    await input.fill('');
+    await input.pressSequentially('500');
+    await applyBtn(page).click();
+
+    await expect.poll(async () => {
+      const s = JSON.parse(await page.evaluate(() => localStorage.getItem('madinah_v1')) || '{}');
+      return s.pomodoro?.longAfter;
+    }, { timeout: 10_000 }).toBe(10);
+  });
+});

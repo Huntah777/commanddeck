@@ -6252,15 +6252,33 @@ function PomodoroView({ state, setState, pomo }) {
 }
 
 function PomodoroSettings({ cfg, onChange }) {
-  const [work,  setWork]  = useState(cfg.workMins);
-  const [short, setShort] = useState(cfg.shortMins);
-  const [long,  setLong]  = useState(cfg.longMins);
-  const [after, setAfter] = useState(cfg.longAfter);
-  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, +v || lo));
+  /* Held as the raw typed string, not a clamped number. Clamping on every
+     keystroke (the previous behaviour) fights the act of editing: clearing
+     the field to type a fresh value produces an empty string for one
+     render, `+'' ` is 0, and 0 is falsy — so the old clamp's `|| lo`
+     snapped it straight back to the minimum before the next digit ever
+     landed. From there every further digit composes against that
+     resurrected "1" instead of what was actually typed, which is exactly
+     the "defaults to 1, then 10, then won't move" symptom: it stopped
+     changing because the field was rejecting the intended value on every
+     single keystroke, not just the last one.
+
+     The fix is to let the field hold whatever was typed — including
+     empty, mid-edit — and only clamp once editing is actually finished:
+     on blur, and defensively again in case Apply is reached some other
+     way (e.g. Enter, which some browsers fire without a preceding blur). */
+  const [work,  setWork]  = useState(String(cfg.workMins));
+  const [short, setShort] = useState(String(cfg.shortMins));
+  const [long,  setLong]  = useState(String(cfg.longMins));
+  const [after, setAfter] = useState(String(cfg.longAfter));
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, Math.round(Number(v)) || lo));
+
   const numFld = (label, val, set, lo, hi) => (
     <Field label={label}>
-      <input type="number" value={val} min={lo} max={hi}
-        onChange={e => set(clamp(e.target.value, lo, hi))}
+      <input type="number" value={val} min={lo} max={hi} aria-label={label}
+        onChange={e => set(e.target.value)}
+        onBlur={e => set(String(clamp(e.target.value, lo, hi)))}
         className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono text-sm"/>
     </Field>
   );
@@ -6272,7 +6290,12 @@ function PomodoroSettings({ cfg, onChange }) {
         {numFld('Long break (min)',  long,  setLong,  1, 120)}
         {numFld('Long after (×)',    after, setAfter, 1,  10)}
       </div>
-      <button onClick={() => onChange({ workMins: work, shortMins: short, longMins: long, longAfter: after })}
+      <button onClick={() => onChange({
+          workMins:  clamp(work,  1, 120),
+          shortMins: clamp(short, 1, 60),
+          longMins:  clamp(long,  1, 120),
+          longAfter: clamp(after, 1, 10),
+        })}
         className="btn w-full py-2 rounded-lg bg-strategy text-ink-950 font-semibold text-sm">
         Apply settings
       </button>
