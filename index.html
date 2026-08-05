@@ -1058,12 +1058,40 @@ function useSalahWeek(dayKeys, method, school, loc, offsets) {
 ------------------------------------------------------------------- */
 const resolveBlocks = (state) => {
   const habits = state?.habits || [];
+  const tasks  = state?.tasks  || [];
   return (state?.blocks || []).flatMap(b => {
-    if (!b?.habitId) return b ? [b] : [];
-    const h = habits.find(x => x.id === b.habitId);
-    if (!h) return [];
-    return [{ ...b, title: h.name, pillar: h.pillar, every: Array.isArray(h.days) ? h.days : [] }];
+    if (b?.habitId) {
+      const h = habits.find(x => x.id === b.habitId);
+      if (!h) return [];
+      return [{ ...b, title: h.name, pillar: h.pillar, every: Array.isArray(h.days) ? h.days : [] }];
+    }
+    if (b?.taskId) {
+      const t = tasks.find(x => x.id === b.taskId);
+      if (!t) return [];
+      /* `every: []` clears any weekday list a stale block arrived with — a
+         task happens once, on its date, and must never start recurring.
+         Falling back to the due date keeps a block that somehow lost its
+         own date visible on the day the task is owed rather than nowhere. */
+      return [{ ...b, title: t.title, listId: t.listId, done: !!t.done, date: b.date || t.due || null, every: [] }];
+    }
+    return b ? [b] : [];
   });
+};
+
+/* Does this block belong to this day? Habits and ordinary blocks recur by
+   weekday; a task's slot is a one-off and names its date outright. */
+const blockOnDay = (b, dayKey, dow) =>
+  b?.date ? b.date === dayKey : (b?.every || []).includes(dow);
+
+/* What a block is painted with. A task takes the colour of its list — the
+   same blue that marks Work in the sidebar marks it on the timeline —
+   everything else takes its pillar's. */
+const blockAccent = (b, state) => {
+  if (b?.taskId) {
+    const l = (state?.lists || []).find(x => x.id === b.listId);
+    return { color: l?.color || '#9a9788', name: l?.name || 'Task' };
+  }
+  return pillarByIdFromState(b?.pillar, state);
 };
 
 /* The slot a habit occupies, if it has one. */
@@ -1114,6 +1142,79 @@ function deleteHabit(s, id) {
     blocks: (s.blocks || []).filter(b => b?.habitId !== id),
   }, ...gone);
 }
+
+/* ------------------------------------------------------------------
+   TASKS ON THE CALENDAR
+   ------------------------------------------------------------------
+   The same arrangement as habits above, with one difference that runs
+   all the way through: a habit recurs and a task happens once. So a
+   task's block carries a `date` where a habit's carries the habit's
+   weekdays — `{ id, taskId, date, start, end }` — and the day views ask
+   blockOnDay rather than reading `every` directly.
+
+   Everything else is deliberately identical. The block stores only the
+   pointer and the times; the title, the list it belongs to and whether
+   it is done are read back off the task, so renaming or ticking a task
+   can never leave a stale twin on the timeline, and a block whose task
+   was deleted resolves to nothing. Being a real block, it inherits the
+   overlap layout and the 15-before / 5-before / 5-before-the-end alerts.
+
+   MIRRORED in push-worker/index.js. Change both.
+------------------------------------------------------------------- */
+const slotForTask = (state, taskId) =>
+  (state?.blocks || []).find(b => b?.taskId === taskId) || null;
+
+/* Write a task and its calendar slot together. `slot` is { date, start,
+   end }, or null for "not on the calendar". One transaction for the same
+   reason as saveHabitWithSlot: a block pointing at a task that didn't
+   save is a ghost, and a task whose block didn't save is a promise the
+   day never keeps. */
+function saveTaskWithSlot(s, task, slot) {
+  const tasks = s.tasks.find(x => x.id === task.id)
+    ? s.tasks.map(x => x.id === task.id ? task : x)
+    : [...s.tasks, task];
+
+  const blocks = s.blocks || [];
+  const existing = blocks.find(b => b?.taskId === task.id);
+
+  if (!slot) {
+    /* Tombstoned, not merely dropped — see saveHabitWithSlot. */
+    return existing
+      ? tomb({ ...s, tasks, blocks: blocks.filter(b => b !== existing) }, existing.id)
+      : { ...s, tasks };
+  }
+
+  const next = existing
+    ? { ...existing, ...slot, modifiedAt: Date.now() }
+    : { id: `b-${task.id}`, taskId: task.id, ...slot, modifiedAt: Date.now() };
+
+  return {
+    ...s, tasks,
+    blocks: existing ? blocks.map(b => b === existing ? next : b) : [...blocks, next],
+  };
+}
+
+/* Deleting a task takes its calendar slot with it — resolveBlocks would
+   hide the orphan anyway, but leaving it in state means it syncs to
+   every other device forever. */
+function deleteTask(s, id) {
+  const orphan = (s.blocks || []).find(b => b?.taskId === id);
+  const gone = orphan ? [id, orphan.id] : [id];
+  return tomb({
+    ...s,
+    tasks: s.tasks.filter(x => x.id !== id),
+    blocks: (s.blocks || []).filter(b => b?.taskId !== id),
+  }, ...gone);
+}
+
+/* Ticking a task off, from its row or from its block on the timeline —
+   one write, so the two can't drift. */
+const toggleTaskDone = (s, id) => ({
+  ...s,
+  tasks: s.tasks.map(x => x.id === id
+    ? { ...x, done: !x.done, doneAt: !x.done ? Date.now() : null, modifiedAt: Date.now() }
+    : x),
+});
 
 /* Block writes, shared by every calendar scope. A block edited from the
    week grid has to land in state identically to one edited from the day
@@ -1205,7 +1306,9 @@ const SEED = () => ({
   ],
   /* blocks: { id, title, pillar, start, end, every: [dow] } — or, for a
      habit given a slot in the day, { id, habitId, start, end } with the
-     title/pillar/days read off the habit instead. See resolveBlocks. */
+     title/pillar/days read off the habit instead, or for a task given
+     one, { id, taskId, date, start, end } with the title/list/done read
+     off the task. See resolveBlocks. */
   blocks: [],
   pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
   pomodoroLogs: [],
@@ -1527,13 +1630,17 @@ function buildPlan(state) {
   } catch(e) {}
 
   /* Calendar blocks — 3 notifications each. A block standing in for a
-     habit is skipped once that habit is ticked: the alerts exist to get
-     it done, and buzzing about something already done is how people
-     learn to ignore the buzzing. */
+     habit or a task is skipped once that habit or task is ticked: the
+     alerts exist to get it done, and buzzing about something already
+     done is how people learn to ignore the buzzing. */
   const doneToday = state.logs?.[todayKey()] || {};
+  /* The day in the user's timezone, matching `dow` — a task block names
+     the date it falls on, and the device's own clock may be elsewhere. */
+  const zonedKey = `${y}-${String(mo).padStart(2,'0')}-${String(dayOfMonth).padStart(2,'0')}`;
   resolveBlocks(state).forEach(b => {
-    if (!b.every.includes(dow)) return;
+    if (!blockOnDay(b, zonedKey, dow)) return;
     if (b.habitId && doneToday[b.habitId]) return;
+    if (b.taskId && b.done) return;
     const s = atMins(b.start);
     /* end <= start means the block crosses midnight — anchor the end to the next day */
     const e = atMins(b.end) + (b.end <= b.start ? 24 * 60 * 60000 : 0);
@@ -1554,9 +1661,16 @@ function buildPlan(state) {
     push(`h-${h.id}`, 'Habit reminder', h.name, atHm(hr, mn));
   });
 
-  /* Task reminders */
+  /* Task reminders. Suppressed only when the task's calendar slot is on
+     the same day the reminder would fire — that day already carries the
+     three block alerts, and four notifications for one task is how you
+     teach someone to swipe them away. A reminder set for a different day
+     is a different intention and stands. */
+  const taskSlotDate = new Map(
+    resolveBlocks(state).filter(b => b.taskId && b.date).map(b => [b.taskId, b.date]));
   (state.tasks || []).forEach(t => {
     if (!t.reminder || t.done) return;
+    if (taskSlotDate.get(t.id) === String(t.reminder).slice(0, 10)) return;
     push(`t-${t.id}`, 'Task reminder', t.title, new Date(t.reminder).getTime());
   });
 
@@ -2588,9 +2702,16 @@ function TodayView({ state, setState }) {
     };
   });
 
-  /* tasks due today or undated and not done */
-  const tasksToday = state.tasks.filter(t => !t.done && (!t.due || t.due === dKey));
-  const overdue    = state.tasks.filter(t => !t.done && t.due && t.due < dKey);
+  /* Tasks due today or undated and not done — plus anything booked into
+     this day's calendar, whatever it is due. Having decided to do it
+     today, you should not have to go and find it in another list; and an
+     overdue task you have booked in belongs under today rather than
+     appearing twice. */
+  const bookedToday = useMemo(
+    () => new Set((state.blocks || []).filter(b => b?.taskId && b.date === dKey).map(b => b.taskId)),
+    [state.blocks, dKey]);
+  const tasksToday = state.tasks.filter(t => !t.done && (!t.due || t.due === dKey || bookedToday.has(t.id)));
+  const overdue    = state.tasks.filter(t => !t.done && t.due && t.due < dKey && !bookedToday.has(t.id));
 
   const wide = scope !== 'day';
   const heading = {
@@ -2633,13 +2754,13 @@ function TodayView({ state, setState }) {
         {overdue.length > 0 && (
           <div className="mb-3">
             <div className="text-[10px] font-mono tracking-widest text-combat mb-1.5">OVERDUE · {overdue.length}</div>
-            {overdue.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState} compact/>) }
+            {overdue.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState} compact dayKey={dKey}/>) }
           </div>
         )}
         <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1.5">TODAY · {tasksToday.length}</div>
         {tasksToday.length === 0
           ? <EmptyHint text="Inbox zero. Add the next move."/>
-          : tasksToday.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState}/>)}
+          : tasksToday.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState} dayKey={dKey}/>)}
       </section>
 
       {/* Habits */}
@@ -2703,7 +2824,8 @@ function Timeline({ state, setState, dow, dKey, sel }) {
   const startHour = 0, endHour = 24;
   const hours = endHour - startHour;
 
-  const blocks = useMemo(() => resolveBlocks(state).filter(b => b.every.includes(dow)), [state.blocks, state.habits, dow]);
+  const blocks = useMemo(() => resolveBlocks(state).filter(b => blockOnDay(b, dKey, dow)),
+    [state.blocks, state.habits, state.tasks, dKey, dow]);
   const log = state.logs[dKey] || {};
 
   /* Ticking a habit off its own block. Same write as the checklist's — see
@@ -2722,6 +2844,9 @@ function Timeline({ state, setState, dow, dKey, sel }) {
       logsOff: { ...(s.logsOff || {}),  [dKey]: logsOff },
     };
   });
+  /* Same write as the task row's — a task ticked from its block and one
+     ticked from the list are the same event. */
+  const toggleTask = (id) => setState(s => toggleTaskDone(s, id));
   const [editing, setEditing] = useState(null);
   const [adding,  setAdding]  = useState(null);
   const [showManual, setShowManual] = useState(false);
@@ -2870,15 +2995,16 @@ function Timeline({ state, setState, dow, dKey, sel }) {
                 segments (one per segmentsOf()) so it visually splits across
                 the top/bottom of the grid instead of one wrongly-sized box */}
             {blocks.map(b => {
-              const p = pillarByIdFromState(b.pillar, state);
+              const p = blockAccent(b, state);
               const { col=0, numCols=1 } = layouts[b.id] || {};
               const pct = 100 / numCols;
-              /* A habit's block is the habit — so it can be ticked from
-                 here rather than making you go and find the checklist. */
-              const done = b.habitId ? !!log[b.habitId] : false;
+              /* A habit's or a task's block is the thing itself — so it
+                 can be ticked from here rather than making you go and
+                 find the checklist or the list. */
+              const done = b.habitId ? !!log[b.habitId] : b.taskId ? !!b.done : false;
               return segmentsOf(b).map((seg, i) => (
                 <div key={`${b.id}-${i}`}
-                  data-testid={b.habitId ? 'habit-block' : 'time-block'}
+                  data-testid={b.habitId ? 'habit-block' : b.taskId ? 'task-block' : 'time-block'}
                   className="absolute rounded-lg overflow-hidden flex items-stretch"
                   style={{
                     top: blockTop(seg), height: blockHt(seg),
@@ -2889,8 +3015,8 @@ function Timeline({ state, setState, dow, dKey, sel }) {
                     opacity: done ? 0.55 : 1,
                     pointerEvents: 'auto',
                   }}>
-                  {b.habitId && (
-                    <button onClick={()=>toggleHabit(b.habitId)}
+                  {(b.habitId || b.taskId) && (
+                    <button onClick={()=>b.habitId ? toggleHabit(b.habitId) : toggleTask(b.taskId)}
                       aria-label={`${done ? 'Untick' : 'Tick'} ${b.title}`}
                       className="btn shrink-0 pl-2 pr-1 flex items-start pt-1.5">
                       <div className={`tick ${done?'on':''}`} style={done ? { background: p.color, borderColor: p.color } : {}}>
@@ -2905,7 +3031,7 @@ function Timeline({ state, setState, dow, dKey, sel }) {
                       <div className="font-mono text-[9px] text-bone-400 whitespace-nowrap shrink-0">{toHM(b.start)}–{toHM(b.end)}</div>
                     </div>
                     <div className="text-[9px] font-mono tracking-wider uppercase mt-0.5" style={{ color: p.color }}>
-                      {b.habitId ? `${p.name} · habit` : p.name}
+                      {b.habitId ? `${p.name} · habit` : b.taskId ? `${p.name} · task` : p.name}
                     </div>
                   </button>
                 </div>
@@ -2974,7 +3100,7 @@ function WeekCalendar({ state, setState, sel, setDate, onOpenDay }) {
   const days    = useMemo(() => weekDays(sel), [weekId]);
   const dayKeys = useMemo(() => days.map(fmtKey), [days]);
 
-  const resolved = useMemo(() => resolveBlocks(state), [state.blocks, state.habits]);
+  const resolved = useMemo(() => resolveBlocks(state), [state.blocks, state.habits, state.tasks]);
   const offsets  = useMemo(() => salahOffsets(state.ui), [state.ui.salahOffsets]);
   const salahLoc = state.ui?.salahLoc ?? readSalahLoc();
   const salahByDay = useSalahWeek(dayKeys, state.ui?.salahMethod ?? 3, state.ui?.salahSchool ?? 0, salahLoc, offsets);
@@ -2983,7 +3109,7 @@ function WeekCalendar({ state, setState, sel, setDate, onOpenDay }) {
      different days never collide, so overlap is resolved per day. */
   const columns = useMemo(() => days.map((d, i) => {
     const k = dayKeys[i];
-    const blocks = resolved.filter(b => (b.every || []).includes(d.getDay()));
+    const blocks = resolved.filter(b => blockOnDay(b, k, d.getDay()));
     const salah  = salahByDay[k] || [];
     const habits = state.habits.filter(h => h.days.includes(d.getDay()));
     const log    = state.logs[k] || {};
@@ -3061,13 +3187,13 @@ function WeekCalendar({ state, setState, sel, setDate, onOpenDay }) {
                 )}
 
                 {blocks.map(b => {
-                  const p = pillarByIdFromState(b.pillar, state);
+                  const p = blockAccent(b, state);
                   const { col=0, numCols=1 } = layouts[b.id] || {};
                   const pct = 100 / numCols;
-                  const done = b.habitId ? !!log[b.habitId] : false;
+                  const done = b.habitId ? !!log[b.habitId] : b.taskId ? !!b.done : false;
                   return segmentsOf(b).map((seg, i) => (
                     <button key={`${b.id}-${i}`}
-                      data-testid={b.habitId ? 'week-habit-block' : 'week-time-block'}
+                      data-testid={b.habitId ? 'week-habit-block' : b.taskId ? 'week-task-block' : 'week-time-block'}
                       onClick={()=>{ setDate(k); setEditing(b); }}
                       title={`${b.title} · ${toHM(b.start)}–${toHM(b.end)}`}
                       className="btn absolute rounded-md overflow-hidden text-left px-1 py-0.5"
@@ -3137,7 +3263,7 @@ function WeekCalendar({ state, setState, sel, setDate, onOpenDay }) {
 function MonthCalendar({ state, sel, onOpenDay }) {
   const monthId = `${sel.getFullYear()}-${sel.getMonth()}`;
   const cells = useMemo(() => monthGridDays(sel), [monthId]);
-  const resolved = useMemo(() => resolveBlocks(state), [state.blocks, state.habits]);
+  const resolved = useMemo(() => resolveBlocks(state), [state.blocks, state.habits, state.tasks]);
   const now = new Date();
 
   return (
@@ -3155,7 +3281,7 @@ function MonthCalendar({ state, sel, onOpenDay }) {
           const k = fmtKey(d);
           const dow = d.getDay();
           const inMonth = d.getMonth() === sel.getMonth();
-          const blocks  = resolved.filter(b => (b.every || []).includes(dow)).sort((a,b) => a.start - b.start);
+          const blocks  = resolved.filter(b => blockOnDay(b, k, dow)).sort((a,b) => a.start - b.start);
           const habits  = state.habits.filter(h => h.days.includes(dow));
           const log     = state.logs[k] || {};
           const doneN   = habits.filter(h => log[h.id]).length;
@@ -3183,7 +3309,7 @@ function MonthCalendar({ state, sel, onOpenDay }) {
               {blocks.length > 0 && <>
                 <div className="hidden sm:flex flex-col gap-0.5 min-w-0">
                   {blocks.slice(0,3).map(b => {
-                    const p = pillarByIdFromState(b.pillar, state);
+                    const p = blockAccent(b, state);
                     return (
                       <div key={b.id} className="flex items-center gap-1 min-w-0" title={`${b.title} · ${toHM(b.start)}–${toHM(b.end)}`}>
                         <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: p.color }}/>
@@ -3195,7 +3321,7 @@ function MonthCalendar({ state, sel, onOpenDay }) {
                 </div>
                 <div className="flex sm:hidden flex-wrap gap-0.5">
                   {blocks.slice(0,8).map(b => (
-                    <span key={b.id} className="w-1.5 h-1.5 rounded-full" style={{ background: pillarByIdFromState(b.pillar, state).color }}/>
+                    <span key={b.id} className="w-1.5 h-1.5 rounded-full" style={{ background: blockAccent(b, state).color }}/>
                   ))}
                 </div>
               </>}
@@ -3226,6 +3352,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
   const [start, setStart] = useState(toHM(block?.start ?? adding?.start ?? 540));
   const [end,   setEnd]   = useState(toHM(block?.end   ?? adding?.end   ?? 600));
   const [days,  setDays]  = useState(block?.every || [currentDow]);
+  const [date,  setDate]  = useState(block?.date || '');
   const [error, setError] = useState('');
 
   const toggleDay = (d) => setDays(ds => ds.includes(d) ? ds.filter(x=>x!==d) : [...ds, d].sort());
@@ -3234,12 +3361,24 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
      the block — editing them here would either be ignored or silently
      fork the two. Only the time is the block's own. */
   const habit = block?.habitId ? (state.habits || []).find(h => h.id === block.habitId) : null;
+  /* A task's slot. Same arrangement, plus the date — a task happens on a
+     day rather than every Tuesday, so moving it to another day is a thing
+     you do here. */
+  const task = block?.taskId ? (state.tasks || []).find(t => t.id === block.taskId) : null;
 
   const save = () => {
     const startM = fromHM(start), endM = fromHM(end);
     if (endM === startM) { setError("Start and end can't be the same time."); return; }
     if (habit) {
       onSave({ ...block, start: startM, end: endM, modifiedAt: Date.now() });
+      return;
+    }
+    if (task) {
+      if (!date) { setError('Pick a day for this task.'); return; }
+      /* Written from the parts the block actually owns, not by spreading
+         the resolved one — the title and list on `block` were read off
+         the task and writing them back is how a stale twin is born. */
+      onSave({ id: block.id, taskId: block.taskId, date, start: startM, end: endM, modifiedAt: Date.now() });
       return;
     }
     if (!title.trim()) { setError('Give this block a title.'); return; }
@@ -3269,6 +3408,57 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
           The name, pillar and days come from the habit itself — edit those in Habits.
           Here you only set when it sits in the day.
         </p>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Start">
+            <input type="time" value={start} onChange={e=>setStart(e.target.value)} aria-label="Start"
+              className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono"/>
+          </Field>
+          <Field label="End">
+            <input type="time" value={end} onChange={e=>setEnd(e.target.value)} aria-label="End"
+              className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono"/>
+          </Field>
+        </div>
+        <Field label="Notifications">
+          <div className="text-sm text-bone-400 flex items-start gap-2">
+            <span className="text-strategy">✓</span>
+            <span>15 min before · 5 min before · 5 min before the end — and nothing at all once you've ticked it off.</span>
+          </div>
+        </Field>
+        {error && <div className="text-xs text-combat">{error}</div>}
+        <div className="flex justify-between gap-2 pt-2">
+          <button onClick={()=>onDelete(block.id)}
+            className="btn px-3 py-2 rounded-lg text-combat border border-combat/30 hover:bg-combat/10 text-sm">
+            Take off calendar
+          </button>
+          <div className="flex-1"/>
+          <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Cancel</button>
+          <button onClick={save} className="btn px-4 py-2 rounded-lg bg-bone-100 text-ink-950 font-semibold text-sm">Save block</button>
+        </div>
+      </Modal>
+    );
+  }
+
+  if (task) {
+    const list = (state.lists || []).find(l => l.id === task.listId);
+    return (
+      <Modal onClose={onClose} title="Task on the calendar">
+        <div className="card-soft p-3 flex items-center gap-2.5">
+          <div className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: list?.color || '#9a9788' }}/>
+          <div className="flex-1 min-w-0">
+            <div className={`text-sm truncate ${task.done ? 'text-bone-400 line-through' : 'text-bone-100'}`}>{task.title}</div>
+            <div className="text-[10px] font-mono tracking-wider text-bone-400 mt-0.5">
+              {(list?.name || 'Inbox').toUpperCase()}{task.due ? ` · DUE ${task.due}` : ''}
+            </div>
+          </div>
+        </div>
+        <p className="text-[11px] text-bone-400">
+          The title and list come from the task itself — edit those in Tasks.
+          Here you only set when you are going to do it.
+        </p>
+        <Field label="Day">
+          <input type="date" value={date} onChange={e=>setDate(e.target.value)} aria-label="Day"
+            className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono"/>
+        </Field>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Start">
             <input type="time" value={start} onChange={e=>setStart(e.target.value)} aria-label="Start"
@@ -3543,23 +3733,25 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
 /* ------------------------------------------------------------------
    TASK ROW
 ------------------------------------------------------------------- */
-function TaskRow({ t, state, setState, compact, draggable, onDragStart }) {
+function TaskRow({ t, state, setState, compact, draggable, onDragStart, dayKey }) {
   const [editing, setEditing] = useState(false);
+  /* Whether this row's time picker is open. Rows sit in narrow columns —
+     one open at a time, as with the habit checklist. */
+  const [scheduling, setScheduling] = useState(false);
   const list = state.lists.find(l => l.id === t.listId);
   const q = resolveQuads(state).find(x => x.id === t.quadrant);
   const person = t.personId ? (state.people || []).find(p => p.id === t.personId) : null;
+  const slot = slotForTask(state, t.id);
 
-  const toggle = () => setState(s => ({
-    ...s,
-    tasks: s.tasks.map(x => x.id === t.id ? { ...x, done: !x.done, doneAt: !x.done ? Date.now() : null, modifiedAt: Date.now() } : x),
-  }));
-  const remove = () => setState(s => tomb({ ...s, tasks: s.tasks.filter(x => x.id !== t.id) }, t.id));
+  const toggle = () => setState(s => toggleTaskDone(s, t.id));
+  const remove = () => setState(s => deleteTask(s, t.id));
 
   return (
     <>
       <div
         draggable={draggable}
         onDragStart={(e)=>onDragStart && onDragStart(e, t)}
+        data-testid="task-row"
         className={`group flex items-start gap-2.5 px-2.5 py-2 rounded-lg hover:bg-ink-800/60 transition-colors ${t.done?'opacity-50':''}`}>
         <button onClick={toggle} className={`tick mt-0.5 ${t.done?'on':''}`} aria-label="toggle">
           {t.done && <I.check className="w-3 h-3"/>}
@@ -3569,6 +3761,14 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart }) {
                onClick={()=>setEditing(true)}>
             {t.title}
           </div>
+          {/* When it is booked in. The day comes too whenever it isn't the
+              day you are already looking at — "14:00" on a row you are
+              reading on Tuesday has to say which day it means. */}
+          {slot && (
+            <div className="font-mono text-[9px] text-bone-400 mt-0.5">
+              {slot.date && slot.date !== dayKey ? `${slot.date} · ` : ''}{toHM(slot.start)}–{toHM(slot.end)}
+            </div>
+          )}
           {!compact && (
             <div className="flex items-center gap-2 mt-1 text-[10px] font-mono tracking-wider text-bone-400 flex-wrap">
               {t.due && <span className={t.due < todayKey() && !t.done ? 'text-combat' : ''}>{t.due}</span>}
@@ -3578,12 +3778,73 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart }) {
             </div>
           )}
         </div>
-        <button onClick={remove} className="sm:opacity-0 group-hover:opacity-100 text-bone-400 hover:text-combat transition-opacity shrink-0">
+        {/* Booking a to-do into the day, from wherever you are reading it. */}
+        <button onClick={()=>setScheduling(v => !v)}
+          aria-label={slot ? `Reschedule ${t.title}` : `Add ${t.title} to the calendar`}
+          title={slot ? 'Change the time' : 'Put it on the calendar'}
+          className={`btn shrink-0 w-6 h-6 rounded flex items-center justify-center mt-0.5 ${slot ? '' : 'opacity-45 hover:opacity-100'}`}
+          style={{ color: slot ? (list?.color || '#c9c6b8') : '#9a9788' }}>
+          <I.clock className="w-3.5 h-3.5"/>
+        </button>
+        <button onClick={remove} aria-label={`Delete ${t.title}`}
+          className="sm:opacity-0 group-hover:opacity-100 text-bone-400 hover:text-combat transition-opacity shrink-0">
           <I.x className="w-4 h-4"/>
         </button>
       </div>
+      {scheduling && (
+        <TaskSlotPicker task={t} slot={slot} defaultDate={dayKey}
+          onClose={()=>setScheduling(false)}
+          onSave={(next)=>{ setState(s => saveTaskWithSlot(s, t, next)); setScheduling(false); }}/>
+      )}
       {editing && <TaskEditModal t={t} state={state} setState={setState} onClose={()=>setEditing(false)}/>}
     </>
+  );
+}
+
+const TASK_SLOT_MINS = [15, 30, 45, 60, 90, 120];
+
+/* Inline day-time-and-length picker, for booking a to-do into the day
+   without leaving the list you are looking at. The task editor does the
+   same thing alongside everything else about the task. Mirrors
+   HabitSlotPicker, with a date — a task happens once. */
+function TaskSlotPicker({ task, slot, defaultDate, onClose, onSave }) {
+  const [on,  setOn]  = useState(slot?.date || task.due || defaultDate || todayKey());
+  const [at,  setAt]  = useState(slot ? toHM(slot.start) : '09:00');
+  const [len, setLen] = useState(slot ? Math.max(5, slot.end - slot.start) : 30);
+
+  return (
+    <div data-testid="task-slot-picker" className="mt-1 mb-1.5 mx-1.5 p-2 rounded-lg border border-ink-700 bg-ink-800/50 fadeUp">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <input type="date" value={on} aria-label={`Day for ${task.title}`}
+          onChange={e=>setOn(e.target.value)}
+          className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-bone-100 font-mono min-w-0"/>
+        <input type="time" value={at} aria-label={`Time for ${task.title}`}
+          onChange={e=>setAt(e.target.value)}
+          className="bg-ink-800 border border-ink-700 rounded px-2 py-1 text-xs text-bone-100 font-mono min-w-0"/>
+        <select value={len} aria-label={`Length for ${task.title}`} onChange={e=>setLen(Number(e.target.value))}
+          className="bg-ink-800 border border-ink-700 rounded px-1.5 py-1 text-xs text-bone-100">
+          {TASK_SLOT_MINS.map(m => <option key={m} value={m}>{m}m</option>)}
+          {!TASK_SLOT_MINS.includes(len) && <option value={len}>{len}m</option>}
+        </select>
+        <button disabled={!on}
+          onClick={()=>onSave({ date: on, start: fromHM(at), end: (fromHM(at) + len) % 1440 })}
+          className={`btn px-2 py-1 rounded text-[10px] font-mono tracking-wider bg-strategy text-ink-950 font-semibold ${on ? '' : 'opacity-40'}`}>
+          {slot ? 'MOVE' : 'ADD'}
+        </button>
+        {slot && (
+          <button onClick={()=>onSave(null)}
+            className="btn px-2 py-1 rounded text-[10px] font-mono tracking-wider border border-ink-700 text-bone-400 hover:text-combat">
+            OFF
+          </button>
+        )}
+        <button onClick={onClose} aria-label="Close" className="btn text-bone-400 hover:text-bone-100 ml-auto shrink-0">
+          <I.x className="w-3 h-3"/>
+        </button>
+      </div>
+      <div className="text-[9px] text-bone-400/70 mt-1.5 leading-snug">
+        Sits on that day's timeline. Alerts 15 and 5 minutes before.
+      </div>
+    </div>
   );
 }
 
@@ -3598,14 +3859,35 @@ function TaskEditModal({ t, state, setState, onClose }) {
   const [listId, setListId] = useState(t.listId || 'l-inbox');
   const [reminder, setReminder] = useState(t.reminder || '');
 
+  /* The task's slot on the calendar, if it has one. Held as a day, a time
+     and a length rather than start/end minutes because that is how you
+     think about it: "Thursday, 14:00, an hour". */
+  const existingSlot = slotForTask(state, t.id);
+  const [slotOn,  setSlotOn]  = useState(existingSlot?.date || t.due || todayKey());
+  const [slotAt,  setSlotAt]  = useState(existingSlot ? toHM(existingSlot.start) : '');
+  const [slotFor, setSlotFor] = useState(existingSlot ? Math.max(5, existingSlot.end - existingSlot.start) : 30);
+
   const save = () => {
-    setState(s => ({ ...s, tasks: s.tasks.map(x => x.id === t.id ? { ...x, title: title.trim(), notes, due: due||null, quadrant, listId, reminder: reminder||null, modifiedAt: Date.now() } : x) }));
+    setState(s => {
+      /* Read the task back out of state rather than trusting the copy
+         this modal opened with — a sync may have landed since. */
+      const cur = s.tasks.find(x => x.id === t.id) || t;
+      const next = { ...cur, title: title.trim(), notes, due: due||null, quadrant, listId, reminder: reminder||null, modifiedAt: Date.now() };
+      const start = slotAt ? fromHM(slotAt) : null;
+      /* REMOVE — clearing the time — is the way off the calendar. An
+         emptied date field falls back rather than silently unbooking it. */
+      const day = slotOn || cur.due || todayKey();
+      /* The slot travels with the save so the task and its block can never
+         be written apart. null means "not on the calendar". */
+      return saveTaskWithSlot(s, next,
+        start === null ? null : { date: day, start, end: (start + slotFor) % 1440 });
+    });
     onClose();
   };
   return (
     <Modal onClose={onClose} title="Edit task">
       <Field label="Title">
-        <input autoFocus value={title} onChange={e=>setTitle(e.target.value)}
+        <input autoFocus value={title} onChange={e=>setTitle(e.target.value)} aria-label="Task title"
           className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100"/>
       </Field>
       <Field label="Notes">
@@ -3630,6 +3912,34 @@ function TaskEditModal({ t, state, setState, onClose }) {
           </select>
         </Field>
       </div>
+      {/* A task with a slot in the day is a block on the timeline, and
+          picks up the block alerts — 15 and 5 minutes before, 5 before
+          the end — without a reminder of its own. */}
+      <Field label="On the calendar (optional)">
+        <div className="flex items-center gap-2 flex-wrap">
+          <input type="date" value={slotOn} aria-label="Calendar day"
+            onChange={e=>setSlotOn(e.target.value)}
+            className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono text-sm min-w-0"/>
+          <input type="time" value={slotAt} aria-label="Calendar time"
+            onChange={e=>setSlotAt(e.target.value)}
+            className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono text-sm min-w-0"/>
+          {slotAt && (
+            <select value={slotFor} aria-label="Length" onChange={e=>setSlotFor(Number(e.target.value))}
+              className="bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 text-sm">
+              {TASK_SLOT_MINS.map(m => <option key={m} value={m}>{m} min</option>)}
+              {!TASK_SLOT_MINS.includes(slotFor) && <option value={slotFor}>{slotFor} min</option>}
+            </select>
+          )}
+          {slotAt
+            ? <button onClick={()=>setSlotAt('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat shrink-0">REMOVE</button>
+            : <span className="text-[10px] font-mono text-bone-400">Not on the calendar</span>}
+        </div>
+        <div className="text-[10px] text-bone-400/80 mt-1.5">
+          {slotAt
+            ? 'Sits on that day alongside blocks, habits and prayer times, and alerts 15 and 5 minutes before.'
+            : 'When are you actually going to do it? Give it a time and it shows up on your day.'}
+        </div>
+      </Field>
       <Field label="Remind me (optional)">
         <div className="flex items-center gap-2">
           <input type="datetime-local" value={reminder} onChange={e=>setReminder(e.target.value)}

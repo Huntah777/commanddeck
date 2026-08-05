@@ -302,3 +302,80 @@ test.describe('habits on the calendar', () => {
     expect(find(schedule, 'b-b-h1-15')).toBeUndefined();
   });
 });
+
+test.describe('tasks on the calendar', () => {
+  /* A task booked into the day is the same arrangement as a habit's slot
+     with one difference that decides everything: a task happens once, so
+     its block names a date rather than inheriting weekdays. */
+
+  const task = (over = {}) => ({ id: 't1', title: 'Finish the report', listId: 'l-work', done: false, ...over });
+  const booked = (over = {}) => ({
+    tasks: [task()],
+    blocks: [{ id: 'b-t1', taskId: 't1', date: '2026-07-15', start: 14 * 60, end: 15 * 60 }],
+    ...over,
+  });
+
+  test('a booked task gets the block alerts, named after the task', async () => {
+    const { schedule } = await build(booked());
+    // 14:00 BST is 13:00 UTC.
+    expect(find(schedule, 'b-b-t1-15').fireAt).toBe(Date.UTC(2026, 6, 15, 12, 45, 0));
+    expect(find(schedule, 'b-b-t1-5').fireAt).toBe(Date.UTC(2026, 6, 15, 12, 55, 0));
+    expect(find(schedule, 'b-b-t1-end').fireAt).toBe(Date.UTC(2026, 6, 15, 13, 55, 0));
+    expect(find(schedule, 'b-b-t1-15').body).toBe('Finish the report');
+  });
+
+  test('renaming the task renames what the alert says', async () => {
+    const state = booked();
+    state.tasks[0].title = 'Ship the report';
+    const { schedule } = await build(state);
+    expect(find(schedule, 'b-b-t1-15').body).toBe('Ship the report');
+  });
+
+  test('a block for another day is not today\'s business', async () => {
+    const { schedule } = await build(booked({
+      blocks: [{ id: 'b-t1', taskId: 't1', date: '2026-07-16', start: 14 * 60, end: 15 * 60 }],
+    }));
+    expect(schedule.filter(n => n.id.startsWith('b-b-t1'))).toEqual([]);
+  });
+
+  test('a stale weekday list cannot make a one-off recur', async () => {
+    /* A block merged in from an older build could carry `every`. The date
+       has to win, or the alerts arrive again next Wednesday. */
+    const { schedule } = await build(booked({
+      blocks: [{ id: 'b-t1', taskId: 't1', date: '2026-07-16', every: [0,1,2,3,4,5,6], start: 14 * 60, end: 15 * 60 }],
+    }));
+    expect(schedule.filter(n => n.id.startsWith('b-b-t1'))).toEqual([]);
+  });
+
+  test('a slot whose task was deleted is not a notification', async () => {
+    const { schedule } = await build(booked({ tasks: [] }));
+    expect(schedule.filter(n => n.id.startsWith('b-b-t1'))).toEqual([]);
+  });
+
+  test('ticking the task off silences its block', async () => {
+    const { schedule } = await build(booked({ tasks: [task({ done: true })] }));
+    expect(schedule.filter(n => n.id.startsWith('b-b-t1'))).toEqual([]);
+  });
+
+  test('a reminder on the day it is booked stands aside for the block alerts', async () => {
+    const { schedule } = await build(booked({
+      tasks: [task({ reminder: '2026-07-15T09:00' })],
+    }));
+    expect(find(schedule, 't-t1')).toBeUndefined();
+    expect(find(schedule, 'b-b-t1-15')).toBeDefined();
+  });
+
+  test('a reminder on another day is a different intention and stands', async () => {
+    const { schedule } = await build(booked({
+      tasks: [task({ reminder: '2026-07-14T09:00' })],
+    }));
+    expect(find(schedule, 't-t1')).toBeDefined();
+  });
+
+  test('a task with no slot still gets its reminder', async () => {
+    const { schedule } = await build({
+      tasks: [task({ reminder: '2026-07-15T09:00' })], blocks: [],
+    });
+    expect(find(schedule, 't-t1')).toBeDefined();
+  });
+});

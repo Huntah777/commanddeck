@@ -53,17 +53,37 @@ const RELAXED_LATE_MS = 2 * 60 * 60_000;
    habit can't leave a stale twin in the plan; a block whose habit is gone
    resolves to nothing.
 
+   A task given a slot works the same way, with one difference: a task happens
+   once, so its block names a `date` instead of inheriting weekdays, and its
+   title and done-ness are read back off the task.
+
    MIRRORED from index.html, which builds the same plan client-side and must
    reach identical conclusions. Change both. */
 export const resolveBlocks = (state) => {
   const habits = state?.habits || [];
+  const tasks  = state?.tasks  || [];
   return (state?.blocks || []).flatMap(b => {
-    if (!b?.habitId) return b ? [b] : [];
-    const h = habits.find(x => x.id === b.habitId);
-    if (!h) return [];
-    return [{ ...b, title: h.name, pillar: h.pillar, every: Array.isArray(h.days) ? h.days : [] }];
+    if (b?.habitId) {
+      const h = habits.find(x => x.id === b.habitId);
+      if (!h) return [];
+      return [{ ...b, title: h.name, pillar: h.pillar, every: Array.isArray(h.days) ? h.days : [] }];
+    }
+    if (b?.taskId) {
+      const t = tasks.find(x => x.id === b.taskId);
+      if (!t) return [];
+      /* `every: []` clears any weekday list a stale block arrived with — a
+         task must never start recurring. The due date is the fallback for a
+         block that somehow lost its own. */
+      return [{ ...b, title: t.title, listId: t.listId, done: !!t.done, date: b.date || t.due || null, every: [] }];
+    }
+    return b ? [b] : [];
   });
 };
+
+/* Does this block belong to this day? Habits and ordinary blocks recur by
+   weekday; a task's slot is a one-off and names its date outright. */
+export const blockOnDay = (b, dayKey, dow) =>
+  b?.date ? b.date === dayKey : (b?.every || []).includes(dow);
 
 /* Ids are stable and prefixed by kind — see buildTodaysSchedule. */
 const isUrgent  = (id) => id.startsWith('salah-') || id.startsWith('b-');
@@ -337,13 +357,15 @@ export async function buildTodaysSchedule(state, tz, parts) {
 
      A block carrying a habitId is a habit that has been given a slot in the
      day; its title, pillar and days come off the habit rather than being
-     copied onto the block (see resolveBlocks). Once that habit is ticked the
+     copied onto the block (see resolveBlocks). One carrying a taskId is a
+     task booked into a particular day. Once that habit or task is ticked the
      alerts are skipped — they exist to get it done, and buzzing about
      something already done is how people learn to ignore the buzzing. */
   const doneToday = state.logs?.[todayKey] || {};
   for (const b of resolveBlocks(state)) {
-    if (!b.every?.includes(dow)) continue;
+    if (!blockOnDay(b, todayKey, dow)) continue;
     if (b.habitId && doneToday[b.habitId]) continue;
+    if (b.taskId && b.done) continue;
     const s = zonedHmToUtcMs(y, mo, d, Math.floor(b.start / 60), b.start % 60, tz);
     let   e = zonedHmToUtcMs(y, mo, d, Math.floor(b.end   / 60), b.end   % 60, tz);
     if (b.end <= b.start) e += 24 * 60 * 60 * 1000;
@@ -364,9 +386,15 @@ export async function buildTodaysSchedule(state, tz, parts) {
     push(`h-${h.id}`, 'Habit reminder', h.name, zonedHmToUtcMs(y, mo, d, hh, mm, tz));
   }
 
-  /* Task reminders — already an absolute timestamp */
+  /* Task reminders — already an absolute timestamp. Suppressed only when the
+     task's calendar slot falls on the same day the reminder would fire: that
+     day already carries the three block alerts. A reminder set for another
+     day is a different intention and stands. */
+  const taskSlotDate = new Map(
+    resolveBlocks(state).filter(b => b.taskId && b.date).map(b => [b.taskId, b.date]));
   for (const t of state.tasks || []) {
     if (!t.reminder || t.done) continue;
+    if (taskSlotDate.get(t.id) === String(t.reminder).slice(0, 10)) continue;
     push(`t-${t.id}`, 'Task reminder', t.title, new Date(t.reminder).getTime());
   }
 
