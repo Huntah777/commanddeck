@@ -3801,7 +3801,7 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart, dayKey }
   );
 }
 
-const TASK_SLOT_MINS = [15, 30, 45, 60, 90, 120];
+const TASK_SLOT_MINS = [5, 10, 15, 30, 45, 60, 90, 120];
 
 /* Inline day-time-and-length picker, for booking a to-do into the day
    without leaving the list you are looking at. The task editor does the
@@ -4189,7 +4189,7 @@ function HabitCard({ h, state, setState, onEdit }) {
   );
 }
 
-const HABIT_SLOT_MINS = [15, 20, 30, 45, 60, 90];
+const HABIT_SLOT_MINS = [5, 10, 15, 20, 30, 45, 60, 90];
 
 function HabitModal({ habit, state, onClose, onSave, onDelete }) {
   const isNew = !habit;
