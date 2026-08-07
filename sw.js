@@ -1,6 +1,8 @@
-/* Bump on every deploy: the shell is served cache-first, so a stale cache name
-   keeps serving the previous index.html indefinitely. */
-const CACHE = 'commanddeck-v8';
+/* Bump on every deploy: the static assets below (vendor libs, icons) are
+   served cache-first, so a stale cache name keeps serving the previous
+   versions indefinitely. The shell itself (index.html) is network-first —
+   see the fetch handler — so it doesn't depend on this bump to stay fresh. */
+const CACHE = 'commanddeck-v9';
 
 /* Written by the page, read by this worker. The SW cannot see localStorage,
    but it needs the sync token to re-register a rotated push subscription while
@@ -82,7 +84,32 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Everything else (app shell, vendor, Tailwind CDN) — cache-first
+  /* The shell itself (the page navigation, and index.html directly) —
+     network-first. This has to reach the network on every load, not just
+     the first one: an auth gateway sitting in front of the origin (this
+     deployment sits behind Keycloak) can only challenge a request that
+     actually leaves the device. Cache-first would keep answering every
+     future launch out of Cache Storage forever, so an expired session
+     cookie never gets the chance to redirect to the login page — it just
+     silently re-serves the last authenticated shell, whose API calls then
+     fail against the network. Falling back to the cache only when the
+     network request itself fails keeps offline launch working; being
+     logged out is not being offline. */
+  if (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
+    event.respondWith(
+      fetch(request)
+        .then((resp) => {
+          caches.open(CACHE).then((c) => c.put(request, resp.clone()));
+          return resp;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+
+  // Everything else (vendor, icons, Tailwind CDN) — cache-first. Static per
+  // deploy and carries no auth of its own, so there's no staleness risk in
+  // skipping the network — see CACHE's version bump on release, above.
   event.respondWith(
     caches.match(request).then(
       (cached) =>
