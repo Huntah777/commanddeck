@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { buildTodaysSchedule, nextFireAt, staleAfter, salahOffsets, salahMinutes } from '../push-worker/index.js';
+import { buildTodaysSchedule, nextFireAt, staleAfter, salahOffsets, salahMinutes, pushHeaders } from '../push-worker/index.js';
 
 /* The Cron Worker's plan builder decides what gets delivered and when, for
    every device, whether or not the app is running. It had no tests. No browser
@@ -377,5 +377,52 @@ test.describe('tasks on the calendar', () => {
       tasks: [task({ reminder: '2026-07-15T09:00' })], blocks: [],
     });
     expect(find(schedule, 't-t1')).toBeDefined();
+  });
+});
+
+/* ============================================================
+   Delivery priority
+   ------------------------------------------------------------
+   A plan that is correct and a notification that arrives on time are
+   two different achievements. These pin the second one — specifically
+   the header that was making Android, and only Android, behave as
+   though background notifications were not implemented at all.
+   ============================================================ */
+
+test.describe('when a push is allowed to arrive', () => {
+  const URGENT  = staleAfter('salah-Fajr');   // a prayer time
+  const RELAXED = staleAfter('h-h1');         // a habit reminder
+
+  test('every notification is high urgency, whatever kind it is', async () => {
+    /* Chrome delivers Web Push through FCM, and FCM holds a
+       normal-priority message for as long as the device is in Doze —
+       then releases the lot when the phone is unlocked. That is exactly
+       the reported symptom: silence while the app is closed, everything
+       at once when it is opened. Every notification here is anchored to
+       a wall-clock moment, so none of them may be deferred. */
+    expect(pushHeaders('jwt', URGENT).Urgency).toBe('high');
+    expect(pushHeaders('jwt', RELAXED).Urgency).toBe('high');
+  });
+
+  test('urgency is not tied to how long the message may be held', async () => {
+    // The regression this guards: they used to be the same decision.
+    expect(RELAXED).toBeGreaterThan(URGENT);
+    expect(pushHeaders('jwt', RELAXED).Urgency).toBe(pushHeaders('jwt', URGENT).Urgency);
+  });
+
+  test('TTL still says how long the push service should hold it', async () => {
+    /* Being high priority is about waking a phone that is asleep. TTL is
+       about a phone that is off, and the two answers still differ: a
+       prayer time is worthless an hour late, a habit reminder is not. */
+    expect(pushHeaders('jwt', URGENT).TTL).toBe(String(URGENT / 1000));
+    expect(pushHeaders('jwt', RELAXED).TTL).toBe(String(RELAXED / 1000));
+    expect(Number(pushHeaders('jwt', RELAXED).TTL)).toBeGreaterThan(Number(pushHeaders('jwt', URGENT).TTL));
+  });
+
+  test('the VAPID JWT is carried on every send', async () => {
+    const h = pushHeaders('a-signed-jwt', URGENT);
+    expect(h.Authorization).toContain('vapid t=a-signed-jwt');
+    expect(h.Authorization).toContain('k=');
+    expect(h['Content-Encoding']).toBe('aes128gcm');
   });
 });

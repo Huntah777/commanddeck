@@ -1649,10 +1649,37 @@ async function reconnectPush(state) {
   }
 }
 
-/* In PWA standalone mode new Notification() is blocked — always go through the SW */
-function showNotificationViaSW(title, body, tag) {
-  if (!navigator.serviceWorker?.controller) return;
-  navigator.serviceWorker.controller.postMessage({ type: 'SHOW_NOTIFICATION', title, body: body || '', tag: tag || 'commanddeck' });
+/* In PWA standalone mode new Notification() is blocked — always go through
+   the service worker.
+
+   Two routes to it, because `controller` is not always there. It is null on
+   the very first load after registration, and again whenever the browser has
+   evicted and restarted the worker — which Android does routinely. Posting
+   to a null controller silently dropped the notification, so the Pomodoro
+   chime and, far more damagingly, the "send a test notification" button did
+   nothing at all on exactly the platform whose notifications were already
+   under suspicion. A registration can show a notification without
+   controlling the page, so fall back to it rather than giving up.
+
+   Returns whether anything was actually shown — the test button reports it. */
+async function showNotificationViaSW(title, body, tag) {
+  const t = tag || 'commanddeck';
+  const ctrl = navigator.serviceWorker?.controller;
+  if (ctrl) {
+    ctrl.postMessage({ type: 'SHOW_NOTIFICATION', title, body: body || '', tag: t });
+    return true;
+  }
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    if (!reg?.showNotification) return false;
+    /* Same options as the worker's own swNotify — one look, whichever
+       route the notification took. */
+    await reg.showNotification(title, {
+      body: body || '', icon: '/icons/icon-192.png', badge: '/icons/icon-192.png',
+      tag: t, renotify: true, vibrate: [200, 100, 200],
+    });
+    return true;
+  } catch { return false; }
 }
 
 /* Timezone helpers — a mirror of the Cron Worker's, so a notification computed
@@ -5234,12 +5261,18 @@ function NotificationsCard({ state, setState }) {
     setBusy(false);
   };
 
-  const testLocal = () => {
+  const testLocal = async () => {
     /* Proves this device can DISPLAY a notification — the service worker
        is alive and permission is real. It deliberately does not claim to
-       prove delivery: nothing left the device. */
-    showNotificationViaSW('Command Deck', 'Notifications are working on this device.', 'test');
-    setMsg('Sent a notification to this device. If nothing appeared, the block is in your OS or browser settings, not here.');
+       prove delivery: nothing left the device.
+
+       The result is reported rather than assumed. Claiming "sent" when the
+       call had in fact found no worker to send through is what sent people
+       looking for an OS-level block that was never there. */
+    const shown = await showNotificationViaSW('Command Deck', 'Notifications are working on this device.', 'test');
+    setMsg(shown
+      ? 'Sent a notification to this device. If nothing appeared, the block is in your OS or browser settings, not here.'
+      : 'This device has no service worker to show a notification through. Reload the app and try again.');
   };
 
   const statusLine = !supported
@@ -5276,6 +5309,21 @@ function NotificationsCard({ state, setState }) {
         : staleBy >= PUSH_STALE_AFTER_MS ? `last confirmed ${agoLabel(srv.updatedAt)} — probably dead`
         : `holds ${srv.scheduled} alert${srv.scheduled === 1 ? '' : 's'} for today, last confirmed ${agoLabel(srv.updatedAt)}`,
     });
+    /* What the server believes it has already pushed today. The one fact
+       that separates "nothing was ever sent to this device" from "it was
+       sent and the phone never showed it" — which are the same silence from
+       the user's side, and completely different faults. Android in
+       particular can accept a push and sit on it (Doze, or an OEM battery
+       manager), and without this line that is indistinguishable from a
+       registration that never worked. */
+    if (srv?.registered) {
+      rows.push({
+        ok: true, label: 'Delivered',
+        detail: srv.delivered > 0
+          ? `${srv.delivered} of today's ${srv.scheduled} sent to this device so far`
+          : "none sent yet today — nothing has come due since the plan was built",
+      });
+    }
     if (srv?.registered && srv.nextFireAt > 0) {
       rows.push({ ok: true, label: 'Next alert', detail: new Date(srv.nextFireAt).toLocaleString() });
     }

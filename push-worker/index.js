@@ -207,27 +207,51 @@ async function encryptWebPush(plaintext, subscription) {
 
 /* ── Send one Web Push ────────────────────────────────────────── */
 
+/* The two headers that decide WHEN a push arrives, split out from the send
+   so the policy can be tested without a live push service or a keypair.
+
+   TTL — how long the push service should hold this message for a device it
+   cannot currently reach. Matches how late we would still be willing to
+   deliver this kind of notification: too short and a phone in a tunnel loses
+   it outright, while a blanket 24h is what makes a phone that was off
+   overnight buzz with the whole of yesterday on wake.
+
+   Urgency — whether to wake a device that IS reachable but asleep. Always
+   `high`, because every notification this Worker sends is anchored to a
+   wall-clock moment: a prayer time, the start of a block, a reminder set for
+   07:00. None of them are still the same notification an hour later.
+
+   Urgency used to follow the TTL split, on the reasoning that the
+   non-critical ones could be batched with whatever else the OS was already
+   delivering. That is sound everywhere except the one platform that takes it
+   completely literally. Chrome delivers Web Push through FCM, and FCM holds
+   a normal-priority message for the whole time the device is in Doze,
+   releasing it at the next maintenance window — for a phone face-down on a
+   desk, hours. Unlocking the phone ends Doze and flushes the queue at once,
+   which is why the symptom reads as "notifications only arrive while the app
+   is open": they were being held, then delivered in a clump the moment the
+   user picked the phone up. Desktop Chrome and iOS Safari have no Doze, so
+   the identical schedule behaved correctly on every other install.
+
+   The two are genuinely different questions, and only the second one was
+   wrong. */
+export function pushHeaders(jwt, ttlMs) {
+  return {
+    'Authorization':    `vapid t=${jwt},k=${VAPID_PUBLIC_KEY}`,
+    'Content-Type':     'application/octet-stream',
+    'Content-Encoding': 'aes128gcm',
+    'TTL':              String(Math.round(ttlMs / 1000)),
+    'Urgency':          'high',
+  };
+}
+
 async function sendPush(subscription, payload, privateKeyB64u, subject, ttlMs = URGENT_LATE_MS) {
   const jwt  = await makeVapidJWT(subscription.endpoint, privateKeyB64u, subject);
   const body = await encryptWebPush(JSON.stringify(payload), subscription);
 
   const r = await fetch(subscription.endpoint, {
     method:  'POST',
-    headers: {
-      'Authorization':    `vapid t=${jwt},k=${VAPID_PUBLIC_KEY}`,
-      'Content-Type':     'application/octet-stream',
-      'Content-Encoding': 'aes128gcm',
-      /* TTL matches how late we'd still be willing to deliver this kind of
-         notification. It is what covers a phone that is off or out of signal
-         at fire time: the push service holds the message and delivers it on
-         reconnect, up to this long. Too short and it is dropped; a blanket
-         24h is what makes a phone that was off overnight buzz with the whole
-         of yesterday on wake. */
-      'TTL':              String(Math.round(ttlMs / 1000)),
-      /* high = wake the device now. Reserved for the time-critical ones, so
-         the rest can be batched with whatever else the OS is delivering. */
-      'Urgency':          ttlMs <= URGENT_LATE_MS ? 'high' : 'normal',
-    },
+    headers: pushHeaders(jwt, ttlMs),
     body,
   });
   return r.status;
