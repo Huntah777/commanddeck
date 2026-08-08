@@ -15,19 +15,44 @@
    ── The split that matters ────────────────────────────────────
    The model does LANGUAGE. This file does POLICY.
 
-   The model is only ever asked to extract what was written: the task,
-   whose name appears, the date phrase, the list. It is never asked
-   whether your partner outranks your manager — that is a fact about
-   your life, it lives in the `people` table you control, and it is
-   applied by the arithmetic below. So the same person always yields
-   the same weight, the weights are editable without touching a
-   prompt, and swapping or losing the model changes nothing about how
-   tasks are prioritised.
+   The model is asked what the note SAYS — never what should be done
+   about it. That covers the obvious fields (the task, whose name
+   appears, the date phrase, the list) and three readings of the
+   sentence that no regex can get at:
+
+     consequence  what the note says is at stake, 1–5
+     minutes      how much work it sounds like
+     timeCritical whether the wording itself means it cannot wait
+
+   Those are still descriptions of the text. "The boiler is leaking
+   through the kitchen ceiling" names nobody and contains no urgency
+   keyword, and reading it as high-stakes is a language job. Deciding
+   that high stakes outrank your manager's weight of 2, and that a
+   40-minute job doesn't fit the 15 minutes left before Maghrib, is
+   policy — and stays down here in arithmetic you can read.
+
+   So: the model never sees a quadrant, never sees a person's weight,
+   and cannot file anything anywhere. It hands over adjectives; the
+   code below does the deciding.
+
+   ── Reading the calendar ──────────────────────────────────────
+   `days` arrives from the client: for today and the fortnight after
+   it, how many minutes are actually free once blocks, prayer and
+   scheduled habits are subtracted, plus what is already due. The
+   client computes it because the client already resolves all of that
+   to draw the timeline — re-deriving it in a Worker would be a third
+   implementation of the same rules to keep in step (there is already
+   a second, in push-worker/index.js).
+
+   Given that, "can this be done now?" becomes arithmetic: does the
+   work fit in what is left of today, and if not, which is the first
+   day it does fit? A date you stated yourself is never moved.
 
    Everything here degrades: no AI binding, a model error, or a
    timeout all fall through to `fallbackExtract` (regex only), which
    still resolves dates, people and — via keyword matching against your
-   configured lists — which list a task belongs in. Capture never fails.
+   configured lists — which list a task belongs in. A client too old to
+   send `days` simply gets no scheduling. Capture never fails.
    ============================================================ */
 
 import { learningExamples } from './learn.js';
@@ -43,6 +68,25 @@ const AI_TIMEOUT_MS  = 6_000;
 const DEFAULT_WEIGHT     = 3;
 const IMPORTANT_AT       = 3;
 const URGENT_WITHIN_DAYS = 3; // a deadline inside the next few days is pressure
+
+/* ── Fitting work into a day ──────────────────────────────────────
+   A note that says nothing about its own size is assumed to be a
+   half-hour job — long enough that a genuinely full day says no,
+   short enough that an ordinary one says yes. Clamped at both ends
+   because a model that answers 0 or 5000 must not be able to make
+   every task fit, or none of them. */
+const DEFAULT_TASK_MINS = 30;
+const MIN_TASK_MINS     = 5;
+const MAX_TASK_MINS     = 480;
+
+/* Time a day owes to things that aren't on the calendar. A habit
+   scheduled for today with no slot on the timeline still gets done,
+   and a task already due today still wants doing — neither shows up
+   in the free-minutes figure, so both are charged for here. Reserves
+   rather than measurements: the honest claim is "this day is more
+   committed than the timeline admits", not a precise number. */
+const HABIT_RESERVE_MINS = 15;
+const DUE_TASK_RESERVE_MINS = 20;
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -179,6 +223,73 @@ const clampWeight = (w) => {
   return Number.isFinite(n) ? Math.max(1, Math.min(5, Math.round(n))) : DEFAULT_WEIGHT;
 };
 
+const clampMins = (m) => {
+  const n = Number(m);
+  return Number.isFinite(n) && n > 0
+    ? Math.max(MIN_TASK_MINS, Math.min(MAX_TASK_MINS, Math.round(n)))
+    : DEFAULT_TASK_MINS;
+};
+
+/* ── What a day actually has left ─────────────────────────────────
+   `free` is what the client measured off the timeline; the reserves
+   are what the timeline doesn't know about. Never negative — a day
+   that is already over-committed has no room, not negative room. ── */
+export function roomOn(day) {
+  const free   = Number(day?.free)   || 0;
+  const habits = Number(day?.habits) || 0;
+  const due    = Number(day?.due)    || 0;
+  return Math.max(0, free - habits * HABIT_RESERVE_MINS - due * DUE_TASK_RESERVE_MINS);
+}
+
+/* The first day in the window with room for a job this size. */
+export function firstDayWithRoom(days, minutes) {
+  for (const day of days || []) {
+    if (isDateKey(day?.d) && roomOn(day) >= minutes) return day;
+  }
+  return null;
+}
+
+/* "45m", "2h", "1h30" — for the receipt, which is one line and read
+   at a glance. */
+export function fmtMins(n) {
+  const m = Math.max(0, Math.round(Number(n) || 0));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60), rest = m % 60;
+  return rest ? `${h}h${String(rest).padStart(2, '0')}` : `${h}h`;
+}
+
+/* ── Now, or later? ───────────────────────────────────────────────
+   The question the capture box could never answer before. Six
+   outcomes, and each one is a different thing to tell the user:
+
+     stated     you named a day — it stands, whatever the day holds
+     someday    nothing here should be given a date at all (see
+                `noDate`) — putting one on would be words in your mouth
+     today      there is room for it in what's left of today
+     squeezed   there isn't, but it can't wait, so today anyway
+     scheduled  there isn't, and it can, so the first day there is
+     full       nothing in the window has room; left undated rather
+                than dropped on an arbitrary day
+
+   Only reached when the client sent `days`. Without it there is no
+   calendar to read and the date stands as extracted — which is
+   exactly how this endpoint behaved before. ── */
+export function place({ due, minutes, urgent, noDate, days }) {
+  if (!Array.isArray(days) || !days.length || !isDateKey(days[0]?.d)) return { due, fit: null };
+
+  const today = days[0];
+  const room  = roomOn(today);
+  const base  = { minutes, roomToday: room };
+
+  if (due)    return { due,       fit: { when: 'stated',  ...base } };
+  if (noDate) return { due: null, fit: { when: 'someday', ...base } };
+  if (urgent) return { due: today.d, fit: { when: room >= minutes ? 'today' : 'squeezed', ...base } };
+
+  const slot = firstDayWithRoom(days, minutes);
+  if (!slot) return { due: null, fit: { when: 'full', ...base } };
+  return { due: slot.d, fit: { when: slot.d === today.d ? 'today' : 'scheduled', ...base, roomThen: roomOn(slot) } };
+}
+
 /* ── The classifier ───────────────────────────────────────────────
    Two independent axes, crossed. Importance comes from who it
    concerns; urgency comes from when it is due. Because they are
@@ -203,6 +314,13 @@ export function classify(extract, ctx = {}) {
   const weight = hit ? clampWeight(hit.person.weight) : DEFAULT_WEIGHT;
   const mark   = markers(raw);
 
+  /* What the sentence itself says is at stake, and how long it sounds.
+     Absent on the rules-only path, where they fall to neutral defaults
+     and this whole paragraph is a no-op. */
+  const consequence  = clampWeight(extract?.consequence);
+  const minutes      = clampMins(extract?.minutes);
+  const timeCritical = !!extract?.timeCritical;
+
   /* Keyword hits are policy you configured (Configuration → Task lists),
      same standing as a person's weight — they beat the model's own
      semantic guess. Only when nothing configured matches does the
@@ -210,17 +328,40 @@ export function classify(extract, ctx = {}) {
   const listHit = matchList(raw, ctx.lists);
   const listId  = listHit?.list.id ?? extract?.listId ?? null;
 
+  /* What the sentence stakes can PROMOTE a task; it can never demote
+     one. Two reasons, both deliberate:
+
+     Promotion is the gap this fills. "The boiler is leaking through
+     the kitchen ceiling" names nobody, so it takes the neutral weight
+     3 and used to sit in Schedule with everything else. Read as a 5
+     it lifts two places, and a weight-2 manager saying "the server is
+     down" lifts by the same two — because a person's weight describes
+     their ordinary asks, not a ceiling on what can happen to them.
+
+     Demotion is withheld because Eliminate is a verdict, and one the
+     model should not be able to reach. A note it reads as idle still
+     gets its owner's weight; only YOUR words ("no rush", "sometime")
+     take a task below the line. Nothing you configured can be
+     overruled downwards by a sentence a model misread. */
+  const bump = Math.max(0, consequence - DEFAULT_WEIGHT);
   const importance = Math.max(1, Math.min(5,
-    weight + (mark.important ? 1 : 0) - (mark.trivial ? 1 : 0)));
+    weight + bump + (mark.important ? 1 : 0) - (mark.trivial ? 1 : 0)));
 
   /* Code's date reading beats the model's; the model only covers
      phrasings the regexes above don't know. */
   const modelDue = isDateKey(extract?.due) && Math.abs(daysBetween(today, extract.due)) <= 730
     ? extract.due : null;
-  const due  = resolveDue(raw, today) ?? modelDue;
-  const days = due ? daysBetween(today, due) : null;
+  /* The date the CAPTURE named, as against the one the scheduler may
+     propose below. Everything that reads a date as evidence — urgency,
+     the commitment that keeps a task out of Eliminate — reads this
+     one. A day the parser picked because the calendar had a gap is
+     not a deadline, and must never be mistaken for one. */
+  const namedDue  = resolveDue(raw, today) ?? modelDue;
+  const namedDays = namedDue ? daysBetween(today, namedDue) : null;
 
-  const urgent    = mark.urgent || (days !== null && days <= URGENT_WITHIN_DAYS);
+  /* Wording that means "this cannot wait" counts the same as a near
+     deadline — that is what it is saying. */
+  const urgent    = mark.urgent || timeCritical || (namedDays !== null && namedDays <= URGENT_WITHIN_DAYS);
   const important = importance >= IMPORTANT_AT;
 
   /* Do has to be earned. A near date is a fact about the calendar, not
@@ -230,37 +371,72 @@ export function classify(extract, ctx = {}) {
      have actually said this is pressing: someone weighted above
      neutral, or your own words. With neither, the parser is guessing,
      and a guess belongs in Schedule — still visible, still dated, just
-     not jumping the queue ahead of the things you did call urgent. */
-  const stated = mark.urgent || mark.important || importance > DEFAULT_WEIGHT;
+     not jumping the queue ahead of the things you did call urgent.
+
+     Wording that stakes something counts here too. It is not a guess:
+     the note said the ceiling is coming down. What is still excluded
+     is the parser's own arithmetic — a gap in the calendar is never
+     evidence that anything is pressing. */
+  const stated = mark.urgent || mark.important || timeCritical || importance > DEFAULT_WEIGHT;
 
   /* Eliminate is a verdict too — it says "cut this without guilt".
      Nothing the user gave a deadline to should land there
      automatically, however little weight the person carries: stating a
      date is stating a commitment. A far-off low-priority ask is
-     something to pass on, not something to bin. */
+     something to pass on, not something to bin.
+
+     `namedDue`, not `due`: the day the scheduler found a gap on is not
+     a commitment anyone made, and must not quietly rescue a task from
+     Eliminate. */
   const quadrant = important
     ? (urgent && stated ? 'do' : 'plan')
-    : (urgent || due ? 'delegate' : 'eliminate');
+    : (urgent || namedDue ? 'delegate' : 'eliminate');
+
+  /* Now, or later. Last, because it needs the verdict: booking time
+     this week for something just filed under "cut this without guilt"
+     would be the parser arguing with itself. A date you named yourself
+     still comes back untouched — Eliminate is about what to do with
+     the task, not licence to forget a deadline you set. */
+  const { due, fit } = place({
+    due: namedDue, minutes, days: ctx.days,
+    urgent: mark.urgent || timeCritical,
+    noDate: mark.trivial || quadrant === 'eliminate',
+  });
 
   /* Say why, in the same terms the settings screen uses. A filing you
      can't audit is one you stop trusting. */
   const why = [];
   if (hit) why.push(`${hit.person.name} · weight ${weight}`);
   else     why.push('no one named · default weight 3');
+  /* Where the wording, rather than a person, is what carried it. Said
+     only when it actually moved the task — a note read as ordinary
+     has nothing to report. */
+  if (bump > 0) why.push(`wording reads ${consequence}/5 at stake`);
   if (listHit)               why.push(`filed under ${listHit.list.name}`);
   else if (extract?.listId)  why.push('filed by AI guess');
   if (mark.important) why.push('flagged important');
   if (mark.trivial)   why.push('flagged low priority');
   why.push(important ? 'important' : 'not important');
-  if (mark.urgent)        why.push('urgent wording');
-  else if (days === null) why.push('no deadline');
-  else if (days < 0)      why.push(`overdue by ${Math.abs(days)}d`);
-  else if (days === 0)    why.push('due today');
-  else if (days === 1)    why.push('due tomorrow');
-  else                    why.push(`due in ${days}d`);
+  if (mark.urgent)             why.push('urgent wording');
+  else if (timeCritical)       why.push('wording says it cannot wait');
+  else if (namedDays === null) why.push('no deadline');
+  else if (namedDays < 0)      why.push(`overdue by ${Math.abs(namedDays)}d`);
+  else if (namedDays === 0)    why.push('due today');
+  else if (namedDays === 1)    why.push('due tomorrow');
+  else                         why.push(`due in ${namedDays}d`);
   /* Say when the date alone was what stopped it reaching Do, so the
      demotion reads as a rule rather than as the parser losing track. */
   if (important && urgent && !stated) why.push('nothing marked it urgent · scheduled');
+
+  /* What the calendar had to say. One line, in the same voice — the
+     receipt is a single row of text. */
+  if (fit) {
+    const room = fmtMins(fit.roomToday), work = fmtMins(fit.minutes);
+    if (fit.when === 'today')     why.push(`${work} of work · ${room} free today`);
+    if (fit.when === 'squeezed')  why.push(`today only has ${room} free · doing it anyway`);
+    if (fit.when === 'scheduled') why.push(`only ${room} free today · booked for ${due}`);
+    if (fit.when === 'full')      why.push(`${work} of work · nothing free in the next fortnight`);
+  }
 
   return {
     title: extract?.title || raw,
@@ -268,6 +444,11 @@ export function classify(extract, ctx = {}) {
     personId:   hit?.person.id   ?? null,
     personName: hit?.person.name ?? null,
     listId,
+    /* How long the work looked, and how the day was read. Reported
+       rather than acted on: the receipt shows it, and it is what makes
+       a scheduling decision auditable instead of a date appearing from
+       nowhere. */
+    minutes, fit,
     why,
   };
 }
@@ -307,8 +488,11 @@ const SCHEMA = {
     person: { type: 'string', description: 'who asked for it or who it concerns; empty if nobody' },
     due:    { type: 'string', description: 'YYYY-MM-DD if the note implies a date; empty otherwise' },
     list:   { type: 'string', description: 'best matching list name; empty if unclear' },
+    consequence:  { type: 'number',  description: '1-5, what the note says is at stake if it never happens' },
+    minutes:      { type: 'number',  description: 'rough working minutes the task needs' },
+    timeCritical: { type: 'boolean', description: 'true only if the wording itself means it cannot wait a few days' },
   },
-  required: ['title', 'person', 'due', 'list'],
+  required: ['title', 'person', 'due', 'list', 'consequence', 'minutes', 'timeCritical'],
 };
 
 /* Captures this user has previously corrected, as input → what they
@@ -332,8 +516,22 @@ title  - the task, imperative, in the writer's own words, with the date phrase r
 person - the known person the note names or refers to, exactly as spelled above. "" if none.
 due    - YYYY-MM-DD only if the note states or implies a date. "" otherwise. Never invent one.
 list   - one of the list names above, or "".
+
+consequence - 1-5, read ONLY from what this note says is at stake if it never
+  happens. Judge the situation described, not who mentioned it.
+    5  something is broken, unsafe, or an outside deadline is about to pass
+    4  someone is blocked waiting, or money or a promise is at risk
+    3  ordinary work that matters — use this when the note gives you nothing
+    2  useful, but nothing turns on it
+    1  idle or optional
+minutes - roughly how long the work takes. 5 for a text message, 30 if the
+  note gives you nothing to go on, 480 for a full day.
+timeCritical - true ONLY when the wording itself means it cannot wait a few
+  days: a shop about to close, a bin collection, a flight, someone waiting on
+  it right now. A note that is merely important is not timeCritical.
 ${examplesBlock(examples)}
-Extract only. Do not judge importance, urgency or priority.` },
+Describe the note. Do not decide what to do about it: no priorities, no
+quadrants, no scheduling. Those are decided elsewhere from your answers.` },
   { role: 'user', content: text },
 ];
 
@@ -366,6 +564,12 @@ async function aiExtract(text, ctx, env) {
     person: String(got.person || '').trim(),
     due: isDateKey(got.due) ? got.due : null,
     listId: listIdFor(got.list, ctx.lists),
+    /* Clamped on the way in rather than trusted. A model that answers 9,
+       or 0 minutes, or a string, gets the neutral default — it cannot
+       shout its way past a person's weight or make everything fit. */
+    consequence:  clampWeight(got.consequence),
+    minutes:      clampMins(got.minutes),
+    timeCritical: got.timeCritical === true,
     /* What the call actually cost, in the only unit the API reports.
        Handed back so the client can keep its own ledger — the running
        total is arithmetic over calls this app made, not a number
@@ -400,6 +604,13 @@ export async function onRequest({ request, env }) {
     today:  isDateKey(body?.today) ? body.today : keyOf(Date.now()),
     people: Array.isArray(body?.people) ? body.people.slice(0, 200) : [],
     lists:  Array.isArray(body?.lists)  ? body.lists.slice(0, 50)   : [],
+    /* Free minutes per day, from today forward — see `place`. Absent
+       from an older client, which simply gets no scheduling. Trimmed to
+       date-keyed entries so a malformed one can't be read as a day with
+       infinite room. */
+    days: (Array.isArray(body?.days) ? body.days : [])
+      .filter(d => isDateKey(d?.d))
+      .slice(0, 31),
   };
   /* The client sends the tasks the parser previously filed; the rule for
      what counts as a correction lives here, in learn.js, rather than

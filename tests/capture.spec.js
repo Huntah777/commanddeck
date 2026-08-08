@@ -420,3 +420,163 @@ test.describe('natural-language capture', () => {
     await expect.poll(async () => (await tasks(page))[0]?.ai, { timeout: 5_000 }).toBeNull();
   });
 });
+
+/* ============================================================
+   What the capture box tells the parser about the day
+   ------------------------------------------------------------
+   "Can this be done now?" is answered server-side (parse.spec.js has
+   the policy), but only from figures measured here — the client is
+   the only side that has the blocks, habits and prayer times already
+   resolved. These assert the measurement, which is the half that
+   could silently drift out of step with the timeline.
+   ============================================================ */
+
+const DAILY = [0, 1, 2, 3, 4, 5, 6];
+
+/* Wednesday, 09:00. The waking window the client counts against is
+   07:00–22:00, so a capture made now has six hours of afternoon left
+   before anything is subtracted. */
+const NOON_WED = '2026-07-29T09:00:00';
+const WED_KEY  = '2026-07-29';
+const FULL_DAY = (22 - 7) * 60;          // 900, an untouched day
+const FROM_9AM = (22 - 9) * 60;          // 780, what is left at 09:00
+
+/* The `days` array the client sent with the last capture, by date. */
+const dayIn = (api, key) => (api.lastBody?.days || []).find(d => d.d === key);
+
+/* Never hands the mocked server an empty `habits` — the app reads that
+   as a first run and replaces local state with a fresh seed, taking the
+   fixture's blocks with it. Where a test needs specific habits it says
+   so; otherwise seed()'s single unslotted Fajr stands, which costs the
+   day no calendar time. */
+const withCalendar = async (page, extra) => {
+  await page.clock.install({ time: new Date(NOON_WED) });
+  await seed(page, extra);
+  await page.goto('/');
+  await boot(page);
+};
+
+test.describe('the day the parser is shown', () => {
+  test('a fortnight is sent, starting today', async ({ page }) => {
+    const api = mockParse(page, FILED);
+    await withCalendar(page, { blocks: [] });
+    await capture(page, 'sort the loft');
+
+    await expect.poll(() => api.lastBody?.days?.length, { timeout: 10_000 }).toBe(14);
+    expect(api.lastBody.days[0].d).toBe(WED_KEY);
+    expect(api.lastBody.days[13].d).toBe('2026-08-11');
+  });
+
+  test('today is measured from now, later days from the top of the window', async ({ page }) => {
+    /* Nobody schedules into the morning they have already spent, and
+       counting the hours you were asleep for would make every day look
+       half empty. */
+    const api = mockParse(page, FILED);
+    await withCalendar(page, { blocks: [] });
+    await capture(page, 'sort the loft');
+
+    await expect.poll(() => dayIn(api, WED_KEY)?.free, { timeout: 10_000 }).toBe(FROM_9AM);
+    expect(dayIn(api, '2026-07-30').free).toBe(FULL_DAY);
+  });
+
+  test('blocks on the calendar come off the free time, on the days they recur', async ({ page }) => {
+    const api = mockParse(page, FILED);
+    await withCalendar(page, {
+      /* Two hours every day, plus two Wednesdays-only hours. */
+      blocks: [
+        { id: 'b-1', title: 'Deep work', pillar: 'tech', start: 13 * 60, end: 15 * 60, every: DAILY },
+        { id: 'b-2', title: 'Council',   pillar: 'tech', start: 16 * 60, end: 18 * 60, every: [3] },
+      ],
+    });
+    await capture(page, 'sort the loft');
+
+    await expect.poll(() => dayIn(api, WED_KEY)?.free, { timeout: 10_000 }).toBe(FROM_9AM - 240);
+    expect(dayIn(api, '2026-07-30').free).toBe(FULL_DAY - 120);   // Thursday: the daily block only
+  });
+
+  test('two blocks booked over each other cost the day one slot, not two', async ({ page }) => {
+    /* Summed rather than merged, a double-booked hour would report the
+       day as more committed than it can possibly be. */
+    const api = mockParse(page, FILED);
+    await withCalendar(page, {
+      blocks: [
+        { id: 'b-1', title: 'A', pillar: 'tech', start: 13 * 60, end: 15 * 60, every: DAILY },
+        { id: 'b-2', title: 'B', pillar: 'tech', start: 14 * 60, end: 16 * 60, every: DAILY },
+      ],
+    });
+    await capture(page, 'sort the loft');
+
+    // 13:00–16:00 is three hours gone, not four.
+    await expect.poll(() => dayIn(api, WED_KEY)?.free, { timeout: 10_000 }).toBe(FROM_9AM - 180);
+  });
+
+  test('a block that already finished this morning does not still cost the afternoon', async ({ page }) => {
+    const api = mockParse(page, FILED);
+    await withCalendar(page, {
+      blocks: [{ id: 'b-1', title: 'Gym', pillar: 'tech', start: 7 * 60, end: 8 * 60, every: DAILY }],
+    });
+    await capture(page, 'sort the loft');
+
+    await expect.poll(() => dayIn(api, WED_KEY)?.free, { timeout: 10_000 }).toBe(FROM_9AM);
+    expect(dayIn(api, '2026-07-30').free).toBe(FULL_DAY - 60);   // tomorrow it still costs an hour
+  });
+
+  test('habits still owed are counted, and ones already ticked off are not', async ({ page }) => {
+    const api = mockParse(page, FILED);
+    await withCalendar(page, {
+      habits: [
+        { id: 'h-1', name: 'Fajr',  pillar: 'deen', days: DAILY, created: 1 },
+        { id: 'h-2', name: 'Qur\'an', pillar: 'deen', days: DAILY, created: 1 },
+        { id: 'h-3', name: 'Gym',   pillar: 'combat', days: [1], created: 1 },   // Mondays
+      ],
+      blocks: [],
+      logs: { [WED_KEY]: { 'h-1': 1 } },
+    });
+    await capture(page, 'sort the loft');
+
+    // Fajr is done, Gym isn't scheduled today — one left.
+    await expect.poll(() => dayIn(api, WED_KEY)?.habits, { timeout: 10_000 }).toBe(1);
+    expect(dayIn(api, '2026-07-30').habits).toBe(2);   // tomorrow, both are owed again
+  });
+
+  test('a habit with a slot is charged as time, not counted twice', async ({ page }) => {
+    /* It is already a block, so its minutes are already gone from
+       `free`. Counting it again would charge the day for it twice. */
+    const api = mockParse(page, FILED);
+    await withCalendar(page, {
+      habits: [{ id: 'h-1', name: 'Qur\'an', pillar: 'deen', days: DAILY, created: 1 }],
+      blocks: [{ id: 'b-h-1', habitId: 'h-1', start: 13 * 60, end: 14 * 60 }],
+    });
+    await capture(page, 'sort the loft');
+
+    await expect.poll(() => dayIn(api, WED_KEY)?.free, { timeout: 10_000 }).toBe(FROM_9AM - 60);
+    expect(dayIn(api, WED_KEY).habits).toBe(0);
+  });
+
+  test('tasks already due that day are reported, done ones are not', async ({ page }) => {
+    const api = mockParse(page, FILED);
+    await withCalendar(page, {
+      blocks: [],
+      tasks: [
+        { id: 't-1', title: 'A', due: WED_KEY, done: false, quadrant: 'do', listId: 'l-inbox', created: 1 },
+        { id: 't-2', title: 'B', due: WED_KEY, done: false, quadrant: 'do', listId: 'l-inbox', created: 1 },
+        { id: 't-3', title: 'C', due: WED_KEY, done: true,  quadrant: 'do', listId: 'l-inbox', created: 1 },
+        { id: 't-4', title: 'D', due: '2026-07-30', done: false, quadrant: 'do', listId: 'l-inbox', created: 1 },
+      ],
+    });
+    await capture(page, 'sort the loft');
+
+    await expect.poll(() => dayIn(api, WED_KEY)?.due, { timeout: 10_000 }).toBe(2);
+    expect(dayIn(api, '2026-07-30').due).toBe(1);
+  });
+
+  test('a day with nothing left reports no free time rather than a negative', async ({ page }) => {
+    const api = mockParse(page, FILED);
+    await withCalendar(page, {
+      blocks: [{ id: 'b-1', title: 'All day', pillar: 'tech', start: 0, end: 23 * 60 + 59, every: DAILY }],
+    });
+    await capture(page, 'sort the loft');
+
+    await expect.poll(() => dayIn(api, WED_KEY)?.free, { timeout: 10_000 }).toBe(0);
+  });
+});

@@ -1283,6 +1283,92 @@ function layoutBlocks(blocks) {
 }
 
 /* ------------------------------------------------------------------
+   WHAT THE DAY HAS LEFT
+   ------------------------------------------------------------------
+   Capture asks the server whether a task can be done now or has to
+   wait (see functions/api/parse.js). That question is unanswerable
+   without knowing what the day already holds — so the arithmetic is
+   done here, where blocks, habits, tasks and prayer times are already
+   resolved for the timeline, and the answer travels with the request.
+
+   Deliberately facts, not judgement: how many minutes are free, how
+   many habits are still owed, how many tasks are already due. What
+   counts as "enough room" is policy and lives server-side with the
+   rest of it.
+
+   Only the waking window is counted. Counting the hours you were
+   asleep for would make every single day look half empty.
+------------------------------------------------------------------- */
+const DAY_START_MIN = 7 * 60;   // 07:00
+const DAY_END_MIN   = 22 * 60;  // 22:00
+const CAPACITY_DAYS = 14;
+
+/* The salah times already downloaded for this day, if any. Cache-only:
+   capture is a foreground interaction and must never wait on a
+   timetable fetch. No location or no cached month simply means prayer
+   isn't subtracted — an overestimate of free time, which errs towards
+   letting you schedule rather than refusing to. */
+function salahBlocksCached(state, dayKey) {
+  const loc = state?.ui?.salahLoc ?? readSalahLoc();
+  if (!loc || !Number.isFinite(loc.lat) || !Number.isFinite(loc.lon)) return [];
+  const [y, mo] = dayKey.split('-').map(Number);
+  const key = monthCacheKey(loc.lat, loc.lon, y, mo, state?.ui?.salahMethod ?? 3, state?.ui?.salahSchool ?? 0);
+  try {
+    const days = JSON.parse(localStorage.getItem(key) || 'null')?.days;
+    return salahBlocksFrom(days?.[dayKey], salahOffsets(state?.ui));
+  } catch { return []; }
+}
+
+/* Minutes on `dayKey` that nothing is booked over, counting from
+   `from` onwards. Overlapping blocks are merged rather than summed —
+   two things booked on top of each other cost the day one hour, not
+   two, and summing them could report a day as more than full. */
+function freeMinsOn(blocks, dayKey, dow, from = DAY_START_MIN) {
+  const winStart = Math.max(DAY_START_MIN, from);
+  if (DAY_END_MIN <= winStart) return 0;
+
+  const segs = blocks
+    .filter(b => blockOnDay(b, dayKey, dow))
+    .flatMap(segmentsOf)
+    .map(s => ({ start: Math.max(s.start, winStart), end: Math.min(s.end, DAY_END_MIN) }))
+    .filter(s => s.end > s.start)
+    .sort((a, b) => a.start - b.start);
+
+  let busy = 0, covered = winStart;
+  for (const s of segs) {
+    const start = Math.max(s.start, covered);
+    if (s.end > start) { busy += s.end - start; covered = s.end; }
+  }
+  return Math.max(0, (DAY_END_MIN - winStart) - busy);
+}
+
+/* Today and the fortnight after it, as the parser needs to see them.
+
+   `habits` counts only habits with no slot on the timeline: one that
+   has a slot is already a block, and its minutes are already gone from
+   `free` — counting it again would charge the day twice for it. On
+   today, a habit already ticked off is no longer owed. */
+function capacitySnapshot(state, todayKey, nowMin) {
+  const blocks = resolveBlocks(state);
+  const slotted = new Set((state?.blocks || []).filter(b => b?.habitId).map(b => b.habitId));
+  const out = [];
+  for (let i = 0; i < CAPACITY_DAYS; i++) {
+    const d = addDays(parseKey(todayKey), i);
+    const k = fmtKey(d), dow = d.getDay();
+    const log = state?.logs?.[k] || {};
+    const owed = (state?.habits || []).filter(h =>
+      h.days.includes(dow) && !slotted.has(h.id) && !(i === 0 && log[h.id]));
+    out.push({
+      d: k,
+      free: freeMinsOn([...blocks, ...salahBlocksCached(state, k)], k, dow, i === 0 ? nowMin : DAY_START_MIN),
+      habits: owed.length,
+      due: (state?.tasks || []).filter(t => !t.done && t.due === k).length,
+    });
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------
    DEFAULT SEED
    No hardcoded personal habits/blocks -- a fresh or fallback (offline/
    load-failure) state must always start empty, never with placeholder
@@ -3591,6 +3677,7 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
      enhancement layer that patches the task a moment later. */
   const smartFile = async (id, text, before, held) => {
     setParsing(true);
+    const now = new Date();
     const r = await Sync.parse(text, {
       today: todayKey(),
       people: state.people || [],
@@ -3598,6 +3685,9 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
       /* Tasks previously filed by the parser, so the server can derive
          few-shot examples from the ones this user corrected. */
       filedTasks: filedTasksFor(state),
+      /* What the calendar has left, so "can this be done now?" is a
+         question with an answer. See capacitySnapshot. */
+      days: capacitySnapshot(state, todayKey(), now.getHours() * 60 + now.getMinutes()),
     });
     setParsing(false);
     if (!r || r.error) return;

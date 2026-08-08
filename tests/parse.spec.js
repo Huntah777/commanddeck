@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
-import { classify, resolveDue, matchPerson, matchList, markers, fallbackExtract, daysBetween, tokensOf } from '../functions/api/parse.js';
+import { classify, resolveDue, matchPerson, matchList, markers, fallbackExtract, daysBetween, tokensOf,
+         roomOn, firstDayWithRoom, place, fmtMins } from '../functions/api/parse.js';
 
 /* Unit tests for natural-language task capture. No browser and no model:
    everything asserted here is the deterministic half of /api/parse — the
@@ -336,5 +337,259 @@ test.describe('what the call cost', () => {
 
   test('half a reading is still a reading', () => {
     expect(tokensOf({ usage: { prompt_tokens: 400 } })).toEqual({ i: 400, o: 0 });
+  });
+});
+
+/* ============================================================
+   Reading the sentence, not just the names
+   ------------------------------------------------------------
+   The model reports what the note says is at stake; the code below
+   decides what that is worth. These pin the direction of travel: the
+   wording can lift a task, and can never sink one.
+   ============================================================ */
+
+/* The AI path, with the model's reading supplied as a fixture — the
+   model itself is never called from a test. */
+const read = (text, signals = {}, over = {}) =>
+  classify({ ...fallbackExtract(text), ...signals, ...over },
+    { today: TODAY, people: PEOPLE, lists: LISTS });
+
+test.describe('what the wording is worth', () => {
+  test('a note that stakes something is filed on that, with nobody named', () => {
+    /* The complaint this answers: no name in the box, no urgency
+       keyword, and the boiler still coming through the ceiling. */
+    const out = read('the boiler is leaking through the kitchen ceiling',
+      { consequence: 5, minutes: 60, timeCritical: true });
+    expect(out.quadrant).toBe('do');
+    expect(out.importance).toBe(5);
+    expect(out.urgent).toBe(true);
+    expect(out.personId).toBe(null);
+  });
+
+  test('the same note without the model is only Schedule', () => {
+    // Which is exactly what it used to be, and why this exists.
+    expect(read('the boiler is leaking through the kitchen ceiling').quadrant).toBe('plan');
+  });
+
+  test('an ordinary reading changes nothing at all', () => {
+    /* 3 is the neutral answer, and the neutral answer must be inert —
+       otherwise every task from a demoted person drifts upwards. */
+    for (const c of [1, 2, 3]) {
+      expect(read('dave wants me to look over the wiki sometime', { consequence: c }).quadrant).toBe('eliminate');
+      expect(read('dave needs the deck by friday', { consequence: c }).quadrant).toBe('delegate');
+    }
+  });
+
+  test('a weight is a floor under that person, not a ceiling on events', () => {
+    /* Dave is weighted 2 because his ordinary asks are ordinary. The
+       server being down is not an ordinary ask. */
+    const ordinary = read('dave wants the deck looked over', { consequence: 3 });
+    const outage   = read('dave says the production server is down', { consequence: 5, timeCritical: true });
+    expect(ordinary.important).toBe(false);
+    expect(outage.important).toBe(true);
+    expect(outage.quadrant).toBe('do');
+  });
+
+  test('the model can promote but never demote', () => {
+    /* Eliminate is a verdict. A sentence the model read as idle still
+       gets its owner's weight — only the user's own words go below. */
+    const idle = read('talk to aisha about the house', { consequence: 1 });
+    expect(idle.importance).toBe(5);
+    expect(idle.quadrant).toBe('plan');
+    expect(read('talk to aisha about the house sometime', { consequence: 1 }).importance).toBe(4);
+  });
+
+  test('"no rush" still pulls back whatever the model thought', () => {
+    const out = read('fix the shed roof sometime', { consequence: 5 });
+    expect(out.importance).toBe(4);   // 3 + 2 promotion − 1 for the wording
+  });
+
+  test('wording that cannot wait is urgent without any date at all', () => {
+    const out = read('catch the post office before it shuts', { consequence: 3, timeCritical: true });
+    expect(out.urgent).toBe(true);
+    expect(out.quadrant).toBe('do');
+    expect(out.why.join(' · ')).toContain('cannot wait');
+  });
+
+  test('a model shouting 9 or -4 cannot invert the grid', () => {
+    /* Clamping bounds how far a reading can move a task, not which way.
+       Dave is 2 and "sometime" takes one off, so the loudest possible
+       promotion still only reaches 3 — and the quietest reading cannot
+       push below the floor of 1. A junk value is simply neutral. */
+    expect(read('dave wants the wiki read sometime', { consequence: 99 }).importance).toBe(3);
+    expect(read('dave wants the wiki read sometime', { consequence: -4 }).importance).toBe(1);
+    expect(read('write the plan', { consequence: 'urgent!!' }).importance).toBe(3);
+  });
+
+  test('the promotion is stated in the receipt, not silent', () => {
+    const why = read('the roof is coming in', { consequence: 5 }).why.join(' · ');
+    expect(why).toContain('wording reads 5/5 at stake');
+    expect(read('write the plan', { consequence: 3 }).why.join(' · ')).not.toContain('at stake');
+  });
+});
+
+/* ============================================================
+   Now, or later
+   ------------------------------------------------------------
+   `days` is what the client measured off its own timeline. What
+   counts as room is policy, and it is all here.
+   ============================================================ */
+
+/* A fortnight of days from TODAY, every one of them wide open unless
+   `over` says otherwise. */
+const openDays = (over = {}) => Array.from({ length: 14 }, (_, i) => ({
+  d: i === 0 ? TODAY : daysFrom(i),
+  free: 600, habits: 0, due: 0,
+  ...(over[i] || {}),
+}));
+const daysFrom = (n) => {
+  const d = new Date(Date.parse(`${TODAY}T12:00:00Z`) + n * 86_400_000);
+  return d.toISOString().slice(0, 10);
+};
+
+const fileWithDays = (text, days, signals = {}) =>
+  classify({ ...fallbackExtract(text), ...signals },
+    { today: TODAY, people: PEOPLE, lists: LISTS, days });
+
+test.describe('what a day has left', () => {
+  test('habits and tasks already owed are charged against the free time', () => {
+    expect(roomOn({ free: 300, habits: 0, due: 0 })).toBe(300);
+    expect(roomOn({ free: 300, habits: 4, due: 0 })).toBe(240);   // 4 × 15
+    expect(roomOn({ free: 300, habits: 0, due: 3 })).toBe(240);   // 3 × 20
+    expect(roomOn({ free: 300, habits: 4, due: 3 })).toBe(180);
+  });
+
+  test('an over-committed day has no room, never negative room', () => {
+    expect(roomOn({ free: 30, habits: 9, due: 9 })).toBe(0);
+    expect(roomOn({})).toBe(0);
+    expect(roomOn(null)).toBe(0);
+  });
+
+  test('the first day with room is the first one that actually fits', () => {
+    const days = openDays({ 0: { free: 20 }, 1: { free: 45 }, 2: { free: 200 } });
+    expect(firstDayWithRoom(days, 30)?.d).toBe(daysFrom(1));
+    expect(firstDayWithRoom(days, 120)?.d).toBe(daysFrom(2));
+    expect(firstDayWithRoom(days, 900)).toBe(null);
+  });
+});
+
+test.describe('now, or later', () => {
+  test('a day with room takes it today', () => {
+    const out = fileWithDays('write the quarterly plan', openDays(), { minutes: 60 });
+    expect(out.due).toBe(TODAY);
+    expect(out.fit.when).toBe('today');
+  });
+
+  test('a full day pushes it to the first one that fits', () => {
+    const days = openDays({ 0: { free: 15 }, 1: { free: 20 }, 2: { free: 240 } });
+    const out = fileWithDays('write the quarterly plan', days, { minutes: 60 });
+    expect(out.due).toBe(daysFrom(2));
+    expect(out.fit.when).toBe('scheduled');
+    expect(out.why.join(' · ')).toContain(`booked for ${daysFrom(2)}`);
+  });
+
+  test('a date you named yourself is never moved, however full the day', () => {
+    /* The line that has to hold: scheduling is a suggestion, a stated
+       deadline is a commitment. */
+    const out = fileWithDays('deck by friday', openDays({ 4: { free: 0 } }), { minutes: 240 });
+    expect(out.due).toBe(FRI);
+    expect(out.fit.when).toBe('stated');
+  });
+
+  test('something that cannot wait lands today even with no room', () => {
+    const out = fileWithDays('the boiler is pouring water through the ceiling',
+      openDays({ 0: { free: 10 } }), { minutes: 90, consequence: 5, timeCritical: true });
+    expect(out.due).toBe(TODAY);
+    expect(out.fit.when).toBe('squeezed');
+    expect(out.quadrant).toBe('do');
+    expect(out.why.join(' · ')).toContain('doing it anyway');
+  });
+
+  test('"sometime" is left undated rather than booked in', () => {
+    // Dating it would be putting words in the user's mouth.
+    const out = fileWithDays('read the wiki sometime', openDays(), { minutes: 30 });
+    expect(out.due).toBe(null);
+    expect(out.fit.when).toBe('someday');
+  });
+
+  test('a fortnight with no room leaves it undated rather than guessing a day', () => {
+    const days = openDays(Object.fromEntries(Array.from({ length: 14 }, (_, i) => [i, { free: 10 }])));
+    const out = fileWithDays('rebuild the deck', days, { minutes: 300 });
+    expect(out.due).toBe(null);
+    expect(out.fit.when).toBe('full');
+    expect(out.why.join(' · ')).toContain('nothing free in the next fortnight');
+  });
+
+  test('a day the scheduler picked is not a deadline', () => {
+    /* Urgency and the rescue from Eliminate both read the date the
+       CAPTURE named. A gap in the calendar is not a commitment, and
+       must not be read back as one. */
+    const soon = fileWithDays('write the quarterly plan', openDays(), { minutes: 30 });
+    expect(soon.due).toBe(TODAY);
+    expect(soon.urgent).toBe(false);
+    expect(soon.quadrant).toBe('plan');
+  });
+
+  test('nothing headed for Eliminate gets time booked for it', () => {
+    /* Filing something under "cut this without guilt" and then putting
+       it in this afternoon would be the parser arguing with itself. */
+    const out = fileWithDays('dave wants the wiki read', openDays(), { minutes: 30 });
+    expect(out.quadrant).toBe('eliminate');
+    expect(out.due).toBe(null);
+    expect(out.fit.when).toBe('someday');
+  });
+
+  test('...but a deadline you set yourself survives that verdict', () => {
+    // Eliminate is about what to do with the task, not licence to
+    // forget a date you stated.
+    const out = fileWithDays('dave needs the audit numbers on 2026-09-30', openDays(), { minutes: 30 });
+    expect(out.quadrant).toBe('delegate');
+    expect(out.due).toBe('2026-09-30');
+    expect(out.fit.when).toBe('stated');
+  });
+
+  test('a client that sends no calendar gets no scheduling', () => {
+    /* An older client, or one with nothing measured yet. The endpoint
+       behaves exactly as it did before. */
+    for (const days of [undefined, [], [{ free: 500 }]]) {
+      const out = classify({ ...fallbackExtract('write the plan'), minutes: 30 },
+        { today: TODAY, people: PEOPLE, lists: LISTS, days });
+      expect(out.due).toBe(null);
+      expect(out.fit).toBe(null);
+    }
+  });
+
+  test('how long the work looked is reported, clamped, and defaulted', () => {
+    expect(fileWithDays('a', openDays(), { minutes: 45 }).minutes).toBe(45);
+    expect(fileWithDays('a', openDays(), { minutes: 9000 }).minutes).toBe(480);
+    expect(fileWithDays('a', openDays(), { minutes: 0 }).minutes).toBe(30);
+    expect(fileWithDays('a', openDays()).minutes).toBe(30);
+  });
+
+  test('the receipt says it in minutes and hours, not raw numbers', () => {
+    expect(fmtMins(45)).toBe('45m');
+    expect(fmtMins(120)).toBe('2h');
+    expect(fmtMins(90)).toBe('1h30');
+    expect(fmtMins(0)).toBe('0m');
+  });
+});
+
+test.describe('placement, directly', () => {
+  /* place() is the whole now-or-later decision, and it is worth
+     pinning without a classify() around it. */
+  const days = openDays({ 0: { free: 60 }, 1: { free: 500 } });
+
+  test('every outcome is reachable and says which one it took', () => {
+    expect(place({ due: FRI, minutes: 30, days }).fit.when).toBe('stated');
+    expect(place({ minutes: 30, noDate: true, days }).fit.when).toBe('someday');
+    expect(place({ minutes: 30, days }).fit.when).toBe('today');
+    expect(place({ minutes: 300, days }).fit.when).toBe('scheduled');
+    expect(place({ minutes: 300, urgent: true, days }).fit.when).toBe('squeezed');
+    expect(place({ minutes: 30, days: [] }).fit).toBe(null);
+  });
+
+  test('a malformed day is not a day with infinite room', () => {
+    expect(place({ minutes: 30, days: [{ free: 999 }] }).fit).toBe(null);
+    expect(firstDayWithRoom([{ free: 999 }], 30)).toBe(null);
   });
 });
