@@ -1834,6 +1834,17 @@ function scheduleNotifications(state) {
   navigator.serviceWorker?.controller?.postMessage({ type: 'SCHEDULE_NOTIFICATIONS', notifications });
 }
 
+/* "12m", "2h05m" — for the upcoming-notifications list in Admin → Alerts.
+   Same convention as functions/api/parse.js's fmtMins, so a duration reads
+   the same wherever it shows up in the app. */
+function untilLabel(ms) {
+  const mins = Math.max(0, Math.round(ms / 60_000));
+  if (mins < 1)  return '<1m';
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return m ? `${h}h${String(m).padStart(2, '0')}` : `${h}h`;
+}
+
 /* Synthesised adhan tone — plays when the page is open at prayer time */
 function playAdhan() {
   try {
@@ -5184,6 +5195,27 @@ function NotificationsCard({ state, setState }) {
     };
   }, [supported]);
 
+  /* What's left to fire today, read straight off buildPlan — the exact
+     function that hands the schedule to the service worker and, via
+     syncPushSchedule, to the server. Not a second computation that could
+     drift from what actually gets sent: if it's wrong here, it's wrong
+     everywhere, and the fix is one function.
+
+     Scoped to today because that's what the rest of the system means by
+     "the plan" — the server rebuilds this same one-day window from
+     scratch on every cron tick (see push-worker/index.js) rather than
+     projecting forward, so there is no "tomorrow's plan" to read yet. */
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!enabled) return;
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, [enabled]);
+  const upcoming = useMemo(() => {
+    if (!enabled) return [];
+    return buildPlan(state).filter(n => n.fireAt > now).sort((a, b) => a.fireAt - b.fireAt);
+  }, [state, now, enabled]);
+
   /* Both ends of the chain, together. Either half on its own is
      misleading: the browser will happily report a subscription the push
      service abandoned weeks ago, and the server can be holding a row for
@@ -5376,6 +5408,41 @@ function NotificationsCard({ state, setState }) {
           have gone quiet — after reinstalling the app, clearing site data, or a long stretch with
           the app closed. It is safe to press at any time and costs nothing.
         </p>
+      )}
+
+      {enabled && (
+        <div className="mt-3 pt-3 border-t border-ink-700" data-testid="upcoming-notifications">
+          <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1.5">
+            UPCOMING TODAY{upcoming.length > 0 ? ` · ${upcoming.length}` : ''}
+          </div>
+          {upcoming.length === 0 ? (
+            <div className="text-xs text-bone-400 italic px-2.5 py-2" data-testid="upcoming-empty">
+              Nothing left to fire today.
+            </div>
+          ) : (
+            <div className="rounded-lg border border-ink-700 divide-y divide-ink-700 max-h-64 overflow-y-auto scrollbar">
+              {upcoming.map(n => (
+                <div key={n.id} data-testid="upcoming-notif" data-id={n.id} data-fire-at={n.fireAt}
+                  className="flex items-start gap-2.5 px-2.5 py-2">
+                  <div className="w-14 shrink-0">
+                    <div className="text-[10px] font-mono text-bone-300 leading-tight">
+                      {new Date(n.fireAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                    <div className="text-[9px] font-mono text-bone-500 leading-tight mt-0.5">in {untilLabel(n.fireAt - now)}</div>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-bone-100 truncate">{n.title}</div>
+                    {n.body && <div className="text-[10px] text-bone-400 truncate">{n.body}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <p className="text-[10px] text-bone-400/70 mt-1.5 leading-relaxed">
+            The same plan sent to this device and the server — what's here is what will actually
+            fire, for the rest of today.
+          </p>
+        </div>
       )}
 
       <div className="mt-3 pt-3 border-t border-ink-700">
