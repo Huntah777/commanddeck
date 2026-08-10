@@ -330,6 +330,210 @@ test.describe('what the session is aimed at', () => {
   });
 });
 
+/* A session aimed at a HABIT specifically (not just its pillar) is the
+   habit — finishing it is doing the thing, so it should not also have to
+   be found and ticked by hand afterwards. Aimed at a whole pillar, a
+   task, or nothing, there is no single habit to tick and none of this
+   applies. */
+test.describe('a session aimed at a habit ticks it off', () => {
+  const logs = (page) => page.evaluate(() =>
+    JSON.parse(localStorage.getItem('madinah_v1') || '{}').logs || {});
+  const aimAtFajr = async (page) => {
+    await page.getByRole('button', { name: 'PILLAR', exact: true }).click();
+    await page.getByTestId('pillar-choice').filter({ hasText: 'Deen' }).click();
+    await page.getByLabel('Habit').selectOption({ label: 'Fajr' });
+  };
+
+  test('finishing the session ticks it, visibly, on the Today checklist too', async ({ page }) => {
+    await boot(page);
+    await aimAtFajr(page);
+    await start(page).click();
+    await page.clock.fastForward('25:00');
+
+    await expect.poll(async () => (await logs(page))['2026-07-29']?.['h-fajr'], { timeout: 10_000 }).toBeTruthy();
+
+    await goTab(page, 'Today');
+    await expect(page.getByRole('button', { name: 'Untick Fajr' })).toBeVisible();
+  });
+
+  test('aimed at the whole pillar, there is no single habit to tick', async ({ page }) => {
+    await boot(page);
+    await page.getByRole('button', { name: 'PILLAR', exact: true }).click();
+    await page.getByTestId('pillar-choice').filter({ hasText: 'Deen' }).click();
+    await start(page).click();
+    await page.clock.fastForward('25:00');
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    expect((await logs(page))['2026-07-29']).toBeUndefined();
+  });
+
+  test('a task or a free session ticks nothing', async ({ page }) => {
+    await boot(page);
+    await start(page).click(); // Free, the default target
+    await page.clock.fastForward('25:00');
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    expect((await logs(page))['2026-07-29']).toBeUndefined();
+  });
+
+  test('skipping out early still ticks it, at the same one-minute threshold as the log', async ({ page }) => {
+    await boot(page);
+    await aimAtFajr(page);
+    await start(page).click();
+    await page.clock.fastForward('04:00');
+    await skip(page).click();
+
+    await expect.poll(async () => (await logs(page))['2026-07-29']?.['h-fajr'], { timeout: 10_000 }).toBeTruthy();
+  });
+
+  test('skipping immediately ticks nothing, same as it logs nothing', async ({ page }) => {
+    await boot(page);
+    await aimAtFajr(page);
+    await start(page).click();
+    await skip(page).click();
+    await page.waitForTimeout(200);
+    expect((await logs(page))['2026-07-29']).toBeUndefined();
+  });
+
+  test('a habit already ticked keeps its original timestamp — this never unticks', async ({ page }) => {
+    /* tickHabit is a tick, never a toggle: finishing a session must not
+       fight a box that got ticked (or unticked) some other way before
+       the timer caught up. */
+    const tickedAt = new Date('2026-07-29T07:00:00').getTime();
+    await boot(page, { state: { ...STATE, logs: { '2026-07-29': { 'h-fajr': tickedAt } } } });
+    await aimAtFajr(page);
+    await start(page).click();
+    await page.clock.fastForward('25:00');
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    expect((await logs(page))['2026-07-29']['h-fajr']).toBe(tickedAt);
+  });
+
+  test('a completion noticed late still ticks as of when the session actually ended', async ({ page }) => {
+    /* The device-asleep case: the deadline passed before the app was
+       there to see it. The tick lands on the moment the session really
+       finished, matching its pomodoroLogs entry — not the moment this
+       device happened to wake up and notice. */
+    await boot(page, {
+      at: '2026-07-29T23:59:00',
+      timer: {
+        phase: 0, running: true, leftMs: null, doneCount: 0,
+        target: { kind: 'habit', id: 'h-fajr', pillarId: 'deen', label: 'Fajr', color: '#10b981' },
+        endsAt: new Date('2026-07-29T23:58:00').getTime(),
+      },
+    });
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    const day = await logs(page);
+    expect(day['2026-07-29']?.['h-fajr']).toBe(new Date('2026-07-29T23:58:00').getTime());
+  });
+});
+
+/* Same story, aimed at a task instead of a habit — completeTask is
+   tickHabit's twin, with the same idempotency and the same instant-of-
+   completion rules. */
+test.describe('a session aimed at a task completes it', () => {
+  const tasks = (page) => page.evaluate(() =>
+    JSON.parse(localStorage.getItem('madinah_v1') || '{}').tasks || []);
+  const findT1 = async (page) => (await tasks(page)).find(t => t.id === 't-1');
+  const aimAtTask = async (page) => {
+    await page.getByRole('button', { name: 'TASK', exact: true }).click();
+    await page.getByLabel('Task').selectOption({ label: 'Write the deck' });
+  };
+
+  test("finishing the session completes it, and it drops off Today's list", async ({ page }) => {
+    await boot(page);
+    await aimAtTask(page);
+    await start(page).click();
+    await page.clock.fastForward('25:00');
+
+    await expect.poll(async () => (await findT1(page))?.done, { timeout: 10_000 }).toBe(true);
+
+    await goTab(page, 'Today');
+    await expect(page.getByText('TODAY · 0')).toBeVisible();
+    await expect(page.getByText('Inbox zero. Add the next move.')).toBeVisible();
+  });
+
+  test('aimed at anything else, no task is completed', async ({ page }) => {
+    await boot(page);
+    await start(page).click(); // Free, the default target
+    await page.clock.fastForward('25:00');
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    expect((await findT1(page)).done).toBe(false);
+  });
+
+  test('skipping out early still completes it, at the same one-minute threshold as the log', async ({ page }) => {
+    await boot(page);
+    await aimAtTask(page);
+    await start(page).click();
+    await page.clock.fastForward('04:00');
+    await skip(page).click();
+
+    await expect.poll(async () => (await findT1(page))?.done, { timeout: 10_000 }).toBe(true);
+  });
+
+  test('skipping immediately completes nothing, same as it logs nothing', async ({ page }) => {
+    await boot(page);
+    await aimAtTask(page);
+    await start(page).click();
+    await skip(page).click();
+    await page.waitForTimeout(200);
+    expect((await findT1(page)).done).toBe(false);
+  });
+
+  test('a task already done keeps its original completion time — this never reopens it', async ({ page }) => {
+    /* completeTask must only ever complete: finishing a session must not
+       fight a task someone reopened, or overwrite doneAt on one that was
+       already ticked off some other way before the timer caught up —
+       here, completed on another device and synced in mid-session.
+
+       The target is seeded straight into the session rather than picked
+       through the UI: the picker only ever offers OPEN tasks (see
+       focusTargets), so a session aimed at one that's already done can
+       only arise from having been aimed at it before it was completed
+       elsewhere — exactly the case this is testing. */
+    const doneAt = new Date('2026-07-29T07:00:00').getTime();
+    await boot(page, {
+      state: {
+        ...STATE,
+        tasks: STATE.tasks.map(t => t.id === 't-1' ? { ...t, done: true, doneAt } : t),
+      },
+      timer: {
+        phase: 0, running: false, leftMs: null, doneCount: 0,
+        target: { kind: 'task', id: 't-1', label: 'Write the deck', color: '#ef4444' },
+      },
+    });
+    await start(page).click();
+    await page.clock.fastForward('25:00');
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    const t1 = await findT1(page);
+    expect(t1.done).toBe(true);
+    expect(t1.doneAt).toBe(doneAt);
+  });
+
+  test('a completion noticed late lands on when the session actually ended, not when it was noticed', async ({ page }) => {
+    /* doneAt is the historical instant (matches the pomodoroLogs entry
+       and tickHabit's own tick); modifiedAt is the ordinary "this device
+       touched the record now" instant every other write already gives
+       it. The two diverge on exactly this device-asleep path. */
+    await boot(page, {
+      at: '2026-07-29T23:59:00',
+      timer: {
+        phase: 0, running: true, leftMs: null, doneCount: 0,
+        target: { kind: 'task', id: 't-1', label: 'Write the deck', color: '#ef4444' },
+        endsAt: new Date('2026-07-29T23:58:00').getTime(),
+      },
+    });
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    const t1 = await findT1(page);
+    expect(t1.doneAt).toBe(new Date('2026-07-29T23:58:00').getTime());
+    expect(t1.modifiedAt).toBe(new Date('2026-07-29T23:59:00').getTime());
+  });
+});
+
 test.describe('what gets logged', () => {
   test('skipping banks the minutes actually sat through, not a full session', async ({ page }) => {
     // A 25-minute credit for four minutes of work makes the log lie.

@@ -1151,6 +1151,30 @@ function deleteHabit(s, id) {
   }, ...gone);
 }
 
+/* Mark a habit done for a given day — the same write TodayView's and
+   Timeline's toggleHabit use for a tick (store when it happened, and
+   clear any un-tick in logsOff so a later merge can't quietly resurrect
+   one). Pulled out here because a third site now ticks a habit
+   automatically — usePomodoro.finish(), for a Focus session aimed at a
+   habit — and that site must never UNTICK: idempotent, a no-op if the
+   habit is already ticked, unlike the toggle those two views use.
+
+   `at` defaults to now but takes the real completion instant when the
+   caller has one — a session that finished while the phone was asleep
+   should tick as of the moment it actually ended, same as its
+   pomodoroLogs entry does, not the moment the app happened to notice. */
+function tickHabit(s, dKey, id, at = Date.now()) {
+  if ((s.logs?.[dKey] || {})[id]) return s;
+  const logs    = { ...(s.logs?.[dKey]    || {}), [id]: at };
+  const logsOff = { ...(s.logsOff?.[dKey] || {}) };
+  delete logsOff[id];
+  return {
+    ...s,
+    logs:    { ...s.logs,             [dKey]: logs },
+    logsOff: { ...(s.logsOff || {}), [dKey]: logsOff },
+  };
+}
+
 /* ------------------------------------------------------------------
    TASKS ON THE CALENDAR
    ------------------------------------------------------------------
@@ -1223,6 +1247,31 @@ const toggleTaskDone = (s, id) => ({
     ? { ...x, done: !x.done, doneAt: !x.done ? Date.now() : null, modifiedAt: Date.now() }
     : x),
 });
+
+/* Complete a task, at a given instant rather than always "now" — same
+   relationship to toggleTaskDone as tickHabit has to the checklist's
+   toggle above. Used by usePomodoro.finish() for a session aimed at a
+   task, which must only ever COMPLETE it, never flip a done task back to
+   open: idempotent, a no-op once `done` is already true, and silently a
+   no-op too if the task was deleted mid-session (nothing in `s.tasks`
+   matches `id`).
+
+   `doneAt` takes the real completion instant, same as tickHabit's tick
+   and the pomodoroLog's own completedAt — so a session finished while the
+   device was asleep still completes the task on the day it actually
+   ended, not the day the app happened to wake up and notice. `modifiedAt`
+   stays wall-clock `Date.now()`: it means "this device last touched this
+   record now", the ordinary meaning every other write already gives it,
+   and a historical value there would misrepresent a sync merge race
+   against a genuinely later edit from another device. */
+function completeTask(s, id, at = Date.now()) {
+  return {
+    ...s,
+    tasks: s.tasks.map(x => x.id === id && !x.done
+      ? { ...x, done: true, doneAt: at, modifiedAt: Date.now() }
+      : x),
+  };
+}
 
 /* Block writes, shared by every calendar scope. A block edited from the
    week grid has to land in state identically to one edited from the day
@@ -1968,25 +2017,43 @@ function usePomodoro(state, setState) {
          minute. */
       if (mins >= 1) {
         const t = s.target || {};
-        set(prev => ({
-          ...prev,
-          pomodoroLogs: [...(prev.pomodoroLogs || []), {
-            id: `p-${atMs}`,
-            date: fmtKey(new Date(atMs)),
-            /* taskId/taskTitle predate pillar and habit targets and are
-               what every stored log and the coaching digest already
-               read, so they keep their exact old meaning rather than
-               being folded into something generic. */
-            taskId:     t.kind === 'task'  ? t.id : null,
-            taskTitle:  t.kind === 'task'  ? (t.label || null) : null,
-            targetKind: t.kind || 'free',
-            pillarId:   t.pillarId || null,
-            habitId:    t.kind === 'habit' ? t.id : null,
-            label:      t.label || null,
-            mins,
-            completedAt: atMs,
-          }],
-        }));
+        const dKey = fmtKey(new Date(atMs));
+        set(prev => {
+          const withLog = {
+            ...prev,
+            pomodoroLogs: [...(prev.pomodoroLogs || []), {
+              id: `p-${atMs}`,
+              date: dKey,
+              /* taskId/taskTitle predate pillar and habit targets and are
+                 what every stored log and the coaching digest already
+                 read, so they keep their exact old meaning rather than
+                 being folded into something generic. */
+              taskId:     t.kind === 'task'  ? t.id : null,
+              taskTitle:  t.kind === 'task'  ? (t.label || null) : null,
+              targetKind: t.kind || 'free',
+              pillarId:   t.pillarId || null,
+              habitId:    t.kind === 'habit' ? t.id : null,
+              label:      t.label || null,
+              mins,
+              completedAt: atMs,
+            }],
+          };
+          /* A session aimed at a habit or a task, not just a pillar, IS
+             the thing — finishing it (or skipping out once satisfied,
+             same threshold as the log above) is doing the work, so it
+             ticks or completes itself off rather than waiting to be
+             found and ticked by hand. Marked as of when the session
+             actually ended, same instant as the log entry above, not
+             whenever this callback happens to run — a completion noticed
+             late (device asleep) still lands on the day it really
+             finished. Both writes are idempotent completions, never a
+             toggle, so this can't fight a box someone already unticked,
+             or a task someone reopened, for some other reason before the
+             timer caught up. */
+          if (t.kind === 'habit') return tickHabit(withLog, dKey, t.id, atMs);
+          if (t.kind === 'task')  return completeTask(withLog, t.id, atMs);
+          return withLog;
+        });
       }
       const done = s.doneCount + 1;
       /* Not every session earns a break. A day made of one-off stretches —
