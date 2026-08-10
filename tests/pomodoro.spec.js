@@ -123,6 +123,110 @@ test.describe('the countdown is a deadline', () => {
   });
 });
 
+/* Not every stretch of work is a Pomodoro. Some is one session and then
+   the school run, or a meeting, or the day is just over — and forcing a
+   break onto the end of that is something to dismiss, not something
+   useful. `breakAfter` (the BREAK AFTER / NO BREAK AFTER pill next to the
+   phase tabs) is the escape hatch: off, a finished Focus session goes
+   straight back to a fresh one instead of into a break. */
+test.describe('a session that owes no break', () => {
+  const breakToggle = (page) => page.getByTestId('break-after-toggle');
+
+  test('defaults to keeping the break — existing behaviour, untouched', async ({ page }) => {
+    await boot(page);
+    await expect(breakToggle(page)).toHaveText('BREAK AFTER');
+    await expect(breakToggle(page)).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  test('turning it off sends a finished Focus session straight back to Focus', async ({ page }) => {
+    await boot(page);
+    await breakToggle(page).click();
+    await expect(breakToggle(page)).toHaveText('NO BREAK AFTER');
+    await expect(breakToggle(page)).toHaveAttribute('aria-pressed', 'true');
+
+    await start(page).click();
+    await page.clock.fastForward('25:00');
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    // Not the 5-minute break this exact fixture lands on with the toggle
+    // left alone (see "a phase that ended while nothing was ticking is
+    // ended", above) — straight back to a fresh 25-minute Focus phase.
+    await expect(clock(page)).toHaveText('25:00');
+    expect((await sessions(page))[0].mins).toBe(25);
+  });
+
+  test('the same holds when the session is skipped rather than run out', async ({ page }) => {
+    await boot(page);
+    await breakToggle(page).click();
+    await start(page).click();
+    await page.clock.fastForward('10:00');
+    await skip(page).click();
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    expect((await sessions(page))[0].mins).toBe(10);
+    await expect(clock(page)).toHaveText('25:00');
+  });
+
+  test('a break already earned is not retroactively cancelled', async ({ page }) => {
+    /* Off is forward-looking. Flipping it mid-break must not do
+       something stranger than the ordinary "a break always returns to
+       Focus" rule that already applies regardless of the toggle. */
+    await boot(page);
+    await start(page).click();
+    await page.clock.fastForward('25:00');
+    await expect(clock(page)).toHaveText('05:00'); // the break, as normal
+
+    await breakToggle(page).click();
+    await start(page).click();
+    await page.clock.fastForward('05:00');
+    await expect(clock(page)).toHaveText('25:00');
+  });
+
+  test('persists across a reload, same as every other session choice', async ({ page }) => {
+    await boot(page);
+    await breakToggle(page).click();
+
+    await page.reload();
+    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
+    await expect(breakToggle(page)).toHaveText('NO BREAK AFTER');
+  });
+
+  test('the running banner says so, and only while a Focus session is actually running', async ({ page }) => {
+    await boot(page);
+    await breakToggle(page).click();
+    await expect(page.getByText('NO BREAK AFTER THIS ONE')).toHaveCount(0);
+
+    await start(page).click();
+    await expect(page.getByText('NO BREAK AFTER THIS ONE')).toBeVisible();
+  });
+
+  test('the break phases stay reachable by hand — off only cancels the automatic hand-off', async ({ page }) => {
+    await boot(page);
+    await breakToggle(page).click();
+    await page.getByRole('button', { name: 'SHORT BREAK' }).click();
+    await expect(clock(page)).toHaveText('05:00');
+  });
+
+  test('a session persisted before this setting existed still gets its break, not silence', async ({ page }) => {
+    /* Anything stored before breakAfter existed has no opinion on it —
+       and no opinion has to read as "cycle exactly as it always did",
+       never as "skip the break", or every pre-existing install goes
+       quiet on breaks the moment this ships. */
+    await boot(page, {
+      at: '2026-07-29T09:00:00',
+      timer: {
+        phase: 0, running: true, leftMs: null, doneCount: 0, target: null,
+        endsAt: new Date('2026-07-29T08:59:00').getTime(),
+        // no breakAfter field at all
+      },
+    });
+
+    await expect.poll(() => sessions(page), { timeout: 10_000 }).toHaveLength(1);
+    await expect(clock(page)).toHaveText('05:00');
+    await expect(breakToggle(page)).toHaveText('BREAK AFTER');
+  });
+});
+
 test.describe('the timer outlives the view', () => {
   test('switching to another tab in the app does not stop it', async ({ page }) => {
     await boot(page);

@@ -137,7 +137,7 @@ test.describe('Bug fixes', () => {
     await page.goto('/');
     await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
 
-    await expect(page.locator('text=Pomodoro timer')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('text=Focus timer')).toBeVisible({ timeout: 10_000 });
   });
 
   test('stepping back to a previous day is not undone by the day-rollover timer', async ({ page }) => {

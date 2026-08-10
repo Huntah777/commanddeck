@@ -330,7 +330,14 @@ const PHASES = [
 ];
 const phaseMins = (cfg, i) => Math.max(1, Number([cfg.workMins, cfg.shortMins, cfg.longMins][i]) || 25);
 
-const IDLE_SESSION = { phase: 0, endsAt: null, leftMs: null, running: false, doneCount: 0, target: null };
+/* breakAfter defaults true — a completed Focus session rolls into a break
+   unless this device has explicitly turned it off. That default is what
+   makes the change backwards-compatible: a session persisted before this
+   field existed has no opinion, and no opinion should read as "the
+   Pomodoro cycle keeps working exactly as it always did", not as "skip
+   the break". See the finish() branch in usePomodoro for where this is
+   read. */
+const IDLE_SESSION = { phase: 0, endsAt: null, leftMs: null, running: false, doneCount: 0, target: null, breakAfter: true };
 
 /* 'stats' was this tab's name before it grew into the place everything
    is configured. Manifest shortcuts, bookmarks, and any device that
@@ -349,12 +356,13 @@ const TimerStore = {
          the fields we understand, with the idle defaults behind them. */
       return {
         ...IDLE_SESSION,
-        phase:     [0, 1, 2].includes(v.phase) ? v.phase : 0,
-        endsAt:    Number.isFinite(v.endsAt) ? v.endsAt : null,
-        leftMs:    Number.isFinite(v.leftMs) ? v.leftMs : null,
-        running:   v.running === true,
-        doneCount: Number.isFinite(v.doneCount) ? v.doneCount : 0,
-        target:    v.target && typeof v.target === 'object' ? v.target : null,
+        phase:      [0, 1, 2].includes(v.phase) ? v.phase : 0,
+        endsAt:     Number.isFinite(v.endsAt) ? v.endsAt : null,
+        leftMs:     Number.isFinite(v.leftMs) ? v.leftMs : null,
+        running:    v.running === true,
+        doneCount:  Number.isFinite(v.doneCount) ? v.doneCount : 0,
+        target:     v.target && typeof v.target === 'object' ? v.target : null,
+        breakAfter: typeof v.breakAfter === 'boolean' ? v.breakAfter : true,
       };
     } catch { return null; }
   },
@@ -1981,7 +1989,16 @@ function usePomodoro(state, setState) {
         }));
       }
       const done = s.doneCount + 1;
-      setSession(cur => ({ ...cur, doneCount: done, phase: done % c.longAfter === 0 ? 2 : 1, running: false, endsAt: null, leftMs: null }));
+      /* Not every session earns a break. A day made of one-off stretches —
+         answer email for 20 minutes, then leave for the school run — is
+         not the same shape as a stack of identical Pomodoros, and forcing
+         a break onto the end of it just means someone dismisses it and
+         starts the next thing anyway. `breakAfter` off skips straight back
+         to a fresh Focus phase, same as a break finishing on its own. */
+      setSession(cur => ({
+        ...cur, doneCount: done, running: false, endsAt: null, leftMs: null,
+        phase: s.breakAfter ? (done % c.longAfter === 0 ? 2 : 1) : 0,
+      }));
     } else {
       setSession(cur => ({ ...cur, phase: 0, running: false, endsAt: null, leftMs: null }));
     }
@@ -2054,7 +2071,8 @@ function usePomodoro(state, setState) {
     : s);
   const reset      = () => setSession(s => ({ ...s, running: false, endsAt: null, leftMs: null }));
   const goToPhase  = (i) => setSession(s => ({ ...s, phase: i, running: false, endsAt: null, leftMs: null }));
-  const setTarget  = (target) => setSession(s => ({ ...s, target: target || null }));
+  const setTarget     = (target) => setSession(s => ({ ...s, target: target || null }));
+  const setBreakAfter = (on) => setSession(s => ({ ...s, breakAfter: !!on }));
   const skip = () => {
     const { session: s, cfg: c } = live.current;
     const totalMs = phaseMins(c, s.phase) * 60_000;
@@ -2064,7 +2082,7 @@ function usePomodoro(state, setState) {
     finish(Date.now(), totalMs - left);
   };
 
-  return { session, cfg, start, pause, reset, skip, goToPhase, setTarget };
+  return { session, cfg, start, pause, reset, skip, goToPhase, setTarget, setBreakAfter };
 }
 
 /* How much is left, repainted where it is shown rather than at the
@@ -6449,7 +6467,7 @@ function focusTargets(state) {
 }
 
 function PomodoroView({ state, setState, pomo }) {
-  const { session, cfg, start, pause, reset, skip, goToPhase, setTarget } = pomo;
+  const { session, cfg, start, pause, reset, skip, goToPhase, setTarget, setBreakAfter } = pomo;
   const { secsLeft, totalSecs } = useCountdown(session, cfg);
   const [showCfg, setShowCfg] = useState(false);
 
@@ -6518,7 +6536,7 @@ function PomodoroView({ state, setState, pomo }) {
 
   return (
     <div className="max-w-4xl mx-auto pt-6 fadeUp">
-      <SectionHeading kicker="04 / Focus" title="Pomodoro timer" sub="Aimed at a pillar, a habit or a task · runs in the background"/>
+      <SectionHeading kicker="04 / Focus" title="Focus timer" sub="Aimed at a pillar, a habit or a task · cycle through breaks, or run one session and stop · runs in the background"/>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 mt-2">
 
@@ -6536,6 +6554,19 @@ function PomodoroView({ state, setState, pomo }) {
                 {p.label.toUpperCase()}
               </button>
             ))}
+            {/* Not every session earns a break — see finish() in
+                usePomodoro. Off means the classic Pomodoro cycle; on
+                means one Focus session, then straight back to a fresh
+                one with nothing forced in between. */}
+            <button onClick={() => setBreakAfter(!session.breakAfter)}
+              aria-pressed={!session.breakAfter} data-testid="break-after-toggle"
+              title={session.breakAfter ? 'A break follows this session — click to skip it' : 'No break follows this session — click to restore it'}
+              className="btn px-3 py-1.5 rounded-full text-xs font-mono tracking-wider"
+              style={session.breakAfter
+                ? { color: '#9a9788', border: '1px solid #1f1f24' }
+                : { background: '#f59e0b20', color: '#f59e0b', border: '1px solid #f59e0b55' }}>
+              {session.breakAfter ? 'BREAK AFTER' : 'NO BREAK AFTER'}
+            </button>
             <span className="font-mono text-[10px] text-bone-400 ml-auto">SESSION #{session.doneCount + 1}</span>
           </div>
 
@@ -6613,6 +6644,7 @@ function PomodoroView({ state, setState, pomo }) {
             {session.running && (
               <div className="text-[10px] font-mono tracking-wider text-bone-400/70 text-center px-6">
                 KEEPS RUNNING IF YOU SWITCH TABS OR CLOSE THE APP
+                {!session.breakAfter && cur.id === 'work' && ' · NO BREAK AFTER THIS ONE'}
               </div>
             )}
           </div>
