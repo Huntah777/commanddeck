@@ -212,3 +212,104 @@ test.describe('the month', () => {
     await expect(monthCell(page, '2026-07-30').getByTestId('month-due')).toHaveText('2');
   });
 });
+
+/* A 24-hour view is mostly empty of anything you need right now — the
+   day timeline and the week grid both used to open scrolled to the top,
+   so "where am I" meant scrolling to go and find out. They should land
+   already there instead.
+
+   These read the container's real clientHeight rather than assuming a
+   pixel value, so they hold regardless of the test browser's actual
+   viewport — what's asserted is the RELATIONSHIP (a fifth of the way
+   down from the top of whatever's visible), not a specific number. */
+test.describe('landing on now, without scrolling to find it', () => {
+  const TIMELINE_HOUR_PX = 56;
+  const nowTopFor = (hh, mm) => ((hh * 60 + mm) / 60) * TIMELINE_HOUR_PX;
+  const scrollGeometry = (locator) => locator.evaluate(el => ({ scrollTop: el.scrollTop, clientHeight: el.clientHeight }));
+  const expectLandedOn = async (locator, hh, mm) => {
+    const { scrollTop, clientHeight } = await scrollGeometry(locator);
+    const expected = Math.max(0, nowTopFor(hh, mm) - clientHeight * 0.2);
+    expect(scrollTop).toBeGreaterThan(0);
+    expect(Math.abs(scrollTop - expected)).toBeLessThanOrEqual(2);
+  };
+
+  test('the day timeline opens already scrolled to now', async ({ page }) => {
+    await boot(page); // clock pinned at 2026-07-29T09:30:00 — today
+    await expectLandedOn(page.getByTestId('timeline-scroll'), 9, 30);
+  });
+
+  test('a day that is not today does not get scrolled to any "now" position', async ({ page }) => {
+    /* Seeding selectedDate directly to a non-today date isn't reachable
+       here: the Today tab always resets to the real today on load
+       (landToday) — the only way to a different day is to navigate
+       there, same as a real user would. Stepping to it must leave the
+       scroll exactly where it already was, not reset it to the top —
+       there is a "now" line only on today, so there is nothing for the
+       effect to do on any other day. */
+    await boot(page); // lands on today, already auto-scrolled
+    const scroller = page.getByTestId('timeline-scroll');
+    const { scrollTop: landed } = await scrollGeometry(scroller);
+    expect(landed).toBeGreaterThan(0);
+
+    await page.getByRole('button', { name: '‹', exact: true }).click(); // yesterday
+    expect(await scroller.evaluate(el => el.scrollTop)).toBe(landed);
+  });
+
+  test('stepping back to today re-triggers the landing', async ({ page }) => {
+    await boot(page);
+    const scroller = page.getByTestId('timeline-scroll');
+
+    await page.getByRole('button', { name: '‹', exact: true }).click(); // yesterday
+    await scroller.evaluate(el => { el.scrollTop = 5; }); // as if the user had scrolled around
+
+    await page.getByRole('button', { name: 'TODAY', exact: true }).click();
+    await expectLandedOn(scroller, 9, 30); // snaps back, overriding the manual scroll
+  });
+
+  test('a manual scroll survives an unrelated re-render', async ({ page }) => {
+    /* nowMin ticks every 30s while the app is open, and any other state
+       change re-renders the timeline too — neither should drag the view
+       back to "now" out from under someone who scrolled away on
+       purpose. Only a change of DAY does that. */
+    await boot(page);
+    const scroller = page.getByTestId('timeline-scroll');
+    await scroller.evaluate(el => { el.scrollTop = 5; });
+
+    await page.getByRole('button', { name: 'Tick Fajr in jama' }).first().click();
+    await page.waitForTimeout(150);
+
+    expect(await scroller.evaluate(el => el.scrollTop)).toBe(5);
+  });
+
+  test("the week grid lands on today's column the same way", async ({ page }) => {
+    await boot(page);
+    await scope(page, 'week');
+    await expectLandedOn(page.getByTestId('week-scroll'), 9, 30);
+  });
+
+  test('paging to a week without today leaves the scroll exactly where it was', async ({ page }) => {
+    /* The grid doesn't remount between weeks, so there is a real scroll
+       position to protect here — paging away must not reset it to the
+       top any more than it should drag it to some new "now" that isn't
+       on screen. Only landing on a week that DOES hold today acts on
+       the scroll at all. */
+    await boot(page);
+    await scope(page, 'week');
+    const scroller = page.getByTestId('week-scroll');
+    const { scrollTop: landed } = await scrollGeometry(scroller);
+    expect(landed).toBeGreaterThan(0); // sanity: this week did land on today
+
+    await page.getByTestId('period-next').click(); // 3–9 Aug — no "now" column in it
+    expect(await scroller.evaluate(el => el.scrollTop)).toBe(landed);
+  });
+
+  test('paging back to the week holding today re-triggers the landing', async ({ page }) => {
+    await boot(page);
+    await scope(page, 'week');
+    await page.getByTestId('period-next').click();
+    const scroller = page.getByTestId('week-scroll');
+
+    await page.getByTestId('period-today').click();
+    await expectLandedOn(scroller, 9, 30);
+  });
+});

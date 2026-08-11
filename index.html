@@ -250,7 +250,7 @@ tailwind.config = {
 <script src="/vendor/babel.min.js"></script>
 
 <script type="text/babel" data-presets="react">
-const { useState, useEffect, useMemo, useRef, useCallback } = React;
+const { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } = React;
 
 /* ------------------------------------------------------------------
    STORAGE  ─ Cloudflare D1 sync layer with localStorage as cache.
@@ -1337,6 +1337,29 @@ function layoutBlocks(blocks) {
     result[b.id] = { col: colMap[b.id], numCols };
   }
   return result;
+}
+
+/* Where "now" should land in a scrolled-to view — a fifth of the way
+   down, not centred, so most of what's visible is what's still coming
+   rather than what's already past. Shared by the day timeline and the
+   week grid so landing on today looks the same in both.
+
+   Called from a useLayoutEffect on mount, which is exactly why both
+   callers ALSO set overflowY as an inline style, duplicating their own
+   `overflow-y-auto` Tailwind class rather than relying on it alone:
+   Tailwind here is the in-browser JIT runtime (vendor/tailwind.min.js),
+   which scans the DOM and injects the actual CSS rule asynchronously,
+   after React's synchronous commit. A layout effect firing on that same
+   commit can land before the rule exists, and scrollTop on an element
+   that isn't scrollable yet (overflow still the default `visible`) is
+   silently ignored rather than queued — the assignment below would
+   appear to run and do nothing. An inline style is a real DOM attribute,
+   applied synchronously as part of the same mutation React just made, so
+   the element is genuinely scrollable by the time this runs. */
+const NOW_SCROLL_FRACTION = 0.2;
+function scrollToNow(el, nowTop) {
+  if (!el) return;
+  el.scrollTop = Math.max(0, nowTop - el.clientHeight * NOW_SCROLL_FRACTION);
 }
 
 /* ------------------------------------------------------------------
@@ -3087,6 +3110,22 @@ function Timeline({ state, setState, dow, dKey, sel }) {
   const nowTop  = ((nowMin - startHour*60) / 60) * HOUR_PX;
   const showNow = isToday && nowMin >= startHour*60 && nowMin <= endHour*60;
 
+  /* Land on "now" the moment today's timeline is what's on screen, rather
+     than leaving it to be found by scrolling — the whole point of a
+     24-hour view is that most of it is never where you need to be
+     looking. Keyed on dKey, not on nowMin: this must fire once when
+     today becomes the selected day (including landing back on it after
+     browsing elsewhere), and never again on its own — nowMin ticks every
+     30s while the app is open, and re-scrolling on every tick would drag
+     the view out from under anyone who had deliberately scrolled away to
+     read something else. useLayoutEffect so the jump happens before the
+     browser paints, not as a visible scroll after the timeline first
+     appears at the top. */
+  const scrollerRef = useRef(null);
+  useLayoutEffect(() => {
+    if (isToday) scrollToNow(scrollerRef.current, nowTop);
+  }, [dKey]);
+
   const blockTop = (b) => ((b.start - startHour*60) / 60) * HOUR_PX;
   /* blockHt itself is shared with layoutBlocks's overlap check (top of
      file) — same MIN_BLOCK_PX floor, so a short block's column and its
@@ -3173,7 +3212,7 @@ function Timeline({ state, setState, dow, dKey, sel }) {
         )}
       </div>
 
-      <div className="relative scrollbar overflow-y-auto" style={{ maxHeight: '72vh' }}>
+      <div ref={scrollerRef} data-testid="timeline-scroll" className="relative scrollbar overflow-y-auto" style={{ maxHeight: '72vh', overflowY: 'auto' }}>
         <div className="relative" style={{ height: hours * HOUR_PX + 24 }}>
 
           {/* Hour lines + click targets */}
@@ -3342,6 +3381,19 @@ function WeekCalendar({ state, setState, sel, setDate, onOpenDay }) {
   const now = new Date();
   const blockTop = (b) => (b.start / 60) * HOUR_PX;
 
+  /* Same landing-on-now behaviour as the day timeline, and the same
+     reasons for how it's keyed — see Timeline's own comment. Here it's
+     `weekId` rather than `dKey`: switching which DAY is selected inside
+     an already-open week (clicking another header) must not re-trigger
+     it, only paging to a different week (or opening the scope onto the
+     week that contains today) should. Only fires when today is actually
+     one of the seven columns on screen — a week with no "now" line has
+     nothing to scroll to. */
+  const scrollerRef = useRef(null);
+  useLayoutEffect(() => {
+    if (days.some(d => sameDay(d, now))) scrollToNow(scrollerRef.current, (nowMin/60)*HOUR_PX);
+  }, [weekId]);
+
   return (
     <div className="card overflow-hidden" data-testid="week-calendar">
 
@@ -3365,7 +3417,7 @@ function WeekCalendar({ state, setState, sel, setDate, onOpenDay }) {
         })}
       </div>
 
-      <div className="relative scrollbar overflow-y-auto" style={{ maxHeight: '68vh' }}>
+      <div ref={scrollerRef} data-testid="week-scroll" className="relative scrollbar overflow-y-auto" style={{ maxHeight: '68vh', overflowY: 'auto' }}>
         <div className="relative" style={{ height: hours * HOUR_PX + 24 }}>
 
           {/* Hour lines, labelled once down the gutter */}
