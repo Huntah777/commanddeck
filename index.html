@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
 <title>Madinah · Command Deck</title>
 <link rel="icon" type="image/svg+xml" href="command-deck-icon.svg" />
 
@@ -150,7 +150,14 @@ tailwind.config = {
 
   /* ── BASE ─────────────────────────────────────────────────────────── */
   html, body { background: var(--body-bg, var(--s0)); color: var(--f0); -webkit-font-smoothing: antialiased; }
-  body { font-family: 'Manrope', system-ui, sans-serif; }
+  body {
+    font-family: 'Manrope', system-ui, sans-serif;
+    /* Installed on iOS, the status bar is translucent-over-content (black-translucent),
+       so the app draws full-bleed under the Dynamic Island and, in landscape, under the
+       rounded/notch edge — pad the whole app rather than any one element. */
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
+  }
   .font-display { font-family: 'Fraunces', serif; font-optical-sizing: auto; }
   .font-mono { font-family: 'JetBrains Mono', monospace; }
 
@@ -2799,7 +2806,8 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
   ];
 
   return (
-    <header ref={hdrRef} className="sticky top-0 z-30 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700">
+    <header ref={hdrRef} className="sticky top-0 z-30 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700"
+      style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}>
       <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between gap-4 py-4">
           <div className="flex items-center gap-3 min-w-0">
@@ -5013,7 +5021,7 @@ function UnsplashCredit({ attribution }) {
   if (!attribution?.name) return null;
   const utm = 'utm_source=commanddeck&utm_medium=referral';
   return (
-    <div style={{ position:'fixed', bottom:10, right:12, zIndex:40, fontSize:11, color:'rgba(255,255,255,.75)', textShadow:'0 1px 3px rgba(0,0,0,.7)', fontFamily:'Manrope,sans-serif', pointerEvents:'auto' }}>
+    <div style={{ position:'fixed', bottom:'calc(10px + env(safe-area-inset-bottom, 0px))', right:'calc(12px + env(safe-area-inset-right, 0px))', zIndex:40, fontSize:11, color:'rgba(255,255,255,.75)', textShadow:'0 1px 3px rgba(0,0,0,.7)', fontFamily:'Manrope,sans-serif', pointerEvents:'auto' }}>
       Photo by{' '}
       <a href={`${attribution.profileUrl}?${utm}`} target="_blank" rel="noopener noreferrer" style={{ color:'inherit', fontWeight:700 }}>{attribution.name}</a>
       {' '}on{' '}
