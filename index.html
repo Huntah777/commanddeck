@@ -4963,7 +4963,7 @@ function AdminView({ state, setState, hydrate, theme, setTheme, background, chan
           the old page made you scroll back to the top to go anywhere. */}
       <div style={{ top: 'var(--header-h, 140px)' }}
         className="sticky z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-2 mb-5 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700">
-        <nav data-testid="admin-nav" className="flex gap-1.5 overflow-x-auto no-scrollbar">
+        <nav data-testid="admin-nav" className="flex gap-1.5 flex-wrap">
           {ADMIN_SECTIONS.map(s => (
             <button key={s.id} onClick={() => go(s.id)}
               aria-current={tab === s.id ? 'page' : undefined}
