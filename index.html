@@ -4724,6 +4724,39 @@ const STAT_RANGES = [
   { value: 730, label: '2yr' },
 ];
 
+/* One bar per day while that is still readable, one per week beyond it.
+   Shared by both charts on this page rather than each rolling its own:
+   they sit side by side under a single range selector, so a bar in one
+   has to mean the same span of time as a bar in the other.
+
+   Oldest bucket first, each carrying the date keys it covers — the
+   callers differ in what they aggregate (a percentage, a count), not in
+   how the window is cut up. */
+const CHART_DAILY_MAX = 60;
+function rangeBuckets(range, today = new Date()) {
+  const out = [];
+  if (range <= CHART_DAILY_MAX) {
+    for (let i = range - 1; i >= 0; i--) {
+      const k = fmtKey(addDays(today, -i));
+      out.push({ k, days: [k] });
+    }
+    return out;
+  }
+  const weeks = Math.ceil(range / 7);
+  for (let w = weeks - 1; w >= 0; w--) {
+    const days = [];
+    for (let d = 0; d < 7; d++) {
+      const offset = w * 7 + d;
+      /* The oldest week is a partial one whenever the range isn't a
+         whole number of weeks — count only the days inside it. */
+      if (offset >= range) continue;
+      days.push(fmtKey(addDays(today, -offset)));
+    }
+    out.push({ k: fmtKey(addDays(today, -(w * 7))), days });
+  }
+  return out;
+}
+
 /* The numbers half of Admin. Reads state; changes nothing about it. */
 function AdminOverview({ state, syncStatus, onSyncNow }) {
   const [statsRange, setStatsRange] = useState(30);
@@ -4743,36 +4776,19 @@ function AdminOverview({ state, syncStatus, onSyncNow }) {
     });
   }, [state.logs, state.habits, statsRange]);
 
-  /* Habit completion chart: daily bars for ≤60 days, weekly buckets above that */
-  const habitHistory = useMemo(() => {
-    const today = new Date();
-    if (statsRange <= 60) {
-      const out = [];
-      for (let i = statsRange - 1; i >= 0; i--) {
-        const d = addDays(today, -i); const k = fmtKey(d);
-        const hs = state.habits.filter(h => h.days.includes(d.getDay()));
-        const log = state.logs[k] || {};
-        out.push({ k, pct: hs.length ? hs.filter(h => log[h.id]).length / hs.length : 0 });
-      }
-      return out;
+  /* Habit completion chart — the average of each bucket's days, ignoring
+     days with nothing scheduled so a rest day can't read as a failure. */
+  const habitHistory = useMemo(() => rangeBuckets(statsRange).map(b => {
+    let sum = 0, count = 0;
+    for (const k of b.days) {
+      const hs = state.habits.filter(h => h.days.includes(parseKey(k).getDay()));
+      if (!hs.length) continue;
+      const log = state.logs[k] || {};
+      sum += hs.filter(h => log[h.id]).length / hs.length;
+      count++;
     }
-    /* Weekly buckets */
-    const weeks = Math.ceil(statsRange / 7);
-    const out = [];
-    for (let w = weeks - 1; w >= 0; w--) {
-      let sum = 0, count = 0;
-      for (let d = 0; d < 7; d++) {
-        const offset = w * 7 + d;
-        if (offset >= statsRange) continue;
-        const date = addDays(today, -offset);
-        const hs = state.habits.filter(h => h.days.includes(date.getDay()));
-        const log = state.logs[fmtKey(date)] || {};
-        if (hs.length) { sum += hs.filter(h => log[h.id]).length / hs.length; count++; }
-      }
-      out.push({ k: fmtKey(addDays(today, -(w * 7))), pct: count ? sum / count : 0 });
-    }
-    return out;
-  }, [state.logs, state.habits, statsRange]);
+    return { k: b.k, pct: count ? sum / count : 0 };
+  }), [state.logs, state.habits, statsRange]);
 
   /* Per-habit completion over selected range */
   const habitStats = useMemo(() => {
@@ -4789,21 +4805,52 @@ function AdminOverview({ state, syncStatus, onSyncNow }) {
     }).filter(s => s.scheduled > 0).sort((a, b) => b.pct - a.pct);
   }, [state.logs, state.habits, statsRange]);
 
-  /* tasks done by day for 14 days */
-  const tasksByDay = useMemo(() => {
-    const out = {}; const today = new Date();
-    for (let i = 13; i >= 0; i--) { const k = fmtKey(addDays(today, -i)); out[k] = 0; }
-    state.tasks.forEach(t => {
-      if (t.done && t.doneAt) {
-        const k = fmtKey(new Date(t.doneAt));
-        if (k in out) out[k]++;
-      }
-    });
-    return Object.entries(out).map(([k,v]) => ({ k, v }));
-  }, [state.tasks]);
+  /* ── Task throughput ────────────────────────────────────────────
+     Scoped to the selected range, like every other card here. It used
+     to report an all-time done/open pair over a fixed 14-day chart,
+     which answered no question worth asking: a lifetime "done" total
+     only ever goes up, and a bare "open" count can't tell a backlog
+     built this week from one that has been rotting since spring.
 
-  const totalDone = state.tasks.filter(t=>t.done).length;
-  const totalOpen = state.tasks.filter(t=>!t.done).length;
+     What replaces it is flow. How much closed in this window, how much
+     opened against it, and therefore whether the pile is shrinking —
+     plus how much of what's still open predates the window entirely,
+     which is the specific thing a count on its own hides. ── */
+  const flow = useMemo(() => rangeBuckets(statsRange).map(b => {
+    const on = (pick) => state.tasks.filter(t => {
+      const ms = pick(t);
+      return Number.isFinite(ms) && b.days.includes(fmtKey(new Date(ms)));
+    }).length;
+    return { k: b.k, closed: on(t => t.done ? t.doneAt : NaN), opened: on(t => t.created) };
+  }), [state.tasks, statsRange]);
+
+  const throughput = useMemo(() => {
+    const today = new Date();
+    const todayK = fmtKey(today);
+    /* Midnight local at the start of the window. Derived from the same
+       date key the buckets use, so the totals and the bars can never
+       disagree about which side of the boundary a task falls on. */
+    const sinceMs = parseKey(fmtKey(addDays(today, -(statsRange - 1)))).getTime();
+    const since = (ms) => Number.isFinite(ms) && ms >= sinceMs;
+
+    const open   = state.tasks.filter(t => !t.done);
+    const closed = state.tasks.filter(t => t.done && since(t.doneAt)).length;
+    const opened = state.tasks.filter(t => since(t.created)).length;
+
+    return {
+      closed, opened,
+      net: closed - opened,
+      open: open.length,
+      /* The "these are all from six months ago" pile, named. */
+      carried: open.filter(t => Number.isFinite(t.created) && t.created < sinceMs).length,
+      overdue: open.filter(t => t.due && t.due < todayK).length,
+      perWeek: closed / Math.max(1, statsRange / 7),
+    };
+  }, [state.tasks, statsRange]);
+
+  /* One decimal only where it says something — "4.3 a week" is a rate,
+     "12.0" is just noise. */
+  const fmtRate = (n) => n >= 10 ? String(Math.round(n)) : String(Math.round(n * 10) / 10);
 
   const rangeLabel = STAT_RANGES.find(r => r.value === statsRange)?.label ?? `${statsRange}d`;
 
@@ -4862,28 +4909,62 @@ function AdminOverview({ state, syncStatus, onSyncNow }) {
           </div>
         </div>
 
-        <div className="card p-5">
+        <div className="card p-5" data-testid="throughput">
           <div className="flex items-end justify-between mb-4">
             <div>
-              <div className="text-[10px] font-mono tracking-widest text-strategy">TASKS</div>
+              <div className="text-[10px] font-mono tracking-widest text-strategy">{rangeLabel.toUpperCase()} · {statsRange > CHART_DAILY_MAX ? 'WEEKLY' : 'DAILY'}</div>
               <div className="font-display text-xl text-bone-100 mt-1">Throughput</div>
             </div>
             <div className="text-right">
-              <div className="font-mono text-xs text-bone-400">DONE / OPEN</div>
-              <div className="font-display text-2xl text-bone-100 leading-none">{totalDone} <span className="text-bone-400 text-lg">/</span> {totalOpen}</div>
+              <div className="font-mono text-xs text-bone-400">CLOSED / WEEK</div>
+              <div data-testid="throughput-rate" className="font-display text-2xl text-bone-100 leading-none">{fmtRate(throughput.perWeek)}</div>
             </div>
           </div>
-          <div className="flex items-end gap-1 h-32">
-            {tasksByDay.map(d => {
-              const max = Math.max(1, ...tasksByDay.map(x=>x.v));
+
+          {/* Opened sits behind closed, both to the same scale — where the
+              dim bar shows above the solid one, that bucket took on more
+              than it finished. */}
+          <div className="flex items-end gap-px h-32">
+            {flow.map(d => {
+              const max = Math.max(1, ...flow.map(x => Math.max(x.closed, x.opened)));
+              const h = (v) => `${(v / max) * 100}%`;
               return (
-                <div key={d.k} className="flex-1 flex flex-col items-center gap-1 group" title={`${d.k}: ${d.v} done`}>
-                  <div className="w-full rounded-t-sm bg-tech transition-all"
-                    style={{ height: `${(d.v/max)*100 || 2}%` }}/>
-                  <div className="font-mono text-[9px] text-bone-400">{d.k.slice(-2)}</div>
+                <div key={d.k} className="relative flex-1 min-w-0 h-full"
+                  title={`${d.k}: ${d.closed} closed, ${d.opened} opened`}>
+                  <div className="absolute bottom-0 inset-x-0 rounded-t-sm" style={{ height: h(d.opened), background: '#2a2a31' }}/>
+                  <div className="absolute bottom-0 inset-x-0 rounded-t-sm transition-all" style={{ height: h(d.closed), background: '#22d3ee' }}/>
                 </div>
               );
             })}
+          </div>
+          <div className="flex justify-between mt-2 font-mono text-[10px] text-bone-400">
+            <span>{flow[0]?.k.slice(5)}</span>
+            <span>{flow[flow.length-1]?.k.slice(5)}</span>
+          </div>
+
+          {/* Did the pile get smaller? The one thing a done/open pair
+              could never answer. */}
+          <div className="mt-3 pt-3 border-t border-ink-700 flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-3 font-mono text-[11px]">
+              <span className="flex items-center gap-1.5 text-bone-300">
+                <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: '#22d3ee' }}/>
+                {throughput.closed} closed
+              </span>
+              <span className="flex items-center gap-1.5 text-bone-300">
+                <span className="w-2 h-2 rounded-sm shrink-0" style={{ background: '#2a2a31' }}/>
+                {throughput.opened} opened
+              </span>
+            </div>
+            <span data-testid="throughput-net" className="font-mono text-[11px]"
+              style={{ color: throughput.net > 0 ? '#10b981' : throughput.net < 0 ? '#f59e0b' : '#9a9788' }}>
+              {throughput.net > 0 ? `↓ ${throughput.net} off the pile` : throughput.net < 0 ? `↑ ${-throughput.net} onto the pile` : 'holding level'}
+            </span>
+          </div>
+
+          <div data-testid="throughput-backlog" className="mt-2 text-[11px] text-bone-400">
+            {throughput.open} still open
+            {throughput.carried > 0 && <> · <span className="text-strategy">{throughput.carried} older than this window</span></>}
+            {throughput.overdue > 0 && <> · <span className="text-combat">{throughput.overdue} overdue</span></>}
           </div>
         </div>
       </div>
