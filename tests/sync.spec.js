@@ -58,7 +58,10 @@ async function boot(page) {
   await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
 }
 
-const habitRow  = (page) => page.locator('button').filter({ hasText: 'Read Quran' }).first();
+/* Specifically the checklist's row, not the agenda's habit chip — both
+   toggle the same habit, but only the row carries the .tick element
+   this reads its state from. */
+const habitRow  = (page) => page.getByTestId('checklist-habit').filter({ hasText: 'Read Quran' }).getByRole('button').first();
 const isTicked  = (page) => habitRow(page).locator('.tick.on').count().then(n => n > 0);
 
 test.describe('multi-device sync', () => {

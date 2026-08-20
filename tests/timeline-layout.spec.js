@@ -15,7 +15,13 @@ const DAILY = [0,1,2,3,4,5,6];
 const block = (id, start, end, title = id) => ({ id, title, pillar: 'tech', start, end, every: DAILY });
 
 const boot = async (page, blocks) => {
-  await page.addInitScript((s) => localStorage.setItem('madinah_v1', JSON.stringify(s)), {
+  /* These exercise the proportional hour grid specifically, which is no
+     longer what the Today tab opens on — say so rather than relying on a
+     default that has since moved. */
+  await page.addInitScript((s) => {
+    localStorage.setItem('madinah_today_scope_v1', 'day');
+    localStorage.setItem('madinah_v1', JSON.stringify(s));
+  }, {
     habits: [], tasks: [], blocks, logs: {}, people: [], pomodoroLogs: [],
     lists: [{ id: 'l-inbox', name: 'Inbox', color: '#9a9788' }],
     ui: { view: 'today', selectedDate: '2026-07-29' },

@@ -304,10 +304,16 @@ const UiLocal = {
    worth pushing to the phone. Kept out of state.ui entirely so it can
    never be dragged around by a sync merge. */
 const TODAY_SCOPE_KEY = 'madinah_today_scope_v1';
-const TODAY_SCOPES = ['day', 'week', 'month'];
+/* `agenda` is the day as a list of what actually happens, gaps
+   summarised in a line rather than drawn to scale; `day` is the same
+   day as a proportional hour grid. Both are one day — they differ in
+   whether empty time takes up empty space. The agenda is first because
+   it is the one worth opening on: a 24-hour grid is mostly a scroll
+   past nothing. */
+const TODAY_SCOPES = ['agenda', 'day', 'week', 'month'];
 const readTodayScope = () => {
-  try { const v = localStorage.getItem(TODAY_SCOPE_KEY); return TODAY_SCOPES.includes(v) ? v : 'day'; }
-  catch { return 'day'; }
+  try { const v = localStorage.getItem(TODAY_SCOPE_KEY); return TODAY_SCOPES.includes(v) ? v : 'agenda'; }
+  catch { return 'agenda'; }
 };
 const writeTodayScope = (scope) => { try { localStorage.setItem(TODAY_SCOPE_KEY, scope); } catch {} };
 
@@ -674,6 +680,17 @@ const todayKey = () => fmtKey(new Date());
 /* Convert minutes from midnight ↔ "HH:MM" */
 const toHM = (mins) => `${String(Math.floor(mins/60)).padStart(2,'0')}:${String(mins%60).padStart(2,'0')}`;
 const fromHM = (s) => { const [h,m] = s.split(':').map(Number); return (h||0)*60 + (m||0); };
+
+/* A span of minutes, said the way a person would: "25 min", "1h 30m",
+   "3h". Used wherever a duration is shown as prose rather than as a
+   position on a grid — the agenda's block lengths and its free-time
+   gaps. */
+const durLabel = (mins) => {
+  const m = Math.max(0, Math.round(mins));
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60), rest = m % 60;
+  return rest ? `${h}h ${rest}m` : `${h}h`;
+};
 
 /* ── WEEK AND MONTH GEOMETRY ──────────────────────────────────────
    Day-of-week indices stay JS-native everywhere else in the app — 0 is
@@ -1344,6 +1361,53 @@ function layoutBlocks(blocks) {
     result[b.id] = { col: colMap[b.id], numCols };
   }
   return result;
+}
+
+/* ------------------------------------------------------------------
+   THE DAY AS A LIST
+   ------------------------------------------------------------------
+   The agenda's arrangement, as against the hour grid's. A grid draws
+   empty time to scale, so a day with four things in it is mostly a
+   scroll past nothing; a list drops the empty space and says what was
+   in it instead — "3h 5m free" is both shorter and more use than three
+   hours of blank rows.
+
+   Rows come out in the order they are drawn: blocks, the gaps between
+   them, and the current moment sitting wherever it falls. Kept as a
+   pure function of (items, nowMin) so the arithmetic that decides
+   what's a gap can be tested without a browser.
+------------------------------------------------------------------- */
+/* Below this, a gap is just the join between two things rather than
+   time you could actually use. */
+const AGENDA_GAP_MIN = 15;
+
+function agendaRows(items, nowMin = null) {
+  const sorted = [...items].sort((a, b) => a.start - b.start || a.end - b.end);
+  const rows = [];
+  /* How far into the day everything so far reaches. Overlapping blocks
+     move it forward but never back, so two things booked over each
+     other don't invent a gap between them. */
+  let covered = null;
+
+  for (const b of sorted) {
+    if (covered != null && b.start - covered >= AGENDA_GAP_MIN) {
+      rows.push({ kind: 'gap', id: `gap-${covered}`, start: covered, end: b.start });
+    }
+    rows.push({ kind: 'block', id: b.id, block: b });
+    /* A block whose end is at or before its start crosses midnight — it
+       reaches the end of this day, not backwards into it. */
+    covered = Math.max(covered ?? 0, b.end > b.start ? b.end : 1440);
+  }
+
+  if (nowMin == null) return rows;
+
+  /* "Now" goes after everything already under way or finished. Placed
+     by start time rather than spliced by index so an overlapping pair
+     can't put it in the middle of themselves. */
+  const at = rows.findIndex(r => (r.kind === 'gap' ? r.start : r.block.start) > nowMin);
+  const marker = { kind: 'now', id: 'now', start: nowMin };
+  if (at === -1) rows.push(marker); else rows.splice(at, 0, marker);
+  return rows;
 }
 
 /* Where "now" should land in a scrolled-to view — a fifth of the way
@@ -2919,7 +2983,10 @@ function TodayView({ state, setState }) {
   /* Tapping a day anywhere in the week or month grid means "show me this
      day" — select it AND zoom in, rather than leaving you to find the
      scope switch yourself. */
-  const openDay  = (k) => { setDate(k); setScope('day'); };
+  /* Tapping a day in the week or month grid opens the agenda, not the
+     hour grid — "show me this day" means what is on it, and the agenda
+     answers that in a screen where the grid needs scrolling. */
+  const openDay  = (k) => { setDate(k); setScope('agenda'); };
 
   const habitsToday = state.habits.filter(h => h.days.includes(dow));
   const log = state.logs[dKey] || {};
@@ -2953,9 +3020,10 @@ function TodayView({ state, setState }) {
   const tasksToday = state.tasks.filter(t => !t.done && (!t.due || t.due === dKey || bookedToday.has(t.id)));
   const overdue    = state.tasks.filter(t => !t.done && t.due && t.due < dKey && !bookedToday.has(t.id));
 
-  const wide = scope !== 'day';
+  const wide = scope === 'week' || scope === 'month';
   const heading = {
-    day:   { title: 'The day, blocked',  sub: 'Structured-style timeline · click an hour to drop a block' },
+    agenda:{ title: 'The day, in order', sub: 'What happens, and how long is free between · tap to edit' },
+    day:   { title: 'The day, blocked',  sub: 'Proportional hour grid · click an hour to drop a block' },
     week:  { title: 'The week, blocked', sub: 'Seven days side by side · tap a date to open it' },
     month: { title: 'The month, mapped', sub: 'Blocks, habits and due tasks per day · tap a day to open it' },
   }[scope];
@@ -2982,6 +3050,13 @@ function TodayView({ state, setState }) {
             <ScopeSwitch scope={scope} setScope={setScope}/>
           </div>
         </div>
+        {/* The week is always in reach on the one-day scopes — on week
+            and month the grid itself already is the date picker. */}
+        {!wide && <WeekStrip state={state} sel={sel} setDate={setDate}/>}
+        {scope === 'agenda' && <>
+          <HabitChips habits={habitsToday} log={log} toggle={toggleHabit} state={state}/>
+          <AgendaTimeline state={state} setState={setState} dow={dow} dKey={dKey} sel={sel}/>
+        </>}
         {scope === 'day'   && <Timeline state={state} setState={setState} dow={dow} dKey={dKey} sel={sel}/>}
         {scope === 'week'  && <WeekCalendar state={state} setState={setState} sel={sel} setDate={setDate} onOpenDay={openDay}/>}
         {scope === 'month' && <MonthCalendar state={state} sel={sel} onOpenDay={openDay}/>}
@@ -3058,7 +3133,385 @@ function EmptyHint({ text }) {
 }
 
 /* ------------------------------------------------------------------
-   TIMELINE  (Structured-style vertical day plan)
+   WEEK STRIP  ─ the seven days, always in reach
+   ------------------------------------------------------------------
+   The header's ‹ › arrows move a day at a time and tell you nothing
+   about the days either side. This is the whole week at a glance, with
+   how much of each day's habits got done under the date, so "which day
+   did I drop it" is answerable without visiting seven days.
+------------------------------------------------------------------- */
+function WeekStrip({ state, sel, setDate }) {
+  const days = useMemo(() => weekDays(sel), [fmtKey(startOfWeek(sel))]);
+  const now = new Date();
+
+  return (
+    <div className="card-soft p-1.5 mb-3 flex" data-testid="week-strip">
+      {days.map(d => {
+        const k = fmtKey(d);
+        const isSel   = sameDay(d, sel);
+        const isToday = sameDay(d, now);
+        const hs  = state.habits.filter(h => h.days.includes(d.getDay()));
+        const log = state.logs[k] || {};
+        const pct = hs.length ? hs.filter(h => log[h.id]).length / hs.length : null;
+        return (
+          <button key={k} onClick={() => setDate(k)}
+            data-testid="week-strip-day" data-date={k} aria-current={isSel ? 'date' : undefined}
+            aria-label={`${DAY_NAMES[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}`}
+            className="btn flex-1 min-w-0 flex flex-col items-center gap-1 py-1.5 rounded-lg hover:bg-ink-800/50">
+            <span className="font-mono text-[9px] tracking-widest text-bone-400">{DAY_SHORT[d.getDay()].toUpperCase()}</span>
+            <span className={`w-8 h-8 rounded-full flex items-center justify-center font-display text-base leading-none
+              ${isSel ? 'bg-strategy text-ink-950 font-semibold' : isToday ? 'text-strategy' : 'text-bone-100'}`}>
+              {d.getDate()}
+            </span>
+            <span className="h-1 w-6 rounded-full bg-ink-700 overflow-hidden"
+              title={pct == null ? 'No habits scheduled' : `${Math.round(pct*100)}% of habits done`}>
+              {pct != null && <span className="block h-full rounded-full" style={{ width: `${pct*100}%`, background: '#10b981' }}/>}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+   HABIT CHIPS  ─ the day's habits as one tappable row
+   ------------------------------------------------------------------
+   The checklist in the third column is the place to read habits in
+   detail; this is the place to tick one off without going to find it.
+   Deliberately the same write (`toggle`) as the checklist and the
+   timeline block, so a habit ticked here is ticked everywhere.
+------------------------------------------------------------------- */
+function HabitChips({ habits, log, toggle, state }) {
+  if (!habits.length) return null;
+  return (
+    <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1 mb-3" data-testid="habit-chips">
+      {habits.map(h => {
+        const p  = pillarByIdFromState(h.pillar, state);
+        const on = !!log[h.id];
+        return (
+          <button key={h.id} onClick={() => toggle(h.id)}
+            data-testid="habit-chip" aria-pressed={on}
+            aria-label={`${on ? 'Untick' : 'Tick'} ${h.name}`}
+            className="btn shrink-0 flex flex-col items-center gap-1.5" style={{ width: 72 }}>
+            <span className="w-12 h-12 rounded-full flex items-center justify-center border-2 transition-all"
+              style={on
+                ? { background: p.color, borderColor: p.color }
+                : { background: `${p.color}14`, borderColor: `${p.color}55` }}>
+              {on
+                ? <I.check className="w-5 h-5" style={{ color: '#0a0a0b' }}/>
+                : <I.flame className="w-5 h-5" style={{ color: p.color }}/>}
+            </span>
+            {/* Two lines, then ellipsis — "Sunnah Rawatib" should not
+                become "Sunnah…" for want of one more line. */}
+            <span className={`text-[10px] leading-tight text-center ${on ? 'text-bone-100' : 'text-bone-400'}`}
+              style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+              {h.name}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+   AGENDA  ─ the day as a list
+   ------------------------------------------------------------------
+   Same blocks, same salah, same ticks as the hour grid below — this is
+   a second drawing of one day's data, not a second copy of it. What it
+   changes is that empty time stops taking up room: the gaps between
+   things are stated ("3h 5m free") rather than scrolled through, which
+   is what makes a whole day fit on a phone screen.
+------------------------------------------------------------------- */
+const agendaGlyph = (b) => b.isSalah ? null : b.habitId ? I.flame : b.taskId ? I.list : I.clock;
+
+function AgendaTimeline({ state, setState, dow, dKey, sel }) {
+  const blocks = useMemo(
+    () => resolveBlocks(state).filter(b => blockOnDay(b, dKey, dow)),
+    [state.blocks, state.habits, state.tasks, dKey, dow]);
+  const log = state.logs[dKey] || {};
+
+  const salah = useDaySalah(state, setState, dKey);
+  const salahBlocks = salah.salahBlocks;
+
+  const toggleHabit = (id) => setState(s => {
+    const on = (s.logs[dKey] || {})[id];
+    const at = Date.now();
+    const logs    = { ...(s.logs[dKey]      || {}) };
+    const logsOff = { ...(s.logsOff?.[dKey] || {}) };
+    if (on) { delete logs[id]; logsOff[id] = at; }
+    else    { logs[id] = at;   delete logsOff[id]; }
+    return { ...s, logs: { ...s.logs, [dKey]: logs }, logsOff: { ...(s.logsOff || {}), [dKey]: logsOff } };
+  });
+  const toggleTask = (id) => setState(s => toggleTaskDone(s, id));
+
+  const [nowMin, setNowMin] = useState(() => { const n = new Date(); return n.getHours()*60 + n.getMinutes(); });
+  useEffect(() => {
+    const t = setInterval(() => { const n = new Date(); setNowMin(n.getHours()*60 + n.getMinutes()); }, 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  const isToday = sameDay(sel, new Date());
+  const rows = useMemo(
+    () => agendaRows([...blocks, ...salahBlocks], isToday ? nowMin : null),
+    [blocks, salahBlocks, isToday, nowMin]);
+
+  const [editing, setEditing] = useState(null);
+  const [adding,  setAdding]  = useState(null);
+
+  /* Land on the current moment, same as the hour grid does — see
+     scrollToNow for why the overflow is also an inline style. */
+  const scrollerRef = useRef(null);
+  const nowRef = useRef(null);
+  useLayoutEffect(() => {
+    const el = scrollerRef.current, marker = nowRef.current;
+    if (!el || !marker) return;
+    el.scrollTop = Math.max(0, marker.offsetTop - el.clientHeight * NOW_SCROLL_FRACTION);
+  }, [dKey]);
+
+  const done = (b) => b.habitId ? !!log[b.habitId] : b.taskId ? !!b.done : false;
+
+  return (
+    <div className="card overflow-hidden" data-testid="agenda">
+      <SalahStrip salah={salah}/>
+      <div ref={scrollerRef} className="scrollbar" style={{ maxHeight: '72vh', overflowY: 'auto' }}>
+        {/* Emptiness is about whether anything is BOOKED, not whether
+            there are rows — on today there is always at least the now
+            marker, and a day showing only a red line is not a day that
+            has told you anything. */}
+        {!rows.some(r => r.kind === 'block') ? (
+          <div className="p-6 text-center">
+            <div className="text-sm text-bone-400 italic">Nothing blocked in for this day.</div>
+            <button onClick={()=>setAdding({ start: 9*60, end: 10*60 })}
+              className="btn mt-3 px-3 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm hover:bg-ink-800">
+              Block out some time
+            </button>
+          </div>
+        ) : (
+          <div className="p-3">
+            {rows.map((r, i) => {
+              const last = i === rows.length - 1;
+
+              if (r.kind === 'now') return (
+                <div key={r.id} ref={nowRef} data-testid="agenda-now" className="flex items-center gap-3 py-1">
+                  <div className="w-10 shrink-0 text-right font-mono text-[10px] font-semibold" style={{ color: '#ef4444' }}>
+                    {toHM(r.start)}
+                  </div>
+                  <div className="w-11 flex justify-center shrink-0">
+                    <span className="w-2.5 h-2.5 rounded-full" style={{ background: '#ef4444', boxShadow: '0 0 0 4px rgba(239,68,68,.18)' }}/>
+                  </div>
+                  <div className="flex-1 h-px" style={{ background: 'linear-gradient(90deg, #ef4444, rgba(239,68,68,0))' }}/>
+                </div>
+              );
+
+              if (r.kind === 'gap') return (
+                <div key={r.id} data-testid="agenda-gap" className="flex items-stretch gap-3">
+                  <div className="w-10 shrink-0"/>
+                  <div className="w-11 flex justify-center shrink-0">
+                    <span className="w-px" style={{ borderLeft: '1px dashed #2a2a31' }}/>
+                  </div>
+                  <div className="flex-1 min-w-0 py-2 flex items-center gap-1.5 font-mono text-[11px] text-bone-400">
+                    <I.clock className="w-3.5 h-3.5 shrink-0"/>
+                    {durLabel(r.end - r.start)} free
+                  </div>
+                </div>
+              );
+
+              const b = r.block;
+              const p = b.isSalah ? { color: '#10b981', name: 'Salah' } : blockAccent(b, state);
+              const Glyph = agendaGlyph(b);
+              const isDone = done(b);
+              const tickable = !b.isSalah && (b.habitId || b.taskId);
+
+              return (
+                <div key={r.id} data-testid="agenda-row" data-done={isDone ? '1' : undefined}
+                  className="flex items-stretch gap-3">
+                  <div className="w-10 shrink-0 text-right font-mono text-[10px] text-bone-400 pt-3.5">{toHM(b.start)}</div>
+
+                  {/* Bubble, and the line joining it to whatever is next */}
+                  <div className="w-11 shrink-0 flex flex-col items-center">
+                    <span className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
+                      style={{ background: isDone ? `${p.color}33` : p.color }}>
+                      {Glyph
+                        ? <Glyph className="w-5 h-5" style={{ color: isDone ? p.color : '#0a0a0b' }}/>
+                        : <span className="text-lg leading-none" style={{ color: isDone ? p.color : '#0a0a0b' }}>☽</span>}
+                    </span>
+                    {!last && <span className="flex-1 w-px my-1" style={{ background: '#2a2a31' }}/>}
+                  </div>
+
+                  <button onClick={()=>{ if (!b.isSalah) setEditing(b); }}
+                    disabled={b.isSalah}
+                    className={`flex-1 min-w-0 text-left pb-3 pt-2.5 ${b.isSalah ? 'cursor-default' : ''}`}>
+                    <div className="font-mono text-[10px] text-bone-400 flex items-center gap-1.5 flex-wrap">
+                      <span>{toHM(b.start)}–{toHM(b.end)}</span>
+                      <span className="text-bone-400/70">({durLabel(b.end > b.start ? b.end - b.start : (1440 - b.start) + b.end)})</span>
+                      {b.habitId && <I.refresh className="w-3 h-3 shrink-0" title="Repeats"/>}
+                    </div>
+                    <div className={`text-[15px] font-semibold leading-snug truncate ${isDone ? 'text-bone-400 line-through' : 'text-bone-100'}`}>
+                      {b.title}
+                    </div>
+                    <div className="text-[10px] font-mono tracking-wider uppercase mt-0.5" style={{ color: p.color }}>
+                      {b.isSalah ? b.subtitle : b.habitId ? `${p.name} · habit` : b.taskId ? `${p.name} · task` : p.name}
+                    </div>
+                  </button>
+
+                  {tickable && (
+                    <button onClick={()=>b.habitId ? toggleHabit(b.habitId) : toggleTask(b.taskId)}
+                      aria-label={`${isDone ? 'Untick' : 'Tick'} ${b.title}`}
+                      className="btn shrink-0 self-start pt-3.5 pr-1">
+                      <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all"
+                        style={isDone
+                          ? { background: p.color, borderColor: p.color }
+                          : { borderColor: '#2a2a31' }}>
+                        {isDone && <I.check className="w-3.5 h-3.5" style={{ color: '#0a0a0b' }}/>}
+                      </span>
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+
+            <div className="flex gap-3 pt-1">
+              <div className="w-10 shrink-0"/>
+              <button onClick={()=>setAdding({ start: 9*60, end: 10*60 })} data-testid="agenda-add"
+                className="btn flex-1 flex items-center gap-2 px-2 py-2 rounded-lg border border-dashed border-ink-600 text-bone-400 hover:bg-ink-800/50 text-sm">
+                <I.plus className="w-4 h-4"/> Block out some time
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {(editing || adding) && (
+        <BlockModal
+          block={editing} adding={adding} state={state}
+          onClose={()=>{ setEditing(null); setAdding(null); }}
+          onSave={(b)=>{ setState(s => upsertBlock(s, b)); setEditing(null); setAdding(null); }}
+          onDelete={(id)=>{ setState(s => removeBlock(s, id)); setEditing(null); }}
+          currentDow={dow}
+        />
+      )}
+    </div>
+  );
+}
+
+/* The day's prayer times, wired to state. One call per view: every view
+   that shows salah needs both the blocks (to draw) and the strip's
+   controls (to fix a missing location), and useSalahTimes called twice
+   in one view fetches the same month twice. */
+function useDaySalah(state, setState, dKey) {
+  const offsets = useMemo(() => salahOffsets(state.ui), [state.ui.salahOffsets]);
+  const onConfirmed = useCallback(
+    loc => setState(s => ({ ...s, ui: { ...s.ui, salahLoc: loc } })), [setState]);
+  return useSalahTimes(dKey, state.ui.salahMethod ?? 3, state.ui.salahSchool ?? 0,
+                       state.ui.salahLoc ?? null, offsets, onConfirmed);
+}
+
+/* ------------------------------------------------------------------
+   SALAH STRIP  ─ today's prayer times, and the controls behind them
+   ------------------------------------------------------------------
+   Lifted out of the hour grid so it can sit above whichever drawing of
+   the day is on screen. It is not a feature of the grid: it owns the
+   location prompt, the retry and the manual-coordinate fallback, and a
+   device that has never set a location has no other route to any of
+   them. Left inside the grid, defaulting the Today tab to the agenda
+   would have quietly hidden the only way to load prayer times at all.
+------------------------------------------------------------------- */
+function SalahStrip({ salah }) {
+  const [showManual, setShowManual] = useState(false);
+  const [manualLat,  setManualLat]  = useState('');
+  const [manualLon,  setManualLon]  = useState('');
+
+  /* Handed the hook's result rather than calling it — see useDaySalah.
+     A view needs both these controls and the blocks themselves, and
+     useSalahTimes called twice in one view fetches the month twice. */
+  const { salahBlocks, location, status: salahStatus, resyncLocation, setManualLocation, retry: retrySalah } = salah;
+  const salahBusy   = salahStatus.state === 'loading' || salahStatus.state === 'locating';
+  const salahFailed = salahStatus.state === 'error';
+
+  return (
+    <div className="border-b border-ink-700">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 flex-wrap">
+        <div className="flex items-center gap-3 flex-wrap min-w-0">
+          <span className="text-[10px] font-mono tracking-widest text-deen shrink-0">SALAH</span>
+          {salahBusy && (
+            <span className="text-[10px] font-mono text-bone-400 animate-pulse">
+              {salahStatus.state === 'locating' ? 'locating…' : 'fetching…'}
+            </span>
+          )}
+          {salahFailed && !showManual && (
+            <span className="text-[10px] font-mono text-combat">{salahStatus.message || 'Salah times unavailable'}</span>
+          )}
+          {!salahBusy && !salahFailed && salahBlocks.length === 0 && !location && (
+            <span className="text-[10px] font-mono text-bone-400">— tap to load prayer times</span>
+          )}
+          {salahBlocks.map(s => (
+            <span key={s.id} className="text-[10px] font-mono text-bone-300 whitespace-nowrap">
+              {s.title} <span className="text-deen">{toHM(s.start)}</span>
+            </span>
+          ))}
+          {/* Say plainly whether these times are confirmed, and how old they
+              are — "fetching…" that silently stopped told you nothing. */}
+          {!salahBusy && salahBlocks.length > 0 && (
+            <span className={`text-[10px] font-mono whitespace-nowrap ${salahStatus.state === 'stale' ? 'text-strategy' : 'text-bone-500'}`}
+                  title={salahStatus.at ? new Date(salahStatus.at).toLocaleString() : ''}>
+              {salahStatus.state === 'stale' ? `· offline · ${agoLabel(salahStatus.at)}` : `· updated ${agoLabel(salahStatus.at)}`}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {(salahFailed || salahStatus.state === 'stale') && (
+            <button onClick={retrySalah}
+              className="btn flex items-center gap-1 px-2 py-1 rounded-md border border-bone-600/40 text-bone-400 text-[10px] font-mono tracking-wider hover:bg-ink-700">
+              RETRY
+            </button>
+          )}
+          {salahFailed && (
+            <button onClick={() => setShowManual(v => !v)}
+              className="btn flex items-center gap-1 px-2 py-1 rounded-md border border-bone-600/40 text-bone-400 text-[10px] font-mono tracking-wider hover:bg-ink-700">
+              MANUAL
+            </button>
+          )}
+          <button onClick={() => { setShowManual(false); resyncLocation(); }}
+            className="btn flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-deen/40 text-deen text-[10px] font-mono tracking-wider hover:bg-deen/10">
+            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+              <circle cx="12" cy="12" r="3"/>
+              <line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/>
+              <line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>
+            </svg>
+            {location ? 'RESYNC' : 'GET LOCATION'}
+          </button>
+        </div>
+      </div>
+      {showManual && (
+        <div className="flex items-center gap-2 px-3 pb-2">
+          <span className="text-[10px] font-mono text-bone-500 shrink-0">lat</span>
+          <input type="number" step="0.0001" placeholder="51.5074" value={manualLat}
+            onChange={e => setManualLat(e.target.value)}
+            className="w-24 bg-ink-700 border border-ink-600 rounded px-2 py-1 text-[11px] font-mono text-bone-100 focus:outline-none focus:border-deen/60" />
+          <span className="text-[10px] font-mono text-bone-500 shrink-0">lon</span>
+          <input type="number" step="0.0001" placeholder="-0.1278" value={manualLon}
+            onChange={e => setManualLon(e.target.value)}
+            className="w-24 bg-ink-700 border border-ink-600 rounded px-2 py-1 text-[11px] font-mono text-bone-100 focus:outline-none focus:border-deen/60" />
+          <button
+            onClick={async () => {
+              if (!manualLat || !manualLon) return;
+              /* Stay open on failure — closing the editor on a coordinate
+                 that produced no times leaves nothing to correct. */
+              if (await setManualLocation(manualLat, manualLon)) setShowManual(false);
+            }}
+            className="btn px-2.5 py-1 rounded-md bg-deen/20 border border-deen/50 text-deen text-[10px] font-mono tracking-wider hover:bg-deen/30">
+            SET
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+   TIMELINE  (proportional hour grid)
 ------------------------------------------------------------------- */
 function Timeline({ state, setState, dow, dKey, sel }) {
   const startHour = 0, endHour = 24;
@@ -3089,22 +3542,8 @@ function Timeline({ state, setState, dow, dKey, sel }) {
   const toggleTask = (id) => setState(s => toggleTaskDone(s, id));
   const [editing, setEditing] = useState(null);
   const [adding,  setAdding]  = useState(null);
-  const [showManual, setShowManual] = useState(false);
-  const [manualLat,  setManualLat]  = useState('');
-  const [manualLon,  setManualLon]  = useState('');
-
-  const salahMethod = state.ui.salahMethod ?? 3;
-  const salahSchool = state.ui.salahSchool ?? 0;
-  const salahLoc    = state.ui.salahLoc ?? null;
-  const offsets     = useMemo(() => salahOffsets(state.ui), [state.ui.salahOffsets]);
-  const onSalahLocConfirmed = useCallback(
-    loc => setState(s => ({ ...s, ui: { ...s.ui, salahLoc: loc } })),
-    [setState]
-  );
-  const { salahBlocks, location, status: salahStatus, resyncLocation, setManualLocation, retry: retrySalah }
-    = useSalahTimes(dKey, salahMethod, salahSchool, salahLoc, offsets, onSalahLocConfirmed);
-  const salahBusy = salahStatus.state === 'loading' || salahStatus.state === 'locating';
-  const salahFailed = salahStatus.state === 'error';
+  const salah = useDaySalah(state, setState, dKey);
+  const salahBlocks = salah.salahBlocks;
 
   const layouts = useMemo(() => layoutBlocks([...blocks, ...salahBlocks]), [blocks, salahBlocks]);
 
@@ -3142,83 +3581,7 @@ function Timeline({ state, setState, dow, dKey, sel }) {
   return (
     <div className="card relative overflow-hidden">
 
-      {/* Salah strip */}
-      <div className="border-b border-ink-700">
-        <div className="flex items-center justify-between gap-2 px-3 py-2 flex-wrap">
-          <div className="flex items-center gap-3 flex-wrap min-w-0">
-            <span className="text-[10px] font-mono tracking-widest text-deen shrink-0">SALAH</span>
-            {salahBusy && (
-              <span className="text-[10px] font-mono text-bone-400 animate-pulse">
-                {salahStatus.state === 'locating' ? 'locating…' : 'fetching…'}
-              </span>
-            )}
-            {salahFailed && !showManual && (
-              <span className="text-[10px] font-mono text-combat">{salahStatus.message || 'Salah times unavailable'}</span>
-            )}
-            {!salahBusy && !salahFailed && salahBlocks.length === 0 && !location && (
-              <span className="text-[10px] font-mono text-bone-400">— tap to load prayer times</span>
-            )}
-            {salahBlocks.map(s => (
-              <span key={s.id} className="text-[10px] font-mono text-bone-300 whitespace-nowrap">
-                {s.title} <span className="text-deen">{toHM(s.start)}</span>
-              </span>
-            ))}
-            {/* Say plainly whether these times are confirmed, and how old they
-                are — "fetching…" that silently stopped told you nothing. */}
-            {!salahBusy && salahBlocks.length > 0 && (
-              <span className={`text-[10px] font-mono whitespace-nowrap ${salahStatus.state === 'stale' ? 'text-strategy' : 'text-bone-500'}`}
-                    title={salahStatus.at ? new Date(salahStatus.at).toLocaleString() : ''}>
-                {salahStatus.state === 'stale' ? `· offline · ${agoLabel(salahStatus.at)}` : `· updated ${agoLabel(salahStatus.at)}`}
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            {(salahFailed || salahStatus.state === 'stale') && (
-              <button onClick={retrySalah}
-                className="btn flex items-center gap-1 px-2 py-1 rounded-md border border-bone-600/40 text-bone-400 text-[10px] font-mono tracking-wider hover:bg-ink-700">
-                RETRY
-              </button>
-            )}
-            {salahFailed && (
-              <button onClick={() => setShowManual(v => !v)}
-                className="btn flex items-center gap-1 px-2 py-1 rounded-md border border-bone-600/40 text-bone-400 text-[10px] font-mono tracking-wider hover:bg-ink-700">
-                MANUAL
-              </button>
-            )}
-            <button onClick={() => { setShowManual(false); resyncLocation(); }}
-              className="btn flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-deen/40 text-deen text-[10px] font-mono tracking-wider hover:bg-deen/10">
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-                <circle cx="12" cy="12" r="3"/>
-                <line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/>
-                <line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>
-              </svg>
-              {location ? 'RESYNC' : 'GET LOCATION'}
-            </button>
-          </div>
-        </div>
-        {showManual && (
-          <div className="flex items-center gap-2 px-3 pb-2">
-            <span className="text-[10px] font-mono text-bone-500 shrink-0">lat</span>
-            <input type="number" step="0.0001" placeholder="51.5074" value={manualLat}
-              onChange={e => setManualLat(e.target.value)}
-              className="w-24 bg-ink-700 border border-ink-600 rounded px-2 py-1 text-[11px] font-mono text-bone-100 focus:outline-none focus:border-deen/60" />
-            <span className="text-[10px] font-mono text-bone-500 shrink-0">lon</span>
-            <input type="number" step="0.0001" placeholder="-0.1278" value={manualLon}
-              onChange={e => setManualLon(e.target.value)}
-              className="w-24 bg-ink-700 border border-ink-600 rounded px-2 py-1 text-[11px] font-mono text-bone-100 focus:outline-none focus:border-deen/60" />
-            <button
-              onClick={async () => {
-                if (!manualLat || !manualLon) return;
-                /* Stay open on failure — closing the editor on a coordinate
-                   that produced no times leaves nothing to correct. */
-                if (await setManualLocation(manualLat, manualLon)) setShowManual(false);
-              }}
-              className="btn px-2.5 py-1 rounded-md bg-deen/20 border border-deen/50 text-deen text-[10px] font-mono tracking-wider hover:bg-deen/30">
-              SET
-            </button>
-          </div>
-        )}
-      </div>
+      <SalahStrip salah={salah}/>
 
       <div ref={scrollerRef} data-testid="timeline-scroll" className="relative scrollbar overflow-y-auto" style={{ maxHeight: '72vh', overflowY: 'auto' }}>
         <div className="relative" style={{ height: hours * HOUR_PX + 24 }}>
@@ -4790,6 +5153,29 @@ function AdminOverview({ state, syncStatus, onSyncNow }) {
     return { k: b.k, pct: count ? sum / count : 0 };
   }), [state.logs, state.habits, statsRange]);
 
+  /* The shape behind the average. A mean on its own is the one number a
+     habit chart cannot be read from — 77% is four perfect days and three
+     terrible ones just as readily as seven mediocre ones, and only one
+     of those is worth acting on. `good` is counted against the same bar
+     the day streak uses (STREAK_THRESHOLD), so this card and the streak
+     in the header can't tell different stories. */
+  const habitTrend = useMemo(() => {
+    const n = habitHistory.length;
+    const mean = (xs) => xs.length ? xs.reduce((a, b) => a + b.pct, 0) / xs.length : 0;
+    const half = Math.floor(n / 2);
+    return {
+      total: n,
+      avg: Math.round(mean(habitHistory) * 100),
+      good: habitHistory.filter(d => d.pct >= STREAK_THRESHOLD).length,
+      /* Second half against first — "am I getting better at this", which
+         no single average can answer. Needs two buckets a side to mean
+         anything, so a 1-bucket range reports flat rather than noise. */
+      delta: half >= 1 && n >= 4
+        ? Math.round((mean(habitHistory.slice(half)) - mean(habitHistory.slice(0, half))) * 100)
+        : 0,
+    };
+  }, [habitHistory]);
+
   /* Per-habit completion over selected range */
   const habitStats = useMemo(() => {
     const today = new Date();
@@ -4884,28 +5270,65 @@ function AdminOverview({ state, syncStatus, onSyncNow }) {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="card p-5">
+        <div className="card p-5" data-testid="habit-completion">
           <div className="flex items-end justify-between mb-4">
             <div>
-              <div className="text-[10px] font-mono tracking-widest text-strategy">{rangeLabel.toUpperCase()} · {statsRange > 60 ? 'WEEKLY' : 'DAILY'}</div>
+              <div className="text-[10px] font-mono tracking-widest text-strategy">{rangeLabel.toUpperCase()} · {statsRange > CHART_DAILY_MAX ? 'WEEKLY' : 'DAILY'}</div>
               <div className="font-display text-xl text-bone-100 mt-1">Habit completion</div>
             </div>
-            <div className="font-mono text-xs text-bone-400">
-              avg {Math.round(habitHistory.reduce((a,b)=>a+b.pct,0)/habitHistory.length*100)}%
+            <div className="text-right">
+              <div className="font-mono text-xs text-bone-400">AVERAGE</div>
+              <div data-testid="habit-avg" className="font-display text-2xl text-bone-100 leading-none">{habitTrend.avg}<span className="text-bone-400 text-lg">%</span></div>
             </div>
           </div>
+
+          {/* Each slot needs a definite height of its own. Without it the
+              bar's percentage height resolves against an indefinite
+              parent and collapses to nothing — which is exactly what it
+              did: a chart that had never drawn a single bar. */}
           <div className="flex items-end gap-px h-32">
             {habitHistory.map(d => (
-              <div key={d.k} className="flex-1 min-w-0" title={`${d.k}: ${Math.round(d.pct*100)}%`}>
+              <div key={d.k} className="flex-1 min-w-0 h-full flex items-end"
+                data-testid="habit-bar" data-pct={Math.round(d.pct*100)}
+                title={`${d.k}: ${Math.round(d.pct*100)}%`}>
                 <div className="w-full rounded-t-sm transition-all"
                   style={{ height: `${Math.max(2, d.pct*100)}%`,
-                  background: d.pct >= .8 ? '#10b981' : d.pct >= .5 ? '#f59e0b' : '#3a3a44' }}/>
+                  background: d.pct >= .8 ? '#10b981' : d.pct >= .5 ? '#f59e0b' : '#3a3a44',
+                  /* Today is the bar you can still do something about. */
+                  outline: d.k === todayKey() ? '1px solid #f4f3ee' : 'none' }}/>
               </div>
             ))}
           </div>
-          <div className="flex justify-between mt-2 font-mono text-[10px] text-bone-400">
-            <span>{habitHistory[0]?.k.slice(5)}</span>
-            <span>{habitHistory[habitHistory.length-1]?.k.slice(5)}</span>
+
+          {/* Which bar is which. A start and end date alone can't tell
+              you that the gap was a Sunday, and on a short range there is
+              room to just say so. */}
+          {habitHistory.length <= 14 ? (
+            <div className="flex gap-px mt-2">
+              {habitHistory.map(d => (
+                <div key={d.k} className={`flex-1 min-w-0 text-center font-mono text-[10px] ${d.k === todayKey() ? 'text-bone-100' : 'text-bone-400'}`}>
+                  {DAY_SHORT[parseKey(d.k).getDay()][0]}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex justify-between mt-2 font-mono text-[10px] text-bone-400">
+              <span>{habitHistory[0]?.k.slice(5)}</span>
+              <span>{habitHistory[habitHistory.length-1]?.k.slice(5)}</span>
+            </div>
+          )}
+
+          {/* An average hides its own shape: 77% is four perfect days and
+              three bad ones just as easily as seven mediocre ones. This
+              is the count that actually feeds the streak. */}
+          <div data-testid="habit-trend" className="mt-3 pt-3 border-t border-ink-700 flex items-center justify-between gap-3 font-mono text-[11px]">
+            <span className="text-bone-300">
+              {habitTrend.good} of {habitTrend.total} {statsRange > CHART_DAILY_MAX ? 'weeks' : 'days'} above {Math.round(STREAK_THRESHOLD*100)}%
+            </span>
+            <span style={{ color: habitTrend.delta > 0 ? '#10b981' : habitTrend.delta < 0 ? '#f59e0b' : '#9a9788' }}>
+              {habitTrend.delta > 0 ? `↑ ${habitTrend.delta} pts` : habitTrend.delta < 0 ? `↓ ${-habitTrend.delta} pts` : 'flat'}
+              <span className="text-bone-400"> vs first half</span>
+            </span>
           </div>
         </div>
 

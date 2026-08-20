@@ -81,6 +81,9 @@ test.describe('Bug fixes', () => {
         { id: 'b-early', title: 'Early bird', pillar: 'deen', start: 15, end: 45, every: [0,1,2,3,4,5,6] },
       ],
     };
+    /* The proportional hour grid, which the Today tab no longer opens
+       on by default — these are about its geometry specifically. */
+    await page.addInitScript(() => localStorage.setItem('madinah_today_scope_v1', 'day'));
     await page.addInitScript((s) => localStorage.setItem('madinah_v1', JSON.stringify(s)), seed);
     await page.goto('/');
     await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
@@ -98,6 +101,9 @@ test.describe('Bug fixes', () => {
         { id: 'b-wrap', title: 'Tahajjud', pillar: 'deen', start: 1410, end: 30, every: [0,1,2,3,4,5,6] },
       ],
     };
+    /* The proportional hour grid, which the Today tab no longer opens
+       on by default — these are about its geometry specifically. */
+    await page.addInitScript(() => localStorage.setItem('madinah_today_scope_v1', 'day'));
     await page.addInitScript((s) => localStorage.setItem('madinah_v1', JSON.stringify(s)), seed);
     await page.goto('/');
     await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
@@ -109,6 +115,9 @@ test.describe('Bug fixes', () => {
   });
 
   test('BlockModal shows a visible error instead of silently failing on invalid input', async ({ page }) => {
+    /* The proportional hour grid, which the Today tab no longer opens
+       on by default — these are about its geometry specifically. */
+    await page.addInitScript(() => localStorage.setItem('madinah_today_scope_v1', 'day'));
     await page.goto('/');
     await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
 

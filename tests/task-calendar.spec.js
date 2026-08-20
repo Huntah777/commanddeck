@@ -36,7 +36,11 @@ const SLOT = { id: 'b-t-report', taskId: 't-report', date: '2026-07-29', start: 
    the clock rather than fight the reset. */
 const bootOn = async (page, day, state = STATE()) => {
   await page.clock.install({ time: new Date(`${day}T09:00:00`) });
+  /* These exercise the proportional hour grid specifically, which is no
+     longer what the Today tab opens on — say so rather than relying on a
+     default that has since moved. */
   await page.addInitScript((s) => {
+    localStorage.setItem('madinah_today_scope_v1', 'day');
     if (!localStorage.getItem('madinah_v1')) localStorage.setItem('madinah_v1', JSON.stringify(s));
   }, state);
   await page.goto('/');
@@ -211,12 +215,14 @@ test.describe('the block is the task', () => {
     await taskBlock(page).first().getByText('Finish the quarterly report').click();
 
     await expect(page.getByText('Task on the calendar')).toBeVisible();
-    await expect(page.getByLabel('Day')).toHaveValue('2026-07-29');
+    /* `exact` because the week strip's day buttons are labelled
+       "Monday 27 July" and friends, and getByLabel substring-matches. */
+    await expect(page.getByLabel('Day', { exact: true })).toHaveValue('2026-07-29');
     await expect(page.getByLabel('Start')).toHaveValue('14:00');
     // No title or list controls — those belong to the task.
     await expect(page.getByRole('button', { name: 'Take off calendar' })).toBeVisible();
 
-    await page.getByLabel('Day').fill('2026-07-31');
+    await page.getByLabel('Day', { exact: true }).fill('2026-07-31');
     await page.getByRole('button', { name: 'Save block' }).click();
 
     await expect(taskBlock(page)).toHaveCount(0);   // moved off this day

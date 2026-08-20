@@ -25,7 +25,11 @@ const boot = async (page, state = STATE()) => {
      stop matching "today" the day after they're written and the logs
      asserted on end up keyed to the wrong date entirely. */
   await page.clock.install({ time: new Date('2026-07-29T09:00:00') });
+  /* These exercise the proportional hour grid specifically, which is no
+     longer what the Today tab opens on — say so rather than relying on a
+     default that has since moved. */
   await page.addInitScript((s) => {
+    localStorage.setItem('madinah_today_scope_v1', 'day');
     if (!localStorage.getItem('madinah_v1')) localStorage.setItem('madinah_v1', JSON.stringify(s));
   }, state);
   await page.goto('/');

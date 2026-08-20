@@ -49,11 +49,19 @@ const weekBlock  = (page, title) => page.getByTestId('week-time-block').filter({
 const monthCell  = (page, date) => page.locator(`[data-testid="month-day"][data-date="${date}"]`);
 
 test.describe('choosing a scope', () => {
-  test('opens on the day, and the timeline is what it draws', async ({ page }) => {
+  test('opens on the agenda — the day as a list, not a grid to scroll', async ({ page }) => {
     await boot(page);
-    await expect(page.getByTestId('time-block').first()).toBeVisible();
+    await expect(page.getByTestId('agenda')).toBeVisible();
+    await expect(page.getByTestId('time-block')).toHaveCount(0);
     await expect(page.getByTestId('week-calendar')).toHaveCount(0);
     await expect(page.getByTestId('month-calendar')).toHaveCount(0);
+  });
+
+  test('the hour grid is still there, one tap away', async ({ page }) => {
+    await boot(page);
+    await scope(page, 'day');
+    await expect(page.getByTestId('time-block').first()).toBeVisible();
+    await expect(page.getByTestId('agenda')).toHaveCount(0);
   });
 
   test('week and month replace the timeline, not sit alongside it', async ({ page }) => {
@@ -235,6 +243,7 @@ test.describe('landing on now, without scrolling to find it', () => {
 
   test('the day timeline opens already scrolled to now', async ({ page }) => {
     await boot(page); // clock pinned at 2026-07-29T09:30:00 — today
+    await scope(page, 'day');
     await expectLandedOn(page.getByTestId('timeline-scroll'), 9, 30);
   });
 
@@ -247,6 +256,7 @@ test.describe('landing on now, without scrolling to find it', () => {
        there is a "now" line only on today, so there is nothing for the
        effect to do on any other day. */
     await boot(page); // lands on today, already auto-scrolled
+    await scope(page, 'day');
     const scroller = page.getByTestId('timeline-scroll');
     const { scrollTop: landed } = await scrollGeometry(scroller);
     expect(landed).toBeGreaterThan(0);
@@ -257,6 +267,7 @@ test.describe('landing on now, without scrolling to find it', () => {
 
   test('stepping back to today re-triggers the landing', async ({ page }) => {
     await boot(page);
+    await scope(page, 'day');
     const scroller = page.getByTestId('timeline-scroll');
 
     await page.getByRole('button', { name: '‹', exact: true }).click(); // yesterday
@@ -272,6 +283,7 @@ test.describe('landing on now, without scrolling to find it', () => {
        back to "now" out from under someone who scrolled away on
        purpose. Only a change of DAY does that. */
     await boot(page);
+    await scope(page, 'day');
     const scroller = page.getByTestId('timeline-scroll');
     await scroller.evaluate(el => { el.scrollTop = 5; });
 
@@ -311,5 +323,164 @@ test.describe('landing on now, without scrolling to find it', () => {
 
     await page.getByTestId('period-today').click();
     await expectLandedOn(scroller, 9, 30);
+  });
+});
+
+/* ============================================================
+   The agenda
+   ------------------------------------------------------------
+   The day as a list rather than a grid: what happens, in order, with
+   the empty stretches stated instead of scrolled through. Same blocks,
+   same salah, same ticks as the hour grid — a second drawing of one
+   day's data, not a second copy of it.
+   ============================================================ */
+test.describe('the agenda', () => {
+  const row  = (page) => page.getByTestId('agenda-row');
+  const gap  = (page) => page.getByTestId('agenda-gap');
+
+  /* A morning with deliberate holes in it: 09:00–11:00 and 14:00–15:00
+     on the Wednesday the clock is pinned to, so the gap between them is
+     a known 3h. */
+  const DAY = STATE({ blocks: [
+    { id: 'b-deep',    title: 'Deep work', pillar: 'tech',     start:  9*60, end: 11*60, every: [1,2,3,4,5] },
+    { id: 'b-council', title: 'Council',   pillar: 'strategy', start: 14*60, end: 15*60, every: [3] },
+  ] });
+
+  test('lists what happens, in order, with times and lengths', async ({ page }) => {
+    await boot(page, DAY);
+    await expect(row(page)).toHaveCount(2);
+    await expect(row(page).nth(0)).toContainText('Deep work');
+    await expect(row(page).nth(0)).toContainText('09:00–11:00');
+    await expect(row(page).nth(0)).toContainText('2h');
+    await expect(row(page).nth(1)).toContainText('Council');
+    await expect(row(page).nth(1)).toContainText('1h');
+  });
+
+  test('states the empty stretches rather than drawing them to scale', async ({ page }) => {
+    /* The whole reason for the list: three hours of nothing is one line
+       here and three screens of blank grid in the hour view. */
+    await boot(page, DAY);
+    await expect(gap(page)).toHaveCount(1);
+    await expect(gap(page).first()).toContainText('3h free');
+  });
+
+  test('a gap too small to use is not called free time', async ({ page }) => {
+    await boot(page, STATE({ blocks: [
+      { id: 'b-a', title: 'A', pillar: 'tech', start: 9*60,      end: 10*60,     every: [1,2,3,4,5] },
+      { id: 'b-b', title: 'B', pillar: 'tech', start: 10*60 + 5, end: 11*60,     every: [1,2,3,4,5] },
+    ] }));
+    await expect(row(page)).toHaveCount(2);
+    await expect(gap(page)).toHaveCount(0);   // five minutes is a join, not a gap
+  });
+
+  test('overlapping blocks do not invent a gap between them', async ({ page }) => {
+    await boot(page, STATE({ blocks: [
+      { id: 'b-a', title: 'A', pillar: 'tech', start:  9*60, end: 12*60, every: [1,2,3,4,5] },
+      { id: 'b-b', title: 'B', pillar: 'tech', start: 10*60, end: 11*60, every: [1,2,3,4,5] },
+    ] }));
+    await expect(row(page)).toHaveCount(2);
+    await expect(gap(page)).toHaveCount(0);
+  });
+
+  test('now sits where it actually falls in the day', async ({ page }) => {
+    // Clock is 09:30 — inside Deep work, so after it and before Council.
+    await boot(page, DAY);
+    await expect(page.getByTestId('agenda-now')).toHaveCount(1);
+    await expect(page.getByTestId('agenda-now')).toContainText('09:30');
+
+    const order = await page.locator('[data-testid="agenda-row"], [data-testid="agenda-now"]')
+      .evaluateAll(els => els.map(e => e.dataset.testid));
+    expect(order).toEqual(['agenda-row', 'agenda-now', 'agenda-row']);
+  });
+
+  test('a day that is not today carries no now marker', async ({ page }) => {
+    await boot(page, DAY);
+    await page.getByRole('button', { name: '‹', exact: true }).click();
+    await expect(page.getByTestId('agenda-now')).toHaveCount(0);
+  });
+
+  test('a habit on the calendar can be ticked from its row', async ({ page }) => {
+    await boot(page, STATE({ blocks: [{ id: 'b-h-fajr', habitId: 'h-fajr', start: 6*60, end: 6*60+30 }] }));
+    await row(page).getByRole('button', { name: 'Tick Fajr in jama' }).click();
+
+    await expect.poll(async () => (await stored(page)).logs?.['2026-07-29']?.['h-fajr'], { timeout: 10_000 }).toBeTruthy();
+    await expect(row(page).first()).toHaveAttribute('data-done', '1');
+  });
+
+  test('an empty day says so, and offers the way out of it', async ({ page }) => {
+    await boot(page, STATE({ blocks: [] }));
+    await expect(page.getByTestId('agenda')).toContainText('Nothing blocked in for this day');
+    await expect(row(page)).toHaveCount(0);
+  });
+
+  test('the prayer-times controls come with it, not just with the grid', async ({ page }) => {
+    /* They own the location prompt and the manual fallback. Left in the
+       hour grid, defaulting to the agenda would have hidden the only
+       route to loading prayer times at all. */
+    await boot(page, DAY);
+    await expect(page.getByTestId('agenda').getByText('SALAH')).toBeVisible();
+    await expect(page.getByTestId('agenda').getByRole('button', { name: /GET LOCATION|RESYNC/ })).toBeVisible();
+  });
+});
+
+test.describe('the week strip', () => {
+  const strip = (page) => page.getByTestId('week-strip');
+  const day   = (page, k) => page.locator(`[data-testid="week-strip-day"][data-date="${k}"]`);
+
+  test('shows the week around the selected day, Monday first', async ({ page }) => {
+    await boot(page);
+    await expect(strip(page).getByTestId('week-strip-day')).toHaveCount(7);
+    await expect(strip(page)).toContainText('MON');
+    await expect(day(page, '2026-07-27')).toBeVisible();   // Monday
+    await expect(day(page, '2026-08-02')).toBeVisible();   // Sunday
+  });
+
+  test('tapping a date moves the day without leaving the agenda', async ({ page }) => {
+    await boot(page);
+    await day(page, '2026-07-31').click();
+    await expect(page.getByTestId('agenda')).toBeVisible();
+    expect((await stored(page)).ui.selectedDate).toBe('2026-07-31');
+    await expect(day(page, '2026-07-31')).toHaveAttribute('aria-current', 'date');
+  });
+
+  test('it comes along to the hour grid, but not to week or month', async ({ page }) => {
+    /* On week and month the grid already is the date picker — a second
+       one above it would be two things to tap for one job. */
+    await boot(page);
+    await scope(page, 'day');
+    await expect(strip(page)).toBeVisible();
+
+    await scope(page, 'week');
+    await expect(strip(page)).toHaveCount(0);
+    await scope(page, 'month');
+    await expect(strip(page)).toHaveCount(0);
+  });
+});
+
+test.describe('the habit chips', () => {
+  const chip = (page, name) => page.getByTestId('habit-chip').filter({ hasText: name });
+
+  test('the day\'s habits are tickable without going to find them', async ({ page }) => {
+    await boot(page);
+    // Wednesday: Fajr runs daily, Gym on Mon/Wed/Fri.
+    await expect(page.getByTestId('habit-chip')).toHaveCount(2);
+
+    await chip(page, 'Fajr in jama').click();
+    await expect.poll(async () => (await stored(page)).logs?.['2026-07-29']?.['h-fajr'], { timeout: 10_000 }).toBeTruthy();
+    await expect(chip(page, 'Fajr in jama')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  test('a chip and the checklist are two views of one log', async ({ page }) => {
+    await boot(page);
+    await chip(page, 'Gym').click();
+    await expect(page.getByTestId('checklist-habit').filter({ hasText: 'Gym' })
+      .getByRole('button', { name: 'Untick Gym' })).toBeVisible();
+  });
+
+  test('only the agenda carries them — the grid has its own blocks', async ({ page }) => {
+    await boot(page);
+    await expect(page.getByTestId('habit-chips')).toBeVisible();
+    await scope(page, 'day');
+    await expect(page.getByTestId('habit-chips')).toHaveCount(0);
   });
 });

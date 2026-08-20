@@ -352,8 +352,11 @@ test.describe('a session aimed at a habit ticks it off', () => {
 
     await expect.poll(async () => (await logs(page))['2026-07-29']?.['h-fajr'], { timeout: 10_000 }).toBeTruthy();
 
+    /* Scoped to the checklist rather than the whole tab — the agenda's
+       habit chips carry the same "Untick Fajr" label, and this is
+       specifically about the checklist agreeing. */
     await goTab(page, 'Today');
-    await expect(page.getByRole('button', { name: 'Untick Fajr' })).toBeVisible();
+    await expect(page.getByTestId('checklist-habit').getByRole('button', { name: 'Untick Fajr' })).toBeVisible();
   });
 
   test('aimed at the whole pillar, there is no single habit to tick', async ({ page }) => {
