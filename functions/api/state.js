@@ -8,6 +8,8 @@
    Bindings (configured in Pages → Settings):
      env.DB           D1 database binding (binding name: DB)
      env.SYNC_TOKEN   secret (environment variable, encrypted)
+     env.READ_TOKEN   optional secret — grants GET only. For readers that
+                      are not the app, e.g. the iOS Scriptable widget.
 
    Endpoints:
      GET  /api/state   → returns the stored state JSON (or {} on first run)
@@ -15,7 +17,8 @@
                          (see mergeState below) and returns the merged result
 
    All requests require:
-     Authorization: Bearer <SYNC_TOKEN>
+     Authorization: Bearer <SYNC_TOKEN>   (read and write)
+     Authorization: Bearer <READ_TOKEN>   (GET only — PUT answers 403)
    ============================================================ */
 
 const MAX_BODY = 1_048_576; // 1 MB
@@ -27,13 +30,10 @@ const json = (data, status = 200, extraHeaders = {}) =>
     headers: { 'Content-Type': 'application/json; charset=utf-8', ...extraHeaders },
   });
 
-/* Constant-time token comparison via HMAC.
+/* Constant-time string comparison via HMAC.
    HMAC output is always 32 bytes regardless of input length, so the
    final XOR loop never leaks the expected token's length via timing. */
-const tokenOk = async (request, env) => {
-  const header = request.headers.get('Authorization') || '';
-  const given  = header.replace(/^Bearer\s+/i, '').trim();
-  const expect = env.SYNC_TOKEN || '';
+const secretEq = async (given, expect) => {
   if (!given || !expect) return false;
 
   const key = await crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -46,6 +46,28 @@ const tokenOk = async (request, env) => {
   let diff = 0;
   for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
   return diff === 0;
+};
+
+/* What this caller is allowed to do: 'rw', 'ro', or null for nothing.
+
+   READ_TOKEN exists for readers that are not the app — the iOS home
+   screen widget above all. A widget only ever reads, and it has to keep
+   its token somewhere on the phone; handing it SYNC_TOKEN would mean a
+   script in a third-party app held a key that can overwrite every habit,
+   task and log in one PUT. This one can't write, so the worst a leak
+   costs is disclosure rather than destruction.
+
+   Optional: leave READ_TOKEN unset and nothing changes — secretEq
+   refuses an empty expectation, so an absent variable can never be
+   matched, not even by an empty Authorization header. */
+const authLevel = async (request, env) => {
+  const given = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+  if (!given) return null;
+  /* SYNC_TOKEN first, so a READ_TOKEN misconfigured to the same value
+     degrades to full access rather than silently breaking sync. */
+  if (await secretEq(given, env.SYNC_TOKEN)) return 'rw';
+  if (await secretEq(given, env.READ_TOKEN)) return 'ro';
+  return null;
 };
 
 /* ── Merge logic ──────────────────────────────────────────────────
@@ -193,7 +215,8 @@ export function mergeState(existing, body, now = Date.now()) {
 }
 
 export async function onRequest({ request, env }) {
-  if (!await tokenOk(request, env)) return json({ error: 'Unauthorized' }, 401);
+  const level = await authLevel(request, env);
+  if (!level) return json({ error: 'Unauthorized' }, 401);
 
   try {
     if (request.method === 'GET') {
@@ -214,6 +237,11 @@ export async function onRequest({ request, env }) {
     }
 
     if (request.method === 'PUT') {
+      /* 403, not 401: the token is real, it simply isn't allowed to do
+         this — a client that retries with fresh credentials is wasting
+         its time, and should say so rather than loop. */
+      if (level !== 'rw') return json({ error: 'This token is read-only' }, 403);
+
       const ct = Number(request.headers.get('Content-Length') || 0);
       if (ct > MAX_BODY) return json({ error: 'Payload too large' }, 413);
 

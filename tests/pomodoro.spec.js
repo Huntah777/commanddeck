@@ -31,8 +31,17 @@ const boot = async (page, { at = '2026-07-29T09:00:00', state = STATE, timer = n
   /* Paused, not merely installed. An unpaused fake clock still advances
      with real time, so the seconds a page reload takes leak into the
      countdown and the assertions have to be fuzzy. Time here moves only
-     when a test says it does. */
-  await page.clock.install({ time: new Date(at) });
+     when a test says it does.
+
+     Installed a minute BEFORE the time we want, so pauseAt only ever
+     moves forward. Installing at `at` and pausing at `at` looks tidier
+     and is a race: the fake clock keeps running between the two calls,
+     and on a loaded machine it is already past `at` by the time pauseAt
+     asks for it — "Cannot fast-forward to the past", in boot(), on
+     whichever test happened to be unlucky. The clock still ends up
+     paused at exactly `at`; nothing has loaded yet to see the minute
+     before it. */
+  await page.clock.install({ time: new Date(new Date(at).getTime() - 60_000) });
   await page.clock.pauseAt(new Date(at));
   await page.addInitScript(([s, t]) => {
     if (!localStorage.getItem('madinah_v1')) localStorage.setItem('madinah_v1', JSON.stringify(s));
