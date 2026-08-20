@@ -188,6 +188,19 @@ tailwind.config = {
   /* ── COMPONENTS ───────────────────────────────────────────────────── */
   .card     { background: linear-gradient(180deg, var(--s12) 0%, var(--s1) 100%); border: 1px solid var(--s3); border-radius: 14px; }
   .card-soft { background: var(--s12); border: 1px solid var(--s3); border-radius: 12px; }
+
+  /* A modal taller than the phone it is on used to be clipped at BOTH
+     ends with no way to reach either: the backdrop is fixed and centres
+     the card, so the overflow had nothing to scroll and the top of a
+     long form simply sat above the viewport, under the header. Lives
+     here rather than in a Tailwind class so the 100vh fallback can sit
+     under the 100dvh line for browsers that don't know dvh. */
+  .modal-card {
+    max-height: calc(100vh - 2rem);
+    max-height: calc(100dvh - 2rem - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
   .divider  { border-top: 1px solid var(--s3); }
 
   .scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -1130,6 +1143,26 @@ const blockAccent = (b, state) => {
 const slotForHabit = (state, habitId) =>
   (state?.blocks || []).find(b => b?.habitId === habitId) || null;
 
+/* A habit can carry an emoji of its own. It is what makes a list of ten
+   habits scannable without reading any of them — you find the prayer
+   beads, not the fourth row down — and it is the one thing every tile
+   in the app shows in the same place: the agenda's bubble, the chips
+   under it, the row in the Habits tab. So it resolves in one place too.
+   null means "no icon", and every one of those sites falls back to the
+   pillar-coloured flame it drew before. */
+const habitIcon = (state, habitId) =>
+  (state?.habits || []).find(h => h.id === habitId)?.icon || null;
+
+/* Deliberately a fixed palette rather than a free text box. A keyboard
+   emoji picker on a phone is four taps and a search; this is one, and
+   it can't end up holding a paragraph. */
+const HABIT_ICONS = [
+  '📿','🕋','🕌','📖','🤲','☪️','🌙','⭐',
+  '💻','⌨️','🧠','📝','📚','🔬','✍️','🎯',
+  '🏋️','🏃','🥊','🎾','🧘','💧','🥗','😴',
+  '🗓️','💬','☎️','❤️','🤝','🧹','💰','🌱',
+];
+
 /* Write a habit and its calendar slot together. `slot` is { start, end },
    or null for "not on the calendar". One transaction because the two are
    only meaningful as a pair: a block pointing at a habit that didn't save
@@ -1198,6 +1231,54 @@ function tickHabit(s, dKey, id, at = Date.now()) {
     logsOff: { ...(s.logsOff || {}), [dKey]: logsOff },
   };
 }
+
+/* Tick or un-tick, from wherever you happen to be looking at the day:
+   the checklist, the agenda's chips, a habit's own block on the
+   timeline, a row in the Habits tab. Four call sites, one write, so
+   they cannot drift apart the way three hand-copied versions of this
+   were already starting to.
+
+   The un-tick is RECORDED in logsOff rather than merely absent, for the
+   reason tickHabit clears it: bare absence loses the sync merge, the
+   stored tick unions straight back over it, and the box re-ticks itself
+   a second after you cleared it. */
+function toggleHabitLog(s, dKey, id) {
+  if (!(s.logs?.[dKey] || {})[id]) return tickHabit(s, dKey, id);
+  const logs    = { ...(s.logs?.[dKey]    || {}) };
+  const logsOff = { ...(s.logsOff?.[dKey] || {}) };
+  delete logs[id];
+  logsOff[id] = Date.now();
+  return {
+    ...s,
+    logs:    { ...s.logs,            [dKey]: logs },
+    logsOff: { ...(s.logsOff || {}), [dKey]: logsOff },
+  };
+}
+
+/* Whether a block counts as done on the day whose log this is.
+
+   `logs[day]` is a set of ids that happened that day, and the three
+   kinds of block answer from three places: a habit block from its
+   habit's tick, a task block from the task record, and everything else
+   — a plain block, a prayer — from its OWN id in the same day log.
+
+   That last case is what lets "Wake up" be ticked at all. It has no
+   habit and no task behind it and doesn't need one: all a block like
+   that needs is a mark saying this thing, on this day, happened. */
+const blockDone = (b, log) =>
+  b?.habitId ? !!log[b.habitId] : b?.taskId ? !!b.done : !!log[b?.id];
+
+/* The one tick behind every row on the day. A habit block moves the
+   habit, so its streak and its stats move with it; a task block
+   completes the task; anything else marks itself under its own id.
+
+   Deliberately NOT by promoting a plain block into a task first: a
+   block you ticked off is a block you ticked off, and it has no
+   business turning up in the task list afterwards. */
+const toggleBlockDone = (s, dKey, b) =>
+  b.habitId ? toggleHabitLog(s, dKey, b.habitId)
+  : b.taskId ? toggleTaskDone(s, b.taskId)
+  : toggleHabitLog(s, dKey, b.id);
 
 /* ------------------------------------------------------------------
    TASKS ON THE CALENDAR
@@ -1381,22 +1462,41 @@ function layoutBlocks(blocks) {
    time you could actually use. */
 const AGENDA_GAP_MIN = 15;
 
+/* A block whose end is at or before its start crosses midnight — it
+   reaches the end of this day, not backwards into it. */
+const blockReach = (b) => (b.end > b.start ? b.end : 1440);
+const blockSpan  = (b) => blockReach(b) - b.start;
+
 function agendaRows(items, nowMin = null) {
-  const sorted = [...items].sort((a, b) => a.start - b.start || a.end - b.end);
+  /* Longest first among things starting together, so a container is
+     always seen before what it contains — which is what makes one pass
+     over a stack enough to work out the nesting. */
+  const sorted = [...items].sort((a, b) => a.start - b.start || blockSpan(b) - blockSpan(a));
   const rows = [];
   /* How far into the day everything so far reaches. Overlapping blocks
      move it forward but never back, so two things booked over each
      other don't invent a gap between them. */
   let covered = null;
+  /* Blocks still enclosing whatever comes next. */
+  const open = [];
 
   for (const b of sorted) {
-    if (covered != null && b.start - covered >= AGENDA_GAP_MIN) {
+    /* Maghrib inside a study block belongs UNDER it, not beside it as a
+       rival for the same slot. Strictly inside: something exactly as
+       long as its would-be parent is a clash, not a child, and reads
+       far better as two rows at the same level. */
+    while (open.length && !(blockReach(b) <= blockReach(open[open.length - 1])
+                            && blockSpan(b) < blockSpan(open[open.length - 1]))) open.pop();
+    const depth = open.length;
+
+    /* Free time is only free at the top level. The stretch either side
+       of a prayer inside a study block is still study. */
+    if (!depth && covered != null && b.start - covered >= AGENDA_GAP_MIN) {
       rows.push({ kind: 'gap', id: `gap-${covered}`, start: covered, end: b.start });
     }
-    rows.push({ kind: 'block', id: b.id, block: b });
-    /* A block whose end is at or before its start crosses midnight — it
-       reaches the end of this day, not backwards into it. */
-    covered = Math.max(covered ?? 0, b.end > b.start ? b.end : 1440);
+    rows.push({ kind: 'block', id: b.id, block: b, depth });
+    open.push(b);
+    covered = Math.max(covered ?? 0, blockReach(b));
   }
 
   if (nowMin == null) return rows;
@@ -1903,8 +2003,7 @@ function buildPlan(state) {
   const zonedKey = `${y}-${String(mo).padStart(2,'0')}-${String(dayOfMonth).padStart(2,'0')}`;
   resolveBlocks(state).forEach(b => {
     if (!blockOnDay(b, zonedKey, dow)) return;
-    if (b.habitId && doneToday[b.habitId]) return;
-    if (b.taskId && b.done) return;
+    if (blockDone(b, doneToday)) return;
     const s = atMins(b.start);
     /* end <= start means the block crosses midnight — anchor the end to the next day */
     const e = atMins(b.end) + (b.end <= b.start ? 24 * 60 * 60000 : 0);
@@ -2308,7 +2407,7 @@ function App() {
       people: (data?.people || []).map(p => ({ aliases: [], weight: 3, ...p })),
       lists: (data?.lists || SEED().lists).map(l => ({ keywords: [], ...l })),
       coach: data?.coach || null,
-      habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, ...h })),
+      habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, icon: null, ...h })),
       /* Tasks filed before the full parser snapshot existed carry only
          aiQuadrant. Lift it into `ai` so corrections read uniformly. */
       tasks:  (data?.tasks  || []).map(t => ({
@@ -2917,7 +3016,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
         <div className="flex items-center gap-2 pb-3">
           <div className="flex-1 min-w-0">
             {/* Mobile: dropdown select */}
-            <select value={state.ui.view} onChange={e => setView(e.target.value)}
+            <select value={state.ui.view} onChange={e => setView(e.target.value)} aria-label="Section"
               className="sm:hidden w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 font-mono tracking-wider appearance-none cursor-pointer">
               {tabs.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
             </select>
@@ -2991,23 +3090,10 @@ function TodayView({ state, setState }) {
   const habitsToday = state.habits.filter(h => h.days.includes(dow));
   const log = state.logs[dKey] || {};
   /* A tick stores when it happened and an un-tick is recorded in logsOff,
-     rather than a tick being bare presence in logs. Presence alone can't
-     survive a merge: the stored `true` unions straight back over the
-     un-tick and the box re-ticks itself. Values stay truthy either way, so
-     every read site is just `log[habitId]` as before. */
-  const toggleHabit = (id) => setState(s => {
-    const on = (s.logs[dKey] || {})[id];
-    const at = Date.now();
-    const logs    = { ...(s.logs[dKey]    || {}) };
-    const logsOff = { ...(s.logsOff?.[dKey] || {}) };
-    if (on) { delete logs[id]; logsOff[id] = at; }
-    else    { logs[id] = at;   delete logsOff[id]; }
-    return {
-      ...s,
-      logs:    { ...s.logs,       [dKey]: logs },
-      logsOff: { ...(s.logsOff || {}), [dKey]: logsOff },
-    };
-  });
+     rather than a tick being bare presence in logs — see toggleHabitLog.
+     Values stay truthy either way, so every read site is just
+     `log[habitId]` as before. */
+  const toggleHabit = (id) => setState(s => toggleHabitLog(s, dKey, id));
 
   /* Tasks due today or undated and not done — plus anything booked into
      this day's calendar, whatever it is due. Having decided to do it
@@ -3200,7 +3286,9 @@ function HabitChips({ habits, log, toggle, state }) {
                 : { background: `${p.color}14`, borderColor: `${p.color}55` }}>
               {on
                 ? <I.check className="w-5 h-5" style={{ color: '#0a0a0b' }}/>
-                : <I.flame className="w-5 h-5" style={{ color: p.color }}/>}
+                : h.icon
+                  ? <span className="text-xl leading-none">{h.icon}</span>
+                  : <I.flame className="w-5 h-5" style={{ color: p.color }}/>}
             </span>
             {/* Two lines, then ellipsis — "Sunnah Rawatib" should not
                 become "Sunnah…" for want of one more line. */}
@@ -3235,16 +3323,7 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
   const salah = useDaySalah(state, setState, dKey);
   const salahBlocks = salah.salahBlocks;
 
-  const toggleHabit = (id) => setState(s => {
-    const on = (s.logs[dKey] || {})[id];
-    const at = Date.now();
-    const logs    = { ...(s.logs[dKey]      || {}) };
-    const logsOff = { ...(s.logsOff?.[dKey] || {}) };
-    if (on) { delete logs[id]; logsOff[id] = at; }
-    else    { logs[id] = at;   delete logsOff[id]; }
-    return { ...s, logs: { ...s.logs, [dKey]: logs }, logsOff: { ...(s.logsOff || {}), [dKey]: logsOff } };
-  });
-  const toggleTask = (id) => setState(s => toggleTaskDone(s, id));
+  const toggleRow = (b) => setState(s => toggleBlockDone(s, dKey, b));
 
   const [nowMin, setNowMin] = useState(() => { const n = new Date(); return n.getHours()*60 + n.getMinutes(); });
   useEffect(() => {
@@ -3270,7 +3349,6 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
     el.scrollTop = Math.max(0, marker.offsetTop - el.clientHeight * NOW_SCROLL_FRACTION);
   }, [dKey]);
 
-  const done = (b) => b.habitId ? !!log[b.habitId] : b.taskId ? !!b.done : false;
 
   return (
     <div className="card overflow-hidden" data-testid="agenda">
@@ -3321,21 +3399,28 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
               const b = r.block;
               const p = b.isSalah ? { color: '#10b981', name: 'Salah' } : blockAccent(b, state);
               const Glyph = agendaGlyph(b);
-              const isDone = done(b);
-              const tickable = !b.isSalah && (b.habitId || b.taskId);
+              const emoji = b.habitId ? habitIcon(state, b.habitId) : null;
+              const isDone = blockDone(b, log);
+              /* Every row ticks. A prayer, a task, a habit and a plain
+                 block are all just "a thing on the day" once you are
+                 stood in front of them — see toggleBlockDone. */
+              const inset = Math.min(r.depth || 0, 2) * 16;
 
               return (
                 <div key={r.id} data-testid="agenda-row" data-done={isDone ? '1' : undefined}
-                  className="flex items-stretch gap-3">
+                  data-block={b.id} data-depth={r.depth || 0} className="flex items-stretch gap-3"
+                  style={r.depth ? { marginLeft: inset, paddingLeft: 8, borderLeft: '1px solid #2a2a31' } : undefined}>
                   <div className="w-10 shrink-0 text-right font-mono text-[10px] text-bone-400 pt-3.5">{toHM(b.start)}</div>
 
                   {/* Bubble, and the line joining it to whatever is next */}
                   <div className="w-11 shrink-0 flex flex-col items-center">
                     <span className="w-11 h-11 rounded-2xl flex items-center justify-center shrink-0"
                       style={{ background: isDone ? `${p.color}33` : p.color }}>
-                      {Glyph
-                        ? <Glyph className="w-5 h-5" style={{ color: isDone ? p.color : '#0a0a0b' }}/>
-                        : <span className="text-lg leading-none" style={{ color: isDone ? p.color : '#0a0a0b' }}>☽</span>}
+                      {emoji
+                        ? <span className="text-xl leading-none">{emoji}</span>
+                        : Glyph
+                          ? <Glyph className="w-5 h-5" style={{ color: isDone ? p.color : '#0a0a0b' }}/>
+                          : <span className="text-lg leading-none" style={{ color: isDone ? p.color : '#0a0a0b' }}>☽</span>}
                     </span>
                     {!last && <span className="flex-1 w-px my-1" style={{ background: '#2a2a31' }}/>}
                   </div>
@@ -3356,18 +3441,16 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
                     </div>
                   </button>
 
-                  {tickable && (
-                    <button onClick={()=>b.habitId ? toggleHabit(b.habitId) : toggleTask(b.taskId)}
-                      aria-label={`${isDone ? 'Untick' : 'Tick'} ${b.title}`}
-                      className="btn shrink-0 self-start pt-3.5 pr-1">
-                      <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all"
-                        style={isDone
-                          ? { background: p.color, borderColor: p.color }
-                          : { borderColor: '#2a2a31' }}>
-                        {isDone && <I.check className="w-3.5 h-3.5" style={{ color: '#0a0a0b' }}/>}
-                      </span>
-                    </button>
-                  )}
+                  <button onClick={()=>toggleRow(b)} data-testid="agenda-tick"
+                    aria-label={`${isDone ? 'Untick' : 'Tick'} ${b.title}`}
+                    className="btn shrink-0 self-start pt-3.5 pr-1">
+                    <span className="w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all"
+                      style={isDone
+                        ? { background: p.color, borderColor: p.color }
+                        : { borderColor: '#2a2a31' }}>
+                      {isDone && <I.check className="w-3.5 h-3.5" style={{ color: '#0a0a0b' }}/>}
+                    </span>
+                  </button>
                 </div>
               );
             })}
@@ -3521,25 +3604,11 @@ function Timeline({ state, setState, dow, dKey, sel }) {
     [state.blocks, state.habits, state.tasks, dKey, dow]);
   const log = state.logs[dKey] || {};
 
-  /* Ticking a habit off its own block. Same write as the checklist's — see
-     TodayView.toggleHabit for why an un-tick has to be recorded rather than
-     just absent. */
-  const toggleHabit = (id) => setState(s => {
-    const on = (s.logs[dKey] || {})[id];
-    const at = Date.now();
-    const logs    = { ...(s.logs[dKey]      || {}) };
-    const logsOff = { ...(s.logsOff?.[dKey] || {}) };
-    if (on) { delete logs[id]; logsOff[id] = at; }
-    else    { logs[id] = at;   delete logsOff[id]; }
-    return {
-      ...s,
-      logs:    { ...s.logs,             [dKey]: logs },
-      logsOff: { ...(s.logsOff || {}),  [dKey]: logsOff },
-    };
-  });
-  /* Same write as the task row's — a task ticked from its block and one
-     ticked from the list are the same event. */
-  const toggleTask = (id) => setState(s => toggleTaskDone(s, id));
+  /* Ticking a block off from the grid. Same write the agenda and the
+     checklist use, so a thing ticked in one place is ticked in all of
+     them — see toggleBlockDone, and toggleHabitLog under it for why an
+     un-tick has to be recorded rather than just absent. */
+  const toggleRow = (b) => setState(s => toggleBlockDone(s, dKey, b));
   const [editing, setEditing] = useState(null);
   const [adding,  setAdding]  = useState(null);
   const salah = useDaySalah(state, setState, dKey);
@@ -3617,10 +3686,11 @@ function Timeline({ state, setState, dow, dKey, sel }) {
               const p = blockAccent(b, state);
               const { col=0, numCols=1 } = layouts[b.id] || {};
               const pct = 100 / numCols;
-              /* A habit's or a task's block is the thing itself — so it
-                 can be ticked from here rather than making you go and
-                 find the checklist or the list. */
-              const done = b.habitId ? !!log[b.habitId] : b.taskId ? !!b.done : false;
+              /* A block IS the thing itself — so it ticks from here
+                 rather than making you go and find the checklist or the
+                 list, and a plain "Wake up" ticks the same way a habit
+                 does even though nothing else in the app knows about it. */
+              const done = blockDone(b, log);
               return segmentsOf(b).map((seg, i) => (
                 <div key={`${b.id}-${i}`}
                   data-testid={b.habitId ? 'habit-block' : b.taskId ? 'task-block' : 'time-block'}
@@ -3634,15 +3704,13 @@ function Timeline({ state, setState, dow, dKey, sel }) {
                     opacity: done ? 0.55 : 1,
                     pointerEvents: 'auto',
                   }}>
-                  {(b.habitId || b.taskId) && (
-                    <button onClick={()=>b.habitId ? toggleHabit(b.habitId) : toggleTask(b.taskId)}
-                      aria-label={`${done ? 'Untick' : 'Tick'} ${b.title}`}
-                      className="btn shrink-0 pl-2 pr-1 flex items-start pt-1.5">
-                      <div className={`tick ${done?'on':''}`} style={done ? { background: p.color, borderColor: p.color } : {}}>
-                        {done && <I.check className="w-3 h-3" style={{color:'#0a0a0b'}}/>}
-                      </div>
-                    </button>
-                  )}
+                  <button onClick={()=>toggleRow(b)}
+                    aria-label={`${done ? 'Untick' : 'Tick'} ${b.title}`}
+                    className="btn shrink-0 pl-2 pr-1 flex items-start pt-1.5">
+                    <div className={`tick ${done?'on':''}`} style={done ? { background: p.color, borderColor: p.color } : {}}>
+                      {done && <I.check className="w-3 h-3" style={{color:'#0a0a0b'}}/>}
+                    </div>
+                  </button>
                   <button onClick={()=>setEditing(b)}
                     className="btn flex-1 min-w-0 text-left px-2.5 py-1.5">
                     <div className="flex items-center justify-between gap-1">
@@ -3822,7 +3890,7 @@ function WeekCalendar({ state, setState, sel, setDate, onOpenDay }) {
                   const p = blockAccent(b, state);
                   const { col=0, numCols=1 } = layouts[b.id] || {};
                   const pct = 100 / numCols;
-                  const done = b.habitId ? !!log[b.habitId] : b.taskId ? !!b.done : false;
+                  const done = blockDone(b, log);
                   return segmentsOf(b).map((seg, i) => (
                     <button key={`${b.id}-${i}`}
                       data-testid={b.habitId ? 'week-habit-block' : b.taskId ? 'week-task-block' : 'week-time-block'}
@@ -4640,16 +4708,10 @@ function HabitChecklist({ habits, log, toggle, state, setState }) {
   if (!habits.length) return <EmptyHint text="No habits scheduled for this day."/>;
   const grouped = resolvePillars(state).map(p => ({ pillar: p, items: habits.filter(h => h.pillar === p.id) })).filter(g => g.items.length);
 
-  /* compute streak per habit */
-  const streakFor = (habitId, days) => {
-    let s = 0, cursor = new Date(parseKey(state.ui.selectedDate));
-    for (let i = 0; i < 366; i++) {
-      const k = fmtKey(cursor);
-      if (!days.includes(cursor.getDay())) { cursor = addDays(cursor, -1); continue; }
-      if ((state.logs[k]||{})[habitId]) { s++; cursor = addDays(cursor, -1); } else break;
-    }
-    return s;
-  };
+  /* Same streak the Habits tab shows — one definition, so a habit
+     can't be on a run of four in one place and a run of three in
+     another. */
+  const sel = parseKey(state.ui.selectedDate);
 
   return (
     <div className="space-y-3">
@@ -4662,7 +4724,7 @@ function HabitChecklist({ habits, log, toggle, state, setState }) {
           <div className="space-y-1">
             {g.items.map(h => {
               const on = !!log[h.id];
-              const s = streakFor(h.id, h.days);
+              const s = habitStreak(state, h, sel);
               const slot = slotForHabit(state, h.id);
               return (
                 <div key={h.id} data-testid="checklist-habit">
@@ -4707,42 +4769,155 @@ function HabitChecklist({ habits, log, toggle, state, setState }) {
 }
 
 /* ------------------------------------------------------------------
-   HABITS VIEW  ─ manage all habits with heatmaps
-------------------------------------------------------------------- */
-function HabitsView({ state, setState }) {
-  const [adding, setAdding] = useState(false);
-  const [editing, setEditing] = useState(null);
+   HABITS  ─ the day's habits, as a list you can tick
+   ------------------------------------------------------------------
+   This tab used to be a wall of read-only pillar cards: five columns of
+   heatmaps you could look at but not touch, so the only place in the
+   whole app you could actually tick a habit off was Today. Ticking
+   lives here too now — the same write, toggleHabitLog, that the
+   checklist and the timeline use — which turns this into somewhere you
+   can stand while doing the day rather than somewhere you visit to add
+   a habit and then leave.
 
-  const grouped = resolvePillars(state).map(p => ({ pillar: p, items: state.habits.filter(h => h.pillar === p.id) }));
+   It reads the selected date the header and Today already share, so a
+   day chosen in one place is still the day in the other, and the week
+   strip moves both.
+------------------------------------------------------------------- */
+const HABIT_WINDOW_DAYS = 30;
+
+/* The `n` days ending on `end`, each marked with whether this habit was
+   scheduled that day and whether it got done. */
+function habitWindow(state, h, end, n) {
+  const out = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = addDays(end, -i);
+    const k = fmtKey(d);
+    out.push({ k, scheduled: h.days.includes(d.getDay()), done: !!(state.logs[k] || {})[h.id] });
+  }
+  return out;
+}
+
+/* Consecutive scheduled days done, counting back from `end`.
+   Unscheduled days are stepped over rather than breaking the run — a
+   Monday-only habit has a streak of three after three Mondays, not a
+   streak of one. The 366 cap is what stops a habit scheduled on no days
+   at all (days: []) from walking backwards forever.
+
+   The end day being scheduled but not yet ticked doesn't zero the run:
+   at nine in the morning a three-day streak is still three days, and
+   ticking today turns it into four. Reporting 0 until the moment you
+   tick would mean every streak in the app reads zero for most of the
+   day it is describing. */
+function habitStreak(state, h, end) {
+  let cursor = new Date(end);
+  if (h.days.includes(cursor.getDay()) && !(state.logs[fmtKey(cursor)] || {})[h.id]) cursor = addDays(cursor, -1);
+  let s = 0;
+  for (let i = 0; i < 366; i++) {
+    if (!h.days.includes(cursor.getDay())) { cursor = addDays(cursor, -1); continue; }
+    if ((state.logs[fmtKey(cursor)] || {})[h.id]) { s++; cursor = addDays(cursor, -1); }
+    else break;
+  }
+  return s;
+}
+
+/* Which pillar you're looking at. Filtering rather than sectioning: the
+   five stacked pillar cards meant the Character habit you wanted was
+   four scroll-lengths under the Deen ones, on the tab whose whole job
+   is getting to a habit quickly. */
+function PillarFilter({ pillars, value, onChange }) {
+  const opts = [{ id: 'all', name: 'All', color: '#c8c4b4' }, ...pillars];
+  return (
+    <div className="flex gap-1.5 overflow-x-auto no-scrollbar pb-1 mb-3" data-testid="pillar-filter">
+      {opts.map(p => {
+        const on = value === p.id;
+        return (
+          <button key={p.id} onClick={()=>onChange(p.id)}
+            data-testid="pillar-chip" data-pillar={p.id} aria-pressed={on}
+            className="btn shrink-0 px-3 py-1.5 rounded-full text-xs font-medium"
+            style={on
+              ? { background: p.color, color: '#0a0a0b' }
+              : { background: 'var(--s2)', color: '#9a9788' }}>
+            {p.name}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function HabitsView({ state, setState }) {
+  const [adding, setAdding]   = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [pillar, setPillar]   = useState('all');
+
+  const dKey = state.ui.selectedDate;
+  const sel  = parseKey(dKey);
+  const dow  = sel.getDay();
+  const log  = state.logs[dKey] || {};
+
+  const setDate = (k)  => setState(s => ({ ...s, ui: { ...s.ui, selectedDate: k } }));
+  const toggle  = (id) => setState(s => toggleHabitLog(s, dKey, id));
+
+  const pillars = resolvePillars(state);
+  const inFilter = (h) => pillar === 'all' || h.pillar === pillar;
+
+  /* Done sinks to the bottom, so what is left to do is what is under
+     your thumb. Array sort is stable, so two undone habits keep the
+     order they were created in. */
+  const due  = state.habits.filter(h => inFilter(h) && h.days.includes(dow))
+                           .sort((a, b) => (log[a.id] ? 1 : 0) - (log[b.id] ? 1 : 0));
+  const rest = state.habits.filter(h => inFilter(h) && !h.days.includes(dow));
+
+  const done = due.filter(h => log[h.id]).length;
+  const pct  = due.length ? Math.round(done / due.length * 100) : 0;
 
   return (
     <div className="pt-6 fadeUp">
       <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
-        <SectionHeading kicker="Discipline" title="Habits across the five pillars" sub="Deen · Tech · Combat · Strategy · Character"/>
+        <SectionHeading kicker="Discipline" title="Habits across the five pillars"
+          sub={`${DAY_NAMES[dow]} ${sel.getDate()} ${MONTHS[sel.getMonth()]} · tap the circle to tick one off`}/>
         <button onClick={()=>setAdding(true)} className="btn px-4 py-2 rounded-lg bg-strategy text-ink-950 font-semibold text-sm flex items-center gap-1.5 shrink-0"><I.plus className="w-4 h-4"/>New habit</button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        {grouped.map(g => (
-          <div key={g.pillar.id} className="card p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-8 rounded-full" style={{ background: g.pillar.color }}/>
-                <div>
-                  <div className="font-display text-xl text-bone-100 leading-none">{g.pillar.name}</div>
-                  <div className="text-[10px] font-mono tracking-widest text-bone-400 mt-1">{g.items.length} HABIT{g.items.length===1?'':'S'}</div>
-                </div>
-              </div>
-              <div className="font-display italic text-bone-400 text-lg" style={{ direction:'rtl' }}>{g.pillar.arabic}</div>
-            </div>
-            <div className="space-y-3">
-              {g.items.length === 0
-                ? <div className="text-xs text-bone-400 italic py-2">No habits for this pillar yet.</div>
-                : g.items.map(h => <HabitCard key={h.id} h={h} state={state} setState={setState} onEdit={()=>setEditing(h)}/>) }
-            </div>
+      <WeekStrip state={state} sel={sel} setDate={setDate}/>
+      <PillarFilter pillars={pillars} value={pillar} onChange={setPillar}/>
+
+      {due.length > 0 && (
+        <div className="flex items-center gap-3 mb-3" data-testid="habits-progress">
+          <div className="flex-1 h-1.5 rounded-full bg-ink-700 overflow-hidden">
+            <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: '#10b981' }}/>
           </div>
-        ))}
+          <div className="font-mono text-[10px] tracking-widest text-bone-400 shrink-0">{done} / {due.length} DONE</div>
+        </div>
+      )}
+
+      <div className="space-y-2" data-testid="habit-list">
+        {due.length === 0
+          ? <EmptyHint text={state.habits.some(inFilter)
+              ? `Nothing scheduled for ${DAY_NAMES[dow]}.`
+              : 'No habits here yet — add your first.'}/>
+          : due.map(h => (
+              <HabitRow key={h.id} h={h} state={state} sel={sel} on={!!log[h.id]}
+                onToggle={()=>toggle(h.id)} onEdit={()=>setEditing(h)}/>
+            ))}
       </div>
+
+      {/* Habits that don't run today still belong on this page — it is
+          where you come to find and edit one, and a habit you can't see
+          is a habit you can't fix. They just don't get a tick. */}
+      {rest.length > 0 && (
+        <div className="mt-6" data-testid="habit-list-off">
+          <div className="font-mono text-[10px] tracking-widest text-bone-400 mb-2">
+            NOT ON {DAY_NAMES[dow].toUpperCase()}
+          </div>
+          <div className="space-y-2">
+            {rest.map(h => (
+              <HabitRow key={h.id} h={h} state={state} sel={sel} on={false} offDay
+                onEdit={()=>setEditing(h)}/>
+            ))}
+          </div>
+        </div>
+      )}
 
       {(adding || editing) && (
         <HabitModal habit={editing} state={state} onClose={()=>{ setAdding(false); setEditing(null); }}
@@ -4756,71 +4931,85 @@ function HabitsView({ state, setState }) {
   );
 }
 
-function HabitCard({ h, state, setState, onEdit }) {
-  const p = pillarByIdFromState(h.pillar, state);
-  /* compute 30-day mini heatmap */
-  const days = useMemo(() => {
-    const out = [];
-    const today = new Date();
-    for (let i = 29; i >= 0; i--) {
-      const d = addDays(today, -i);
-      const k = fmtKey(d);
-      const scheduled = h.days.includes(d.getDay());
-      const done = (state.logs[k]||{})[h.id];
-      out.push({ k, scheduled, done });
-    }
-    return out;
-  }, [state.logs, h.id, h.days]);
+/* One habit on the selected day. The row is a tile you recognise it by,
+   the name, what it stands at for the day, and one big circle on the
+   right that is the tick — deliberately the largest target in the row,
+   with nothing next to it competing for the same thumb.
 
-  /* current streak (only counts scheduled days) */
-  const streak = useMemo(() => {
-    let s = 0, cursor = new Date();
-    for (let i = 0; i < 366; i++) {
-      if (!h.days.includes(cursor.getDay())) { cursor = addDays(cursor, -1); continue; }
-      const k = fmtKey(cursor);
-      if ((state.logs[k]||{})[h.id]) { s++; cursor = addDays(cursor, -1); } else break;
-    }
-    return s;
-  }, [state.logs, h.id, h.days]);
+   `offDay` is a habit not scheduled on this day. It keeps its row so it
+   stays findable and editable, but loses the tick: every completion
+   figure in the app counts scheduled days only, so a tick there would
+   be a control that changes nothing you can see. */
+function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit }) {
+  const p    = pillarByIdFromState(h.pillar, state);
+  const slot = slotForHabit(state, h.id);
+  const selKey = fmtKey(sel);
 
-  /* 30-day completion rate (of scheduled days) */
-  const completion = useMemo(() => {
-    const sched = days.filter(d=>d.scheduled);
-    if (!sched.length) return 0;
-    return Math.round(sched.filter(d=>d.done).length / sched.length * 100);
-  }, [days]);
+  const days   = useMemo(() => habitWindow(state, h, sel, HABIT_WINDOW_DAYS), [state.logs, h.id, h.days, selKey]);
+  const streak = useMemo(() => habitStreak(state, h, sel), [state.logs, h.id, h.days, selKey]);
+  const sched      = days.filter(d => d.scheduled);
+  const completion = sched.length ? Math.round(sched.filter(d => d.done).length / sched.length * 100) : 0;
+
+  const dayLabel = h.days.length === 7 ? 'DAILY'
+    : h.days.length === 0 ? 'NO DAYS'
+    : h.days.map(d => DAY_SHORT[d].toUpperCase()).join(' · ');
 
   return (
-    <div className="rounded-lg border border-ink-700 p-3 bg-ink-900/40">
-      <div className="flex items-start justify-between gap-2 mb-2">
-        <div className="min-w-0">
-          <div className="font-medium text-bone-100 text-sm leading-tight">{h.name}</div>
-          <div className="font-mono text-[10px] tracking-wider text-bone-400 mt-1">
-            {h.days.length === 7 ? 'DAILY' : h.days.map(d=>DAY_SHORT[d].toUpperCase()).join(' · ')}
-          </div>
-        </div>
-        <button onClick={onEdit} aria-label={`Edit ${h.name}`} className="text-bone-400 hover:text-bone-100"><I.edit className="w-4 h-4"/></button>
+    <div data-testid="habit-row" data-habit={h.id} data-done={on ? '1' : '0'}
+      className={`card-soft flex items-center gap-3 p-3 ${offDay ? 'opacity-55' : ''}`}
+      style={on ? { background: `${p.color}14`, borderColor: `${p.color}44` } : undefined}>
+
+      {/* Stays the pillar's colour whether or not it's done — the tile
+          says which habit this is, not how it's going. */}
+      <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0 text-xl"
+        style={{ background: `${p.color}1f`, color: p.color }}>
+        {h.icon || <I.flame className="w-5 h-5"/>}
       </div>
-      <div className="flex items-center gap-3 mb-2">
-        <div className="flex-1 h-1.5 rounded-full bg-ink-700 overflow-hidden">
+
+      <button onClick={onEdit} aria-label={`Edit ${h.name}`} className="btn flex-1 min-w-0 text-left">
+        <div className="font-medium text-bone-100 leading-tight truncate">{h.name}</div>
+        <div className="flex items-center gap-2 mt-1 flex-wrap">
+          <span className="font-mono text-[10px] px-1.5 py-px rounded border"
+            style={on ? { color: p.color, borderColor: `${p.color}66` } : { color: '#9a9788', borderColor: 'var(--s3)' }}>
+            {offDay ? '—' : on ? '1/1' : '0/1'}
+          </span>
+          <span className="font-mono text-[10px] tracking-wider text-bone-400">{dayLabel}</span>
+          {slot && <span className="font-mono text-[10px] text-bone-400">{toHM(slot.start)}</span>}
         </div>
-        <div className="font-mono text-[10px] text-bone-400 w-16 text-right">{completion}% · 30D</div>
-      </div>
-      <div className="flex items-center justify-between">
-        <div className="flex gap-[2px]">
-          {days.map((d,i) => {
-            let cls = 'heat-0';
-            if (d.done) cls = 'heat-4';
-            else if (d.scheduled) cls = 'heat-1';
-            return <div key={i} className={`w-1.5 h-3 sm:w-2 sm:h-3.5 rounded-[2px] ${cls}`} title={`${d.k}${d.done?' · done':''}`} style={d.done ? { background: p.color } : (d.scheduled ? { background: `${p.color}26` } : {})}/>;
-          })}
+      </button>
+
+      {/* The thirty days behind this one, in the width the row has
+          spare. Hidden on a phone, where that width belongs to the name
+          and the tick. */}
+      <div className="hidden sm:flex items-center gap-3 shrink-0">
+        <div className="flex gap-[2px]" title={`${completion}% of scheduled days in the last ${HABIT_WINDOW_DAYS}`}>
+          {days.map(d => (
+            <div key={d.k} className="w-1.5 lg:w-2 h-4 rounded-[2px]"
+              title={`${d.k}${d.done ? ' · done' : ''}`}
+              style={d.done ? { background: p.color }
+                   : d.scheduled ? { background: `${p.color}26` }
+                   : { background: 'var(--s2)' }}/>
+          ))}
         </div>
-        {streak > 0 && (
-          <div className="font-mono text-xs flex items-center gap-1" style={{ color: p.color }}>
-            <I.flame className="w-3 h-3"/>{streak}
-          </div>
-        )}
+        <div className="font-mono text-[10px] text-bone-400 w-9 text-right" data-testid="habit-rate">{completion}%</div>
       </div>
+
+      {streak > 0 && (
+        <div className="font-mono text-xs flex items-center gap-0.5 shrink-0" data-testid="habit-streak"
+          style={{ color: p.color }} title={`${streak} scheduled days in a row`}>
+          <I.flame className="w-3.5 h-3.5"/>{streak}
+        </div>
+      )}
+
+      {!offDay && (
+        <button onClick={onToggle} data-testid="habit-row-tick" aria-pressed={on}
+          aria-label={`${on ? 'Untick' : 'Tick'} ${h.name}`}
+          className="btn w-9 h-9 rounded-full border-2 flex items-center justify-center shrink-0"
+          style={on ? { background: p.color, borderColor: p.color, color: '#0a0a0b' }
+                    : { borderColor: 'var(--s4)', color: 'var(--s4)' }}>
+          <I.check className="w-4 h-4"/>
+        </button>
+      )}
     </div>
   );
 }
@@ -4833,7 +5022,10 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
   const [pillar, setPillar] = useState(habit?.pillar || 'deen');
   const [days, setDays] = useState(habit?.days || [0,1,2,3,4,5,6]);
   const [reminder, setReminder] = useState(habit?.reminder || '');
+  const [icon, setIcon] = useState(habit?.icon || '');
+  const [iconOpen, setIconOpen] = useState(false);
   const [error, setError] = useState('');
+  const accent = pillarByIdFromState(pillar, state);
 
   /* The habit's slot on the calendar, if it has one. Held as a time and a
      length rather than start/end minutes because that is how you think
@@ -4850,7 +5042,7 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
     const id = habit?.id || `h-${Date.now()}`;
     const start = slotAt ? fromHM(slotAt) : null;
     onSave(
-      { id, name: name.trim(), pillar, days, created: habit?.created || Date.now(), reminder: reminder || null, modifiedAt: Date.now() },
+      { id, name: name.trim(), pillar, days, created: habit?.created || Date.now(), reminder: reminder || null, icon: icon || null, modifiedAt: Date.now() },
       /* The slot travels with the save so the habit and its block can never
          be written apart — a block pointing at a habit that wasn't saved is
          a ghost on the timeline. null means "not on the calendar". */
@@ -4861,9 +5053,33 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
   return (
     <Modal onClose={onClose} title={isNew ? 'New habit' : 'Edit habit'}>
       <Field label="Habit">
-        <input autoFocus value={name} onChange={e=>setName(e.target.value)}
-          placeholder="Read 10 pages of Mukhtasar Sahih Muslim"
-          className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100"/>
+        <div className="flex items-center gap-2">
+          {/* The tile, at the size it will actually appear — picking an
+              icon against a 32px preview and meeting it at 44px is how
+              you end up with one that reads as a smudge. */}
+          <button onClick={()=>setIconOpen(o=>!o)} aria-label="Choose an icon" aria-expanded={iconOpen}
+            className="btn w-11 h-11 shrink-0 rounded-xl flex items-center justify-center text-xl"
+            style={{ background: `${accent.color}1f`, color: accent.color }}>
+            {icon || <I.flame className="w-5 h-5"/>}
+          </button>
+          <input autoFocus value={name} onChange={e=>setName(e.target.value)}
+            placeholder="Read 10 pages of Mukhtasar Sahih Muslim"
+            className="flex-1 min-w-0 bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100"/>
+        </div>
+        {iconOpen && (
+          <div className="mt-2 p-2 rounded-lg border border-ink-700 bg-ink-900/60" data-testid="icon-picker">
+            <div className="grid grid-cols-8 sm:grid-cols-12 gap-1">
+              {HABIT_ICONS.map(e => (
+                <button key={e} onClick={()=>{ setIcon(e); setIconOpen(false); }} aria-label={`Icon ${e}`}
+                  className={`btn h-9 rounded-md text-lg flex items-center justify-center ${icon===e ? 'bg-ink-700' : 'hover:bg-ink-800'}`}>
+                  {e}
+                </button>
+              ))}
+            </div>
+            <button onClick={()=>{ setIcon(''); setIconOpen(false); }}
+              className="mt-2 text-[10px] font-mono tracking-wider text-bone-400 hover:text-bone-100">NO ICON</button>
+          </div>
+        )}
       </Field>
       <Field label="Pillar">
         <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
@@ -7822,22 +8038,33 @@ function GoalModal({ goal, state, defaultHorizon, defaultQuarter, habits, onClos
 /* ------------------------------------------------------------------
    PRIMITIVES
 ------------------------------------------------------------------- */
+/* Rendered into <body>, not where it was written.
+
+   Every view's root carries `fadeUp`, and an element with a running or
+   filled animation on transform makes a stacking context — so a modal
+   written inside a view had its z-50 measured against its own view
+   rather than against the page, which left it UNDER the sticky header
+   at z-30. Nothing looked wrong: the card painted on top of the page
+   body, and only the top ~130px of it, the part overlapping the header,
+   quietly stopped taking clicks. A portal puts it back in the root
+   stacking context where z-50 means what it says. */
 function Modal({ children, onClose, title }) {
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
-  return (
+  return ReactDOM.createPortal(
     <div className="fixed inset-0 z-50 bg-ink-950/80 backdrop-blur-sm flex items-center justify-center p-4 fadeUp" onClick={onClose}>
-      <div className="card max-w-md w-full p-5 space-y-3" onClick={e=>e.stopPropagation()}>
+      <div className="card modal-card scrollbar max-w-md w-full p-5 space-y-3" onClick={e=>e.stopPropagation()}>
         <div className="flex items-center justify-between mb-1">
           <div className="font-display text-2xl text-bone-100">{title}</div>
           <button onClick={onClose} className="text-bone-400 hover:text-bone-100"><I.x className="w-5 h-5"/></button>
         </div>
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

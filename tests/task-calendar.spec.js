@@ -184,7 +184,14 @@ test.describe('a task happens once', () => {
     }));
     const b = page.getByTestId('time-block').filter({ hasText: 'Deep work' });
     await expect(b).toBeVisible();
-    await expect(b.locator('.tick')).toHaveCount(0);   // nothing to complete
+    /* A plain block ticks off like anything else on the day, and the
+       tick lands in the day's log under the block's own id — it does
+       NOT become a task on the way. */
+    await b.getByRole('button', { name: 'Tick Deep work' }).click();
+    await expect(b.locator('.tick.on')).toHaveCount(1);
+    const after = await stored(page);
+    expect(after.tasks.filter(t => t.title === 'Deep work')).toHaveLength(0);
+    expect(Object.values(after.logs).some(day => day['b-work'])).toBe(true);
   });
 });
 

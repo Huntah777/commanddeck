@@ -217,8 +217,14 @@ test.describe('the block is the habit', () => {
     }));
     const b = page.getByTestId('time-block').filter({ hasText: 'Deep work' });
     await expect(b).toBeVisible();
-    // No tick — there is nothing to complete.
-    await expect(b.locator('.tick')).toHaveCount(0);
+    /* It ticks like everything else on the day now — but it is still a
+       plain block underneath, so it opens the block editor rather than
+       a habit's, and ticking it must not conjure a habit to hang the
+       tick on. */
+    await b.getByRole('button', { name: 'Tick Deep work' }).click();
+    await expect(b.locator('.tick.on')).toHaveCount(1);
+    expect((await stored(page)).habits).toHaveLength(1);   // just h-fajr
+
     await b.getByText('Deep work').click();
     await expect(page.getByText('Edit block')).toBeVisible();
   });

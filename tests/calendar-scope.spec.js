@@ -413,6 +413,73 @@ test.describe('the agenda', () => {
     await expect(row(page)).toHaveCount(0);
   });
 
+  test('a plain block ticks off too — everything on the day does', async ({ page }) => {
+    /* A block standing for nothing but itself ("Wake up") still has a
+       done state: it happened, or it didn't. */
+    await boot(page, DAY);
+    await row(page).filter({ hasText: 'Deep work' })
+      .getByRole('button', { name: 'Tick Deep work' }).click();
+
+    await expect.poll(async () => (await stored(page)).logs?.['2026-07-29']?.['b-deep'],
+      { timeout: 10_000 }).toBeTruthy();
+    await expect(row(page).filter({ hasText: 'Deep work' })).toHaveAttribute('data-done', '1');
+  });
+
+  test('and ticking it makes it neither a task nor a habit', async ({ page }) => {
+    /* The tick is a mark in the day's log under the block's own id.
+       Nothing is promoted on the way: the task list and the habit list
+       are exactly as long afterwards as they were before. */
+    await boot(page, DAY);
+    const before = await stored(page);
+    await row(page).filter({ hasText: 'Deep work' })
+      .getByRole('button', { name: 'Tick Deep work' }).click();
+    await expect.poll(async () => (await stored(page)).logs?.['2026-07-29']?.['b-deep'],
+      { timeout: 10_000 }).toBeTruthy();
+
+    const after = await stored(page);
+    expect(after.tasks).toHaveLength(before.tasks.length);
+    expect(after.habits).toHaveLength(before.habits.length);
+  });
+
+  test('un-ticking a plain block is recorded, not merely dropped', async ({ page }) => {
+    await boot(page, DAY);
+    const tickRow = row(page).filter({ hasText: 'Deep work' });
+    await tickRow.getByRole('button', { name: 'Tick Deep work' }).click();
+    await expect(tickRow).toHaveAttribute('data-done', '1');
+
+    await tickRow.getByRole('button', { name: 'Untick Deep work' }).click();
+    await expect(tickRow).not.toHaveAttribute('data-done', '1');
+    await expect.poll(async () => {
+      const st = await stored(page);
+      return !!st.logsOff?.['2026-07-29']?.['b-deep'] && !st.logs?.['2026-07-29']?.['b-deep'];
+    }, { timeout: 10_000 }).toBe(true);
+  });
+
+  test('the tick is the same one the hour grid shows', async ({ page }) => {
+    await boot(page, DAY);
+    await row(page).filter({ hasText: 'Deep work' })
+      .getByRole('button', { name: 'Tick Deep work' }).click();
+    await expect(row(page).filter({ hasText: 'Deep work' })).toHaveAttribute('data-done', '1');
+
+    await scope(page, 'day');
+    const grid = page.getByTestId('time-block').filter({ hasText: 'Deep work' }).first();
+    await expect(grid.locator('.tick.on')).toHaveCount(1);
+  });
+
+  test('a task block still completes the task, not a log entry of its own', async ({ page }) => {
+    /* "Everything ticks" must not flatten the three kinds into one: a
+       block standing for a task has a task to complete, and that is
+       still where the tick has to land. */
+    await boot(page, STATE({
+      tasks:  [{ id: 't-1', title: 'Write the deck', listId: 'l-inbox', quadrant: 'do', done: false, created: 1 }],
+      blocks: [{ id: 'b-t1', taskId: 't-1', date: '2026-07-29', start: 9*60, end: 10*60 }],
+    }));
+    await row(page).getByRole('button', { name: 'Tick Write the deck' }).click();
+
+    await expect.poll(async () => (await stored(page)).tasks?.[0]?.done, { timeout: 10_000 }).toBe(true);
+    expect((await stored(page)).logs?.['2026-07-29']?.['b-t1']).toBeFalsy();
+  });
+
   test('the prayer-times controls come with it, not just with the grid', async ({ page }) => {
     /* They own the location prompt and the manual fallback. Left in the
        hour grid, defaulting to the agenda would have hidden the only
@@ -420,6 +487,118 @@ test.describe('the agenda', () => {
     await boot(page, DAY);
     await expect(page.getByTestId('agenda').getByText('SALAH')).toBeVisible();
     await expect(page.getByTestId('agenda').getByRole('button', { name: /GET LOCATION|RESYNC/ })).toBeVisible();
+  });
+});
+
+/* Things that happen inside other things.
+
+   A prayer lands in the middle of a study block; a call lands in the
+   middle of a workshop. Drawn as two rival rows at the same level, the
+   day reads as a clash it isn't. Nested, it reads as what it is: the
+   study block, with a prayer in it. */
+test.describe('one thing inside another', () => {
+  const row   = (page) => page.getByTestId('agenda-row');
+  const gap   = (page) => page.getByTestId('agenda-gap');
+  const depths = (page) => row(page).evaluateAll(els => els.map(e => Number(e.dataset.depth)));
+  const ids    = (page) => row(page).evaluateAll(els => els.map(e => e.dataset.block));
+
+  test('the shorter one is nested under the longer, in order', async ({ page }) => {
+    await boot(page, STATE({ blocks: [
+      { id: 'b-study', title: 'Study',  pillar: 'tech', start:  9*60, end: 17*60, every: [1,2,3,4,5] },
+      { id: 'b-call',  title: 'Call',   pillar: 'tech', start: 13*60, end: 13*60+30, every: [1,2,3,4,5] },
+    ] }));
+    await expect(row(page)).toHaveCount(2);
+    expect(await ids(page)).toEqual(['b-study', 'b-call']);
+    expect(await depths(page)).toEqual([0, 1]);
+  });
+
+  test('a nested thing does not cut a gap out of its parent', async ({ page }) => {
+    /* Eight hours of study with a half-hour call in it is not "4h free,
+       call, 3.5h free" — the time either side of the call is still
+       study, and it is already on the screen. */
+    await boot(page, STATE({ blocks: [
+      { id: 'b-study', title: 'Study', pillar: 'tech', start:  9*60, end: 17*60, every: [1,2,3,4,5] },
+      { id: 'b-call',  title: 'Call',  pillar: 'tech', start: 13*60, end: 13*60+30, every: [1,2,3,4,5] },
+    ] }));
+    await expect(gap(page)).toHaveCount(0);
+  });
+
+  test('a partial overlap is a clash, and stays side by side', async ({ page }) => {
+    /* Neither contains the other, so neither is subordinate to it —
+       nesting here would claim a relationship that isn't there. */
+    await boot(page, STATE({ blocks: [
+      { id: 'b-a', title: 'A', pillar: 'tech', start:  9*60, end: 12*60, every: [1,2,3,4,5] },
+      { id: 'b-b', title: 'B', pillar: 'tech', start: 11*60, end: 13*60, every: [1,2,3,4,5] },
+    ] }));
+    expect(await depths(page)).toEqual([0, 0]);
+  });
+
+  test('two things filling exactly the same slot are a clash, not a nest', async ({ page }) => {
+    await boot(page, STATE({ blocks: [
+      { id: 'b-a', title: 'A', pillar: 'tech', start: 9*60, end: 11*60, every: [1,2,3,4,5] },
+      { id: 'b-b', title: 'B', pillar: 'tech', start: 9*60, end: 11*60, every: [1,2,3,4,5] },
+    ] }));
+    expect(await depths(page)).toEqual([0, 0]);
+  });
+
+  test('what follows the parent still gets its gap measured from the parent', async ({ page }) => {
+    await boot(page, STATE({ blocks: [
+      { id: 'b-study', title: 'Study', pillar: 'tech',     start:  9*60, end: 12*60, every: [1,2,3,4,5] },
+      { id: 'b-call',  title: 'Call',  pillar: 'tech',     start: 10*60, end: 10*60+30, every: [1,2,3,4,5] },
+      { id: 'b-later', title: 'Later', pillar: 'strategy', start: 14*60, end: 15*60, every: [1,2,3,4,5] },
+    ] }));
+    await expect(gap(page)).toHaveCount(1);
+    await expect(gap(page).first()).toContainText('2h free');   // 12:00 → 14:00
+  });
+});
+
+/* Prayer times land in the middle of whatever else is booked, which is
+   the case nesting exists for — and they tick off like anything else. */
+test.describe('prayer inside a booked block', () => {
+  const LOC = { lat: 51.5, lon: -0.12 };
+  const TIMINGS = { Fajr: '04:20 (BST)', Dhuhr: '13:10 (BST)', Asr: '17:20 (BST)',
+                    Maghrib: '21:00 (BST)', Isha: '22:30 (BST)' };
+
+  const withSalah = async (page) => {
+    await page.route('**api.aladhan.com/v1/calendar/**', route => route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify({ data: Array.from({ length: 31 }, (_, i) => ({
+        date: { gregorian: { date: `${String(i+1).padStart(2,'0')}-07-2026` } }, timings: TIMINGS,
+      })) }),
+    }));
+    await boot(page, STATE({
+      blocks: [{ id: 'b-study', title: 'Study', pillar: 'tech', start: 9*60, end: 17*60, every: [1,2,3,4,5] }],
+      ui: { view: 'today', selectedDate: '2026-07-29', salahLoc: LOC },
+    }));
+  };
+
+  test('Dhuhr sits inside the study block rather than beside it', async ({ page }) => {
+    await withSalah(page);
+    const dhuhr = page.getByTestId('agenda-row').filter({ hasText: 'Dhuhr' });
+    await expect(dhuhr).toHaveCount(1);
+    await expect(dhuhr).toHaveAttribute('data-depth', '1');
+    await expect(page.getByTestId('agenda-row').filter({ hasText: 'Study' }))
+      .toHaveAttribute('data-depth', '0');
+  });
+
+  test('and Asr, which the study block does not reach, does not', async ({ page }) => {
+    await withSalah(page);   // Asr 17:20, study ends 17:00
+    await expect(page.getByTestId('agenda-row').filter({ hasText: 'Asr' }))
+      .toHaveAttribute('data-depth', '0');
+  });
+
+  test('a prayer ticks off like everything else on the day', async ({ page }) => {
+    await withSalah(page);
+    await page.getByTestId('agenda-row').filter({ hasText: 'Dhuhr' })
+      .getByRole('button', { name: 'Tick Dhuhr' }).click();
+
+    /* Under the prayer's own stable id — it is not a habit and must not
+       become one. */
+    await expect.poll(async () => (await stored(page)).logs?.['2026-07-29']?.['salah-Dhuhr'],
+      { timeout: 10_000 }).toBeTruthy();
+    await expect(page.getByTestId('agenda-row').filter({ hasText: 'Dhuhr' }))
+      .toHaveAttribute('data-done', '1');
+    expect((await stored(page)).habits).toHaveLength(2);   // the two seeded ones
   });
 });
 
