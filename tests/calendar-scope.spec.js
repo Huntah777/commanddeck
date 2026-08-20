@@ -523,6 +523,39 @@ test.describe('one thing inside another', () => {
     await expect(gap(page)).toHaveCount(0);
   });
 
+  test('the parent says how much of it is already spoken for', async ({ page }) => {
+    /* Eight clear hours is what an eight-hour block looks like until it
+       tells you three of them are booked. */
+    await boot(page, STATE({ blocks: [
+      { id: 'b-study', title: 'Study',   pillar: 'tech',     start:  9*60, end: 17*60,    every: [1,2,3,4,5] },
+      { id: 'b-call',  title: 'Standup', pillar: 'strategy', start: 11*60, end: 11*60+15, every: [1,2,3,4,5] },
+      { id: 'b-1to1',  title: '1:1',     pillar: 'strategy', start: 13*60, end: 13*60+30, every: [1,2,3,4,5] },
+      { id: 'b-rev',   title: 'Review',  pillar: 'strategy', start: 15*60, end: 16*60,    every: [1,2,3,4,5] },
+    ] }));
+    await expect(row(page).filter({ hasText: 'Study' })).toContainText('3 inside');
+    /* Only the container says it — the things inside contain nothing. */
+    await expect(page.getByTestId('agenda-inside')).toHaveCount(1);
+  });
+
+  test('it counts everything inside, not just what sits directly under it', async ({ page }) => {
+    await boot(page, STATE({ blocks: [
+      { id: 'b-study', title: 'Study',   pillar: 'tech',     start:  9*60, end: 17*60,    every: [1,2,3,4,5] },
+      { id: 'b-block', title: 'Workshop',pillar: 'strategy', start: 10*60, end: 14*60,    every: [1,2,3,4,5] },
+      { id: 'b-call',  title: 'Standup', pillar: 'strategy', start: 11*60, end: 11*60+15, every: [1,2,3,4,5] },
+    ] }));
+    await expect(row(page).filter({ hasText: 'Study' })).toContainText('2 inside');
+    await expect(row(page).filter({ hasText: 'Workshop' })).toContainText('1 inside');
+  });
+
+  test('a block with nothing in it says nothing', async ({ page }) => {
+    await boot(page, STATE({ blocks: [
+      { id: 'b-a', title: 'A', pillar: 'tech',     start:  9*60, end: 11*60, every: [1,2,3,4,5] },
+      { id: 'b-b', title: 'B', pillar: 'strategy', start: 14*60, end: 15*60, every: [1,2,3,4,5] },
+    ] }));
+    await expect(row(page)).toHaveCount(2);
+    await expect(page.getByTestId('agenda-inside')).toHaveCount(0);
+  });
+
   test('a partial overlap is a clash, and stays side by side', async ({ page }) => {
     /* Neither contains the other, so neither is subordinate to it —
        nesting here would claim a relationship that isn't there. */

@@ -1477,7 +1477,9 @@ function agendaRows(items, nowMin = null) {
      move it forward but never back, so two things booked over each
      other don't invent a gap between them. */
   let covered = null;
-  /* Blocks still enclosing whatever comes next. */
+  /* The rows still enclosing whatever comes next, outermost first.
+     Rows rather than blocks, so an enclosing one can be counted up as
+     its contents are found. */
   const open = [];
 
   for (const b of sorted) {
@@ -1485,8 +1487,8 @@ function agendaRows(items, nowMin = null) {
        rival for the same slot. Strictly inside: something exactly as
        long as its would-be parent is a clash, not a child, and reads
        far better as two rows at the same level. */
-    while (open.length && !(blockReach(b) <= blockReach(open[open.length - 1])
-                            && blockSpan(b) < blockSpan(open[open.length - 1]))) open.pop();
+    while (open.length && !(blockReach(b) <= blockReach(open[open.length - 1].block)
+                            && blockSpan(b) < blockSpan(open[open.length - 1].block))) open.pop();
     const depth = open.length;
 
     /* Free time is only free at the top level. The stretch either side
@@ -1494,8 +1496,13 @@ function agendaRows(items, nowMin = null) {
     if (!depth && covered != null && b.start - covered >= AGENDA_GAP_MIN) {
       rows.push({ kind: 'gap', id: `gap-${covered}`, start: covered, end: b.start });
     }
-    rows.push({ kind: 'block', id: b.id, block: b, depth });
-    open.push(b);
+    const row = { kind: 'block', id: b.id, block: b, depth, inside: 0 };
+    rows.push(row);
+    /* Every enclosing row, not just the immediate one — "inside" means
+       inside, and a prayer within a meeting within a study block is
+       still a thing inside the study block. */
+    for (const anc of open) anc.inside++;
+    open.push(row);
     covered = Math.max(covered ?? 0, blockReach(b));
   }
 
@@ -3432,6 +3439,16 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
                       <span>{toHM(b.start)}–{toHM(b.end)}</span>
                       <span className="text-bone-400/70">({durLabel(b.end > b.start ? b.end - b.start : (1440 - b.start) + b.end)})</span>
                       {b.habitId && <I.refresh className="w-3 h-3 shrink-0" title="Repeats"/>}
+                      {/* What this block has swallowed. Worth saying on
+                          the row itself: an eight-hour block reads as
+                          eight clear hours otherwise, when three of the
+                          things in it are already spoken for. */}
+                      {r.inside > 0 && (
+                        <span data-testid="agenda-inside" className="px-1.5 py-px rounded border shrink-0"
+                          style={{ color: p.color, borderColor: `${p.color}55` }}>
+                          {r.inside} inside
+                        </span>
+                      )}
                     </div>
                     <div className={`text-[15px] font-semibold leading-snug truncate ${isDone ? 'text-bone-400 line-through' : 'text-bone-100'}`}>
                       {b.title}
