@@ -261,7 +261,7 @@ test.describe('landing on now, without scrolling to find it', () => {
     const { scrollTop: landed } = await scrollGeometry(scroller);
     expect(landed).toBeGreaterThan(0);
 
-    await page.getByRole('button', { name: '‹', exact: true }).click(); // yesterday
+    await page.getByRole('button', { name: 'Previous day' }).click(); // yesterday
     expect(await scroller.evaluate(el => el.scrollTop)).toBe(landed);
   });
 
@@ -270,7 +270,7 @@ test.describe('landing on now, without scrolling to find it', () => {
     await scope(page, 'day');
     const scroller = page.getByTestId('timeline-scroll');
 
-    await page.getByRole('button', { name: '‹', exact: true }).click(); // yesterday
+    await page.getByRole('button', { name: 'Previous day' }).click(); // yesterday
     await scroller.evaluate(el => { el.scrollTop = 5; }); // as if the user had scrolled around
 
     await page.getByRole('button', { name: 'TODAY', exact: true }).click();
@@ -395,7 +395,7 @@ test.describe('the agenda', () => {
 
   test('a day that is not today carries no now marker', async ({ page }) => {
     await boot(page, DAY);
-    await page.getByRole('button', { name: '‹', exact: true }).click();
+    await page.getByRole('button', { name: 'Previous day' }).click();
     await expect(page.getByTestId('agenda-now')).toHaveCount(0);
   });
 

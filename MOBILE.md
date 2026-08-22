@@ -41,18 +41,10 @@ The 8-pointed star from `command-deck-icon.svg` is used throughout:
 
 ---
 
-## What's next: notifications + widgets
+## What's next: notifications
 
 ### Notifications (Phase 2)
 The groundwork for push notifications is in place — the service worker already has a push event handler. The remaining step is generating a VAPID key pair and wiring up a small Cloudflare Worker to send reminders (Fajr, evening adhkar, habit check-in, etc.) on a schedule. This is free.
-
-### Home screen widgets (Phase 3)
-Widgets — the small panels you can place on the Android or iOS home screen showing today's habit streak, completion percentage, or next prayer time — require a native app wrapper. The path is:
-
-- **Android** (free): Wrap the app in Capacitor, then write a small native Android widget in Java/Kotlin that reads from shared storage the web layer writes to. The result is an APK you can install directly or publish to Google Play ($25 one-time).
-- **iOS** ($99/year): Same Capacitor wrapper, but the widget is written in Swift using WidgetKit. Requires an Apple Developer account to run on a real device.
-
-Both platforms can display live data from the app (streak, today's completion %, next salah) without the user needing to open it.
 
 ---
 

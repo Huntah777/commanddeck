@@ -85,6 +85,16 @@ tailwind.config = {
     --accent-glow: rgba(245,158,11,.45);
     --mark-from:   #f59e0b;  --mark-to: #b45309;
     --mark-glow:   rgba(245,158,11,.6);
+    /* Translucent fills, the way iOS and macOS build controls: a wash of
+       light over whatever is behind rather than a flat opaque grey. The
+       same control then stays legible on the plain background and on a
+       photo background, which this app supports. */
+    --fill:        rgba(255,255,255,.055);
+    --fill-hover:  rgba(255,255,255,.085);
+    --fill-active: rgba(255,255,255,.12);
+    --hairline:    rgba(255,255,255,.09);
+    --vibrancy:    rgba(22,22,27,.72);
+    --accent-ring: rgba(245,158,11,.35);
   }
   [data-theme="cyberpunk"] {
     --s0: #05000f;  --s1: #0a0118;  --s12: #0e0220;  --s2: #140230;
@@ -98,6 +108,14 @@ tailwind.config = {
     --accent-glow: rgba(0,229,255,.45);
     --mark-from:   #00e5ff;  --mark-to: #0044aa;
     --mark-glow:   rgba(0,229,255,.6);
+    /* Cyberpunk tints its fills toward the accent — a neutral white wash
+       reads as grey haze against this near-black violet ground. */
+    --fill:        rgba(0,229,255,.07);
+    --fill-hover:  rgba(0,229,255,.12);
+    --fill-active: rgba(0,229,255,.18);
+    --hairline:    rgba(0,229,255,.16);
+    --vibrancy:    rgba(10,1,24,.78);
+    --accent-ring: rgba(0,229,255,.35);
   }
   [data-theme="ghibli"] {
     --s0: #060b08;  --s1: #0b1510;  --s12: #0f1b12;  --s2: #131f14;
@@ -111,6 +129,29 @@ tailwind.config = {
     --accent-glow: rgba(86,212,112,.45);
     --mark-from:   #56d470;  --mark-to: #1a7a2a;
     --mark-glow:   rgba(86,212,112,.6);
+    /* Warm the wash toward the bone text, so a control on the forest
+       ground reads as lit rather than washed out. */
+    --fill:        rgba(240,232,200,.06);
+    --fill-hover:  rgba(240,232,200,.10);
+    --fill-active: rgba(240,232,200,.15);
+    --hairline:    rgba(240,232,200,.11);
+    --vibrancy:    rgba(11,21,16,.76);
+    --accent-ring: rgba(86,212,112,.35);
+  }
+
+  /* ── SHAPE & MOTION ───────────────────────────────────────────────
+     One radius scale and one motion curve for the whole app, so nothing
+     has to guess. The curve is the decelerating ease Apple uses
+     everywhere — quick to start, settling at the end — which is most of
+     why an interface "feels" native rather than merely animated. ── */
+  :root {
+    --r-xs: 8px;  --r-sm: 10px;  --r-md: 13px;  --r-lg: 17px;
+    --r-xl: 22px; --r-2xl: 28px; --r-pill: 999px;
+    --ease: cubic-bezier(.32,.72,0,1);
+    --dur: 200ms;
+    --shadow-1: 0 1px 2px rgba(0,0,0,.28);
+    --shadow-2: 0 4px 16px -4px rgba(0,0,0,.5);
+    --shadow-3: 0 18px 48px -12px rgba(0,0,0,.72);
   }
 
   /* ── TAILWIND CLASS OVERRIDES (all themes via [data-theme]) ───────── */
@@ -139,6 +180,21 @@ tailwind.config = {
   [data-theme] .bg-ink-800\/60 { background-color: color-mix(in srgb, var(--s2) 60%, transparent) !important; }
   [data-theme] .bg-ink-800\/40 { background-color: color-mix(in srgb, var(--s2) 40%, transparent) !important; }
   [data-theme] .focus\:border-strategy\/50:focus { border-color: var(--accent-50) !important; }
+
+  /* ── SOFT CORNERS ─────────────────────────────────────────────────
+     Tailwind's radii are re-pointed at the scale above rather than
+     hunted down across several hundred call sites. Every `rounded-lg`
+     already in the markup becomes the softer corner without the class
+     names changing, so this stays one edit rather than a diff nobody
+     can review. `rounded-full` is deliberately untouched — it is
+     already a capsule. ── */
+  [data-theme] .rounded-sm  { border-radius: 6px !important; }
+  [data-theme] .rounded     { border-radius: var(--r-xs) !important; }
+  [data-theme] .rounded-md  { border-radius: var(--r-sm) !important; }
+  [data-theme] .rounded-lg  { border-radius: var(--r-md) !important; }
+  [data-theme] .rounded-xl  { border-radius: var(--r-lg) !important; }
+  [data-theme] .rounded-2xl { border-radius: var(--r-xl) !important; }
+  [data-theme] .rounded-3xl { border-radius: var(--r-2xl) !important; }
 
   /* Cyberpunk — swap serif display font for monospace */
   [data-theme="cyberpunk"] .font-display {
@@ -186,8 +242,11 @@ tailwind.config = {
   }
 
   /* ── COMPONENTS ───────────────────────────────────────────────────── */
-  .card     { background: linear-gradient(180deg, var(--s12) 0%, var(--s1) 100%); border: 1px solid var(--s3); border-radius: 14px; }
-  .card-soft { background: var(--s12); border: 1px solid var(--s3); border-radius: 12px; }
+  /* The inset hairline along the top edge is what stops a dark card
+     reading as a flat hole — it is the light catching the lip, the same
+     trick every native panel uses. */
+  .card      { background: linear-gradient(180deg, var(--s12) 0%, var(--s1) 100%); border: 1px solid var(--s3); border-radius: var(--r-xl); box-shadow: var(--shadow-1), inset 0 1px 0 var(--hairline); }
+  .card-soft { background: var(--s12); border: 1px solid var(--s3); border-radius: var(--r-lg); box-shadow: inset 0 1px 0 var(--hairline); }
 
   /* A modal taller than the phone it is on used to be clipped at BOTH
      ends with no way to reach either: the backdrop is fixed and centres
@@ -201,6 +260,12 @@ tailwind.config = {
     overflow-y: auto;
     overscroll-behavior: contain;
   }
+  /* A sheet is the most foreground thing on screen, so it gets the
+     largest corner and the deepest shadow — the two cues that say
+     "this is on top of everything" without a border doing the work. */
+  .sheet { border-radius: var(--r-2xl) !important; box-shadow: var(--shadow-3), inset 0 1px 0 var(--hairline); }
+  @keyframes sheetIn { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: none; } }
+  .sheet { animation: sheetIn 260ms var(--ease) both; }
   .divider  { border-top: 1px solid var(--s3); }
 
   .scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -212,8 +277,109 @@ tailwind.config = {
   .no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
   .no-scrollbar::-webkit-scrollbar { display: none; }
 
-  .btn { transition: all 160ms ease; }
-  .btn:hover { transform: translateY(-1px); }
+  /* ── CONTROLS ─────────────────────────────────────────────────────
+     Buttons are capsules, and the press state scales down a touch
+     rather than changing colour — the feedback a physical key gives,
+     and the thing that makes a tap feel like it landed on a phone,
+     where there is no hover to lean on. ── */
+  .btn {
+    transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
+                border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
+                transform 140ms var(--ease);
+  }
+  .btn:active { transform: scale(.96); }
+
+  /* Filled capsule — the one affirmative action on a screen. */
+  .btn-primary {
+    background: var(--accent); color: var(--s0);
+    border: none; border-radius: var(--r-pill);
+    padding: 9px 18px; font-size: 13px; font-weight: 600;
+    font-family: 'Manrope', sans-serif; cursor: pointer;
+    box-shadow: var(--shadow-1);
+    transition: filter var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform 140ms var(--ease);
+  }
+  .btn-primary:hover { filter: brightness(1.08); box-shadow: var(--shadow-2); }
+  .btn-primary:active { transform: scale(.96); }
+  .btn-primary:disabled { opacity: .45; cursor: default; transform: none; filter: none; }
+
+  /* Unfilled capsule — everything else. */
+  .btn-ghost {
+    background: var(--fill); color: var(--f1);
+    border: 1px solid transparent; border-radius: var(--r-pill);
+    padding: 8px 16px; font-size: 13px; font-weight: 500;
+    font-family: 'Manrope', sans-serif; cursor: pointer;
+    transition: background var(--dur) var(--ease), color var(--dur) var(--ease), transform 140ms var(--ease);
+  }
+  .btn-ghost:hover { background: var(--fill-hover); color: var(--f0); }
+  .btn-ghost:active { transform: scale(.96); }
+  .btn-ghost:disabled { opacity: .45; cursor: default; transform: none; }
+
+  /* Capsule toggle — the "bubble" used for filters and any on/off chip. */
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 13px; border-radius: var(--r-pill);
+    border: 1px solid transparent; background: var(--fill);
+    color: var(--f2); font-family: 'Manrope', sans-serif;
+    font-size: 12.5px; font-weight: 600; cursor: pointer;
+    white-space: nowrap; user-select: none;
+    transition: background var(--dur) var(--ease), color var(--dur) var(--ease), transform 140ms var(--ease);
+  }
+  .pill:hover { background: var(--fill-hover); color: var(--f0); }
+  .pill:active { transform: scale(.95); }
+  .pill.on { background: var(--accent); color: var(--s0); box-shadow: var(--shadow-1); }
+  .pill.on:hover { filter: brightness(1.08); }
+
+  /* Segmented control: one recessed track, the selection a raised slug
+     that sits proud of it. iOS builds every either/or switch this way. */
+  .seg {
+    display: inline-flex; align-items: center; gap: 2px;
+    padding: 3px; border-radius: var(--r-pill);
+    background: var(--fill); border: 1px solid var(--hairline);
+  }
+  .seg > button {
+    background: none; border: none; border-radius: var(--r-pill);
+    padding: 5px 14px; font-family: 'Manrope', sans-serif;
+    font-size: 12px; font-weight: 600; color: var(--f2);
+    cursor: pointer; white-space: nowrap;
+    transition: background var(--dur) var(--ease), color var(--dur) var(--ease), transform 140ms var(--ease);
+  }
+  .seg > button:hover { color: var(--f0); }
+  .seg > button:active { transform: scale(.95); }
+  .seg > button[aria-pressed="true"] {
+    background: var(--s2); color: var(--f0);
+    box-shadow: var(--shadow-1), inset 0 1px 0 var(--hairline);
+  }
+
+  /* Circular icon button — toolbar affordance, thumb-sized on purpose. */
+  .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 34px; height: 34px; border-radius: var(--r-pill);
+    border: none; background: var(--fill); color: var(--f2);
+    cursor: pointer; flex-shrink: 0;
+    transition: background var(--dur) var(--ease), color var(--dur) var(--ease), transform 140ms var(--ease);
+  }
+  .icon-btn:hover { background: var(--fill-hover); color: var(--f0); }
+  .icon-btn:active { transform: scale(.9); }
+  .icon-btn.sm { width: 28px; height: 28px; }
+
+  /* The capture bar is the one field you are meant to type into on
+     sight, so it lights up as a whole rather than drawing a border on
+     the input inside it — the iOS search-field behaviour. */
+  .capture { transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease); }
+  .capture:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3.5px var(--accent-ring); }
+
+  /* The translucent wash as a utility, for the handful of places that
+     want a capsule background without the rest of a button's opinions. */
+  .bg-fill { background: var(--fill); }
+  .bg-fill:hover { background: var(--fill-hover); }
+
+  /* A row in a grouped list — the iOS settings-table idiom. */
+  .row-soft {
+    border-radius: var(--r-md); background: var(--s12);
+    border: 1px solid var(--s3);
+    transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), transform var(--dur) var(--ease);
+  }
+  .row-soft:hover { background: var(--s2); border-color: var(--s4); }
   .glow-deen      { box-shadow: 0 0 0 1px rgba(16,185,129,.25),  0 8px 24px -12px rgba(16,185,129,.45);  }
   .glow-tech      { box-shadow: 0 0 0 1px rgba(34,211,238,.25),  0 8px 24px -12px rgba(34,211,238,.45);  }
   .glow-combat    { box-shadow: 0 0 0 1px rgba(239,68,68,.25),   0 8px 24px -12px rgba(239,68,68,.45);   }
@@ -223,7 +389,11 @@ tailwind.config = {
   .now-line { position: absolute; left: 56px; right: 0; height: 1px; background: linear-gradient(90deg, #ef4444 0%, rgba(239,68,68,0) 100%); z-index: 5; }
   .now-dot  { position: absolute; left: 50px; width: 10px; height: 10px; border-radius: 999px; background: #ef4444; box-shadow: 0 0 0 4px rgba(239,68,68,.18); z-index: 6; transform: translate(-50%, -50%); }
 
-  .tick { width: 18px; height: 18px; border-radius: 6px; border: 1.5px solid var(--s4); display: inline-flex; align-items: center; justify-content: center; transition: all 140ms ease; flex-shrink: 0; }
+  /* Round, not square: a circle is what iOS uses for "one of many done",
+     and it reads as tappable at a size a square checkbox does not. */
+  .tick { width: 20px; height: 20px; border-radius: var(--r-pill); border: 1.5px solid var(--s4); display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background 140ms var(--ease), border-color 140ms var(--ease), transform 140ms var(--ease); }
+  .tick:hover { border-color: #10b981; }
+  .tick:active { transform: scale(.88); }
   .tick.on { background: #10b981; border-color: #10b981; }
   .tick.on svg { color: var(--s0); }
 
@@ -252,7 +422,7 @@ tailwind.config = {
     border-color: var(--accent) !important;
   }
 
-  .mark { width: 34px; height: 34px; border-radius: 9px; background: radial-gradient(circle at 30% 30%, var(--mark-from), var(--mark-to) 70%); display: flex; align-items: center; justify-content: center; box-shadow: inset 0 0 0 1px rgba(0,0,0,.4), 0 6px 20px -8px var(--mark-glow); }
+  .mark { width: 34px; height: 34px; border-radius: var(--r-md); background: radial-gradient(circle at 30% 30%, var(--mark-from), var(--mark-to) 70%); display: flex; align-items: center; justify-content: center; box-shadow: inset 0 0 0 1px rgba(0,0,0,.4), 0 6px 20px -8px var(--mark-glow); }
 
   /* ── BACKGROUND PHOTO/GIF LAYER ──────────────────────────────────── */
   #app-bg-img  { position: fixed; inset: 0; z-index: -2; background: var(--app-bg-img, none) center/cover no-repeat; background-color: var(--s0); }
@@ -2881,7 +3051,7 @@ function InstallBanner() {
         </button>
         {prompt && (
           <button onClick={install}
-            className="btn px-3 py-1.5 rounded-lg bg-strategy text-ink-950 text-xs font-bold tracking-wide">
+            className="btn-primary text-xs font-bold tracking-wide !py-1.5 !px-4">
             INSTALL
           </button>
         )}
@@ -2999,8 +3169,8 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
             {pomo && <TimerPill pomo={pomo} active={state.ui.view === 'focus'} onClick={()=>setView('focus')}/>}
             <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
             {syncStatus !== 'local' && (
-              <button onClick={onSyncNow} title="Sync now"
-                className={`btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-400 hover:text-bone-100 ${syncStatus === 'saving' ? 'animate-spin pointer-events-none' : ''}`}>
+              <button onClick={onSyncNow} title="Sync now" aria-label="Sync now"
+                className={`icon-btn ${syncStatus === 'saving' ? 'animate-spin pointer-events-none' : ''}`}>
                 <I.refresh className="w-4 h-4"/>
               </button>
             )}
@@ -3024,17 +3194,19 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
           <div className="flex-1 min-w-0">
             {/* Mobile: dropdown select */}
             <select value={state.ui.view} onChange={e => setView(e.target.value)} aria-label="Section"
-              className="sm:hidden w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-sm text-bone-100 font-mono tracking-wider appearance-none cursor-pointer">
+              className="sm:hidden w-full bg-ink-800 border border-ink-700 rounded-full px-4 py-2.5 text-sm text-bone-100 font-mono tracking-wider appearance-none cursor-pointer">
               {tabs.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
             </select>
-            {/* sm+: tab bar */}
-            <nav className="hidden sm:flex gap-1">
+            {/* sm+: one recessed track with the current section as a raised
+                capsule inside it, rather than seven separate buttons —
+                a segmented control reads as "pick one of these". */}
+            <nav className="hidden sm:inline-flex items-center gap-1 p-1 rounded-full bg-ink-900/60 border border-ink-700">
               {tabs.map(t => {
                 const Icon = t.icon;
                 const active = state.ui.view === t.id;
                 return (
-                  <button key={t.id} onClick={()=>setView(t.id)}
-                    className={`btn px-3.5 py-2 rounded-lg flex items-center gap-2 text-sm whitespace-nowrap ${active ? 'bg-bone-100 text-ink-950 font-semibold' : 'text-bone-300 hover:bg-ink-800'}`}>
+                  <button key={t.id} onClick={()=>setView(t.id)} aria-pressed={active}
+                    className={`btn px-3.5 py-1.5 rounded-full flex items-center gap-2 text-sm whitespace-nowrap ${active ? 'bg-bone-100 text-ink-950 font-semibold shadow' : 'text-bone-300 hover:bg-ink-800'}`}>
                     <Icon className="w-4 h-4"/>{t.label}
                   </button>
                 );
@@ -3046,18 +3218,20 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
               {pomo && <TimerPill pomo={pomo} active={state.ui.view === 'focus'} onClick={()=>setView('focus')}/>}
               <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
               {syncStatus !== 'local' && (
-                <button onClick={onSyncNow} title="Sync now"
-                  className={`btn w-7 h-7 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-400 ${syncStatus === 'saving' ? 'animate-spin pointer-events-none' : ''}`}>
+                <button onClick={onSyncNow} title="Sync now" aria-label="Sync now"
+                  className={`icon-btn sm ${syncStatus === 'saving' ? 'animate-spin pointer-events-none' : ''}`}>
                   <I.refresh className="w-3.5 h-3.5"/>
                 </button>
               )}
             </span>
-            <button onClick={()=>setDate(fmtKey(addDays(sel,-1)))}
-              className="btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-300">‹</button>
+            {/* Prev · Today · Next as one capsule cluster: the two arrows
+                are round targets and TODAY is the pill between them. */}
+            <button onClick={()=>setDate(fmtKey(addDays(sel,-1)))} aria-label="Previous day"
+              className="icon-btn">‹</button>
             <button onClick={()=>setDate(todayKey())}
-              className="btn px-2.5 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 text-xs font-mono tracking-wider text-bone-300">TODAY</button>
-            <button onClick={()=>setDate(fmtKey(addDays(sel,1)))}
-              className="btn w-8 h-8 rounded-lg border border-ink-700 hover:bg-ink-800 flex items-center justify-center text-bone-300">›</button>
+              className="btn px-3.5 h-[34px] rounded-full bg-fill text-xs font-mono tracking-wider text-bone-300 hover:text-bone-100">TODAY</button>
+            <button onClick={()=>setDate(fmtKey(addDays(sel,1)))} aria-label="Next day"
+              className="icon-btn">›</button>
           </div>
         </div>
       </div>
@@ -3193,11 +3367,10 @@ function SectionHeading({ kicker, title, sub, className = 'mb-3' }) {
 /* Day / Week / Month. */
 function ScopeSwitch({ scope, setScope }) {
   return (
-    <div role="group" aria-label="Calendar scope" data-testid="scope-switch"
-      className="flex items-center gap-0.5 p-0.5 rounded-lg border border-ink-700 bg-ink-900/50">
+    <div role="group" aria-label="Calendar scope" data-testid="scope-switch" className="seg">
       {TODAY_SCOPES.map(s => (
         <button key={s} onClick={()=>setScope(s)} data-testid={`scope-${s}`} aria-pressed={scope === s}
-          className={`btn px-2.5 py-1 rounded-md text-[11px] font-mono tracking-wider uppercase ${scope === s ? 'bg-bone-100 text-ink-950 font-semibold' : 'text-bone-400 hover:text-bone-100'}`}>
+          className="font-mono tracking-wider uppercase text-[11px]">
           {s}
         </button>
       ))}
@@ -4148,7 +4321,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
             Take off calendar
           </button>
           <div className="flex-1"/>
-          <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Cancel</button>
+          <button onClick={onClose} className="btn-ghost text-sm">Cancel</button>
           <button onClick={save} className="btn px-4 py-2 rounded-lg bg-bone-100 text-ink-950 font-semibold text-sm">Save block</button>
         </div>
       </Modal>
@@ -4199,7 +4372,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
             Take off calendar
           </button>
           <div className="flex-1"/>
-          <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Cancel</button>
+          <button onClick={onClose} className="btn-ghost text-sm">Cancel</button>
           <button onClick={save} className="btn px-4 py-2 rounded-lg bg-bone-100 text-ink-950 font-semibold text-sm">Save block</button>
         </div>
       </Modal>
@@ -4252,9 +4425,9 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
       </Field>
       {error && <div className="text-xs text-combat">{error}</div>}
       <div className="flex justify-between gap-2 pt-2">
-        {!isNew && <button onClick={()=>onDelete(block.id)} className="btn px-3 py-2 rounded-lg text-combat border border-combat/30 hover:bg-combat/10 text-sm flex items-center gap-1.5"><I.trash className="w-4 h-4"/>Delete</button>}
+        {!isNew && <button onClick={()=>onDelete(block.id)} className="btn-ghost !text-combat hover:!bg-combat/10 text-sm flex items-center gap-1.5"><I.trash className="w-4 h-4"/>Delete</button>}
         <div className="flex-1"/>
-        <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Cancel</button>
+        <button onClick={onClose} className="btn-ghost text-sm">Cancel</button>
         <button onClick={save} className="btn px-4 py-2 rounded-lg bg-bone-100 text-ink-950 font-semibold text-sm">Save block</button>
       </div>
     </Modal>
@@ -4395,7 +4568,7 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
   const filedList = filed && state.lists.find(l => l.id === filed.listId);
 
   return (
-    <div className="card-soft mb-3 overflow-hidden">
+    <div className="card-soft capture mb-3 overflow-hidden">
       <div className="flex items-center gap-2 p-2.5">
         <I.plus className="w-4 h-4 text-bone-400 ml-1.5"/>
         <input value={title} onChange={e=>setTitle(e.target.value)}
@@ -4404,7 +4577,7 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
           placeholder="Capture a task… e.g. dave needs the deck by friday"
           className="flex-1 bg-transparent text-sm text-bone-100 placeholder:text-bone-400/70"/>
         {parsing && <span data-testid="parse-status" className="text-[10px] font-mono tracking-wider text-bone-400">FILING…</span>}
-        {title && <button onClick={submit} className="btn px-3 py-1.5 rounded-md bg-strategy text-ink-950 text-xs font-semibold">Add</button>}
+        {title && <button onClick={submit} className="btn-primary text-xs !py-1.5 !px-4">Add</button>}
       </div>
 
       {/* Optional overrides, for when you are filing rather than dumping.
@@ -4669,8 +4842,8 @@ function TaskEditModal({ t, state, setState, onClose }) {
         </div>
       </Field>
       <div className="flex justify-end gap-2 pt-2">
-        <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Cancel</button>
-        <button onClick={save} className="btn px-4 py-2 rounded-lg bg-bone-100 text-ink-950 font-semibold text-sm">Save</button>
+        <button onClick={onClose} className="btn-ghost text-sm">Cancel</button>
+        <button onClick={save} className="btn-primary !bg-bone-100 !text-ink-950 text-sm">Save</button>
       </div>
     </Modal>
   );
@@ -4850,10 +5023,8 @@ function PillarFilter({ pillars, value, onChange }) {
         return (
           <button key={p.id} onClick={()=>onChange(p.id)}
             data-testid="pillar-chip" data-pillar={p.id} aria-pressed={on}
-            className="btn shrink-0 px-3 py-1.5 rounded-full text-xs font-medium"
-            style={on
-              ? { background: p.color, color: '#0a0a0b' }
-              : { background: 'var(--s2)', color: '#9a9788' }}>
+            className="pill shrink-0"
+            style={on ? { background: p.color, color: '#0a0a0b', boxShadow: 'var(--shadow-1)' } : undefined}>
             {p.name}
           </button>
         );
@@ -4893,7 +5064,7 @@ function HabitsView({ state, setState }) {
       <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
         <SectionHeading kicker="Discipline" title="Habits across the five pillars"
           sub={`${DAY_NAMES[dow]} ${sel.getDate()} ${MONTHS[sel.getMonth()]} · tap the circle to tick one off`}/>
-        <button onClick={()=>setAdding(true)} className="btn px-4 py-2 rounded-lg bg-strategy text-ink-950 font-semibold text-sm flex items-center gap-1.5 shrink-0"><I.plus className="w-4 h-4"/>New habit</button>
+        <button onClick={()=>setAdding(true)} className="btn-primary text-sm flex items-center gap-1.5 shrink-0"><I.plus className="w-4 h-4"/>New habit</button>
       </div>
 
       <WeekStrip state={state} sel={sel} setDate={setDate}/>
@@ -5162,10 +5333,10 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
       </Field>
       {error && <div className="text-xs text-combat">{error}</div>}
       <div className="flex justify-between gap-2 pt-2">
-        {!isNew && <button onClick={()=>onDelete(habit.id)} className="btn px-3 py-2 rounded-lg text-combat border border-combat/30 hover:bg-combat/10 text-sm flex items-center gap-1.5"><I.trash className="w-4 h-4"/>Delete</button>}
+        {!isNew && <button onClick={()=>onDelete(habit.id)} className="btn-ghost !text-combat hover:!bg-combat/10 text-sm flex items-center gap-1.5"><I.trash className="w-4 h-4"/>Delete</button>}
         <div className="flex-1"/>
-        <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Cancel</button>
-        <button onClick={save} className="btn px-4 py-2 rounded-lg bg-bone-100 text-ink-950 font-semibold text-sm">Save</button>
+        <button onClick={onClose} className="btn-ghost text-sm">Cancel</button>
+        <button onClick={save} className="btn-primary !bg-bone-100 !text-ink-950 text-sm">Save</button>
       </div>
     </Modal>
   );
@@ -5223,10 +5394,9 @@ function TasksView({ state, setState }) {
       <section className="col-span-12 md:col-span-9">
         <div className="flex items-end justify-between mb-3 gap-3 flex-wrap">
           <SectionHeading kicker="Tasks" title={activeList==='all' ? 'All tasks' : (state.lists.find(l=>l.id===activeList)?.name || 'Tasks')} sub={`${filtered.length} item${filtered.length===1?'':'s'}`}/>
-          <div className="flex gap-1 bg-ink-800 rounded-lg p-1 text-xs">
+          <div className="seg" role="group" aria-label="Task filter">
             {['open','done','all'].map(f => (
-              <button key={f} onClick={()=>setFilter(f)}
-                className={`px-3 py-1 rounded-md ${filter===f ? 'bg-bone-100 text-ink-950 font-semibold' : 'text-bone-400'}`}>{f.toUpperCase()}</button>
+              <button key={f} onClick={()=>setFilter(f)} aria-pressed={filter===f}>{f.toUpperCase()}</button>
             ))}
           </div>
         </div>
@@ -5477,10 +5647,11 @@ function AdminOverview({ state, syncStatus, onSyncNow }) {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <SectionHeading kicker="Admin · 01" title="The numbers don't lie" sub={`${rangeLabel} view across the five pillars`}/>
-        <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="seg flex-wrap" role="group" aria-label="Stats range">
           {STAT_RANGES.map(r => (
             <button key={r.value} onClick={() => setStatsRange(r.value)}
-              className={`btn px-3 py-1.5 rounded-lg border text-xs font-mono tracking-wider ${statsRange === r.value ? 'bg-bone-100 text-ink-950 font-semibold border-transparent' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
+              aria-pressed={statsRange === r.value}
+              className="font-mono tracking-wider text-xs">
               {r.label}
             </button>
           ))}
@@ -5700,11 +5871,12 @@ function AdminView({ state, setState, hydrate, theme, setTheme, background, chan
           the old page made you scroll back to the top to go anywhere. */}
       <div style={{ top: 'var(--header-h, 140px)' }}
         className="sticky z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-2 mb-5 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700">
-        <nav data-testid="admin-nav" className="flex gap-1.5 flex-wrap">
+        <nav data-testid="admin-nav" className="seg flex-wrap">
           {ADMIN_SECTIONS.map(s => (
             <button key={s.id} onClick={() => go(s.id)}
               aria-current={tab === s.id ? 'page' : undefined}
-              className={`btn px-3.5 py-1.5 rounded-lg text-xs font-mono tracking-wider whitespace-nowrap ${tab === s.id ? 'bg-bone-100 text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
+              aria-pressed={tab === s.id}
+              className="font-mono tracking-wider text-xs">
               {s.label}
             </button>
           ))}
@@ -7396,7 +7568,7 @@ function PomodoroView({ state, setState, pomo }) {
   const updateCfg = (next) => setState(s => ({ ...s, pomodoro: next }));
   const cyclePos  = session.doneCount % cfg.longAfter;
 
-  const KIND_BTN = (k) => `btn px-3 py-1.5 rounded-lg text-[11px] font-mono tracking-wider ${kind === k ? 'bg-bone-100 text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400 hover:bg-ink-800'}`;
+  const KIND_BTN = 'font-mono tracking-wider text-[11px]';
 
   return (
     <div className="max-w-4xl mx-auto pt-6 fadeUp">
@@ -7517,10 +7689,10 @@ function PomodoroView({ state, setState, pomo }) {
           <div className="card-soft p-4" data-testid="focus-picker">
             <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-2.5">FOCUS ON</div>
 
-            <div className="flex gap-1.5 flex-wrap mb-3">
-              <button onClick={chooseFree}     className={KIND_BTN('free')}>FREE</button>
-              <button onClick={()=>setKind('task')}   className={KIND_BTN('task')}>TASK</button>
-              <button onClick={()=>setKind('pillar')} className={KIND_BTN('pillar')}>PILLAR</button>
+            <div className="seg mb-3" role="group" aria-label="Focus target">
+              <button onClick={chooseFree}            aria-pressed={kind==='free'}   className={KIND_BTN}>FREE</button>
+              <button onClick={()=>setKind('task')}   aria-pressed={kind==='task'}   className={KIND_BTN}>TASK</button>
+              <button onClick={()=>setKind('pillar')} aria-pressed={kind==='pillar'} className={KIND_BTN}>PILLAR</button>
             </div>
 
             {kind === 'free' && (
@@ -7707,7 +7879,7 @@ function PomodoroSettings({ cfg, onChange }) {
           longMins:  clamp(long,  1, 120),
           longAfter: clamp(after, 1, 10),
         })}
-        className="btn w-full py-2 rounded-lg bg-strategy text-ink-950 font-semibold text-sm">
+        className="btn-primary w-full text-sm">
         Apply settings
       </button>
     </div>
@@ -8043,10 +8215,10 @@ function GoalModal({ goal, state, defaultHorizon, defaultQuarter, habits, onClos
       </Field>
 
       <div className="flex justify-between gap-2 pt-2">
-        {!isNew && <button onClick={()=>onDelete(goal.id)} className="btn px-3 py-2 rounded-lg text-combat border border-combat/30 hover:bg-combat/10 text-sm flex items-center gap-1.5"><I.trash className="w-4 h-4"/>Delete</button>}
+        {!isNew && <button onClick={()=>onDelete(goal.id)} className="btn-ghost !text-combat hover:!bg-combat/10 text-sm flex items-center gap-1.5"><I.trash className="w-4 h-4"/>Delete</button>}
         <div className="flex-1"/>
-        <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Cancel</button>
-        <button onClick={save} className="btn px-4 py-2 rounded-lg bg-bone-100 text-ink-950 font-semibold text-sm">Save</button>
+        <button onClick={onClose} className="btn-ghost text-sm">Cancel</button>
+        <button onClick={save} className="btn-primary !bg-bone-100 !text-ink-950 text-sm">Save</button>
       </div>
     </Modal>
   );
@@ -8072,11 +8244,11 @@ function Modal({ children, onClose, title }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
   return ReactDOM.createPortal(
-    <div className="fixed inset-0 z-50 bg-ink-950/80 backdrop-blur-sm flex items-center justify-center p-4 fadeUp" onClick={onClose}>
-      <div className="card modal-card scrollbar max-w-md w-full p-5 space-y-3" onClick={e=>e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 bg-ink-950/80 backdrop-blur-xl flex items-center justify-center p-4 fadeUp" onClick={onClose}>
+      <div className="card modal-card scrollbar max-w-md w-full p-5 space-y-3 sheet" onClick={e=>e.stopPropagation()}>
         <div className="flex items-center justify-between mb-1">
           <div className="font-display text-2xl text-bone-100">{title}</div>
-          <button onClick={onClose} className="text-bone-400 hover:text-bone-100"><I.x className="w-5 h-5"/></button>
+          <button onClick={onClose} aria-label="Close" className="icon-btn sm"><I.x className="w-4 h-4"/></button>
         </div>
         {children}
       </div>
@@ -8139,8 +8311,8 @@ function TokenSetupModal({ current, onClose, onSubmit }) {
         Stored in this browser only. On first connect, if D1 is empty your local data is pushed up. Otherwise D1's data replaces what's here.
       </div>
       <div className="flex justify-end gap-2 pt-2">
-        <button onClick={onClose} className="btn px-4 py-2 rounded-lg border border-ink-700 text-bone-300 text-sm">Later</button>
-        <button onClick={submit} className="btn px-4 py-2 rounded-lg bg-strategy text-ink-950 font-semibold text-sm">Connect</button>
+        <button onClick={onClose} className="btn-ghost text-sm">Later</button>
+        <button onClick={submit} className="btn-primary text-sm">Connect</button>
       </div>
     </Modal>
   );
