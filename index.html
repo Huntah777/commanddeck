@@ -860,6 +860,139 @@ const sameDay = (a,b) => a.getFullYear()===b.getFullYear() && a.getMonth()===b.g
 const addDays = (d, n) => { const r = new Date(d); r.setDate(r.getDate()+n); return r; };
 const todayKey = () => fmtKey(new Date());
 
+/* ------------------------------------------------------------------
+   HIJRI CALENDAR  +  FASTING DAYS
+   ------------------------------------------------------------------
+   Fasting days are Hijri facts, not weekday ones. Ramadan, the white
+   days, Ashura and Arafah all move through the Gregorian year, and so
+   do the days on which fasting is forbidden. A list of weekdays cannot
+   express any of that, so the app reads the Islamic date itself.
+
+   Umm al-Qura through Intl rather than an arithmetic table of our own:
+   it is what the printed calendars people actually use are based on, and
+   the browser and the Cron Worker's runtime carry the same ICU data — so
+   both ends land on the same date without shipping a table twice and
+   hoping the two copies stay in step.
+
+   A calculated calendar still disagrees with a local moonsighting by a
+   day either way, which is what hijriOffset is for. It is applied by
+   moving the Gregorian date before conversion, so every rule below stays
+   a plain test on a Hijri date.
+
+   MIRRORED in push-worker/index.js, so background push reaches the same
+   conclusions with the app closed — change both.
+------------------------------------------------------------------- */
+const HIJRI_MONTHS = [
+  'Muharram', 'Safar', 'Rabi al-Awwal', 'Rabi al-Thani',
+  'Jumada al-Ula', 'Jumada al-Akhirah', 'Rajab', 'Shaban',
+  'Ramadan', 'Shawwal', 'Dhu al-Qadah', 'Dhu al-Hijjah',
+];
+const HIJRI_OFFSET_LIMIT = 2;
+
+/* Built once and kept — constructing a DateTimeFormat is expensive enough
+   to matter when the agenda asks about thirty days in a row. `null` means
+   this engine has no Umm al-Qura data, and every caller below degrades to
+   "no Hijri date known" rather than throwing. */
+let _hijriFmt;
+const hijriFormatter = () => {
+  if (_hijriFmt === undefined) {
+    try {
+      _hijriFmt = new Intl.DateTimeFormat('en-u-ca-islamic-umalqura', {
+        timeZone: 'UTC', year: 'numeric', month: 'numeric', day: 'numeric',
+      });
+    } catch { _hijriFmt = null; }
+  }
+  return _hijriFmt;
+};
+
+const clampHijriOffset = (v) =>
+  Math.max(-HIJRI_OFFSET_LIMIT, Math.min(HIJRI_OFFSET_LIMIT, Math.round(Number(v) || 0)));
+
+/* 'YYYY-MM-DD' -> { y, m, d, month } in the Hijri calendar, or null.
+   Anchored at noon UTC so no timezone can drag the answer onto the
+   neighbouring day. */
+function hijriOn(dayKey, offset = 0) {
+  const f = hijriFormatter();
+  if (!f || !/^\d{4}-\d{2}-\d{2}$/.test(dayKey || '')) return null;
+  const [y, m, d] = dayKey.split('-').map(Number);
+  const at = new Date(Date.UTC(y, m - 1, d, 12) + clampHijriOffset(offset) * 86400000);
+  try {
+    const p = Object.fromEntries(f.formatToParts(at).map(x => [x.type, x.value]));
+    const hy = parseInt(p.year, 10), hm = Number(p.month), hd = Number(p.day);
+    if (![hy, hm, hd].every(Number.isFinite)) return null;
+    return { y: hy, m: hm, d: hd, month: HIJRI_MONTHS[hm - 1] || `Month ${hm}` };
+  } catch { return null; }
+}
+
+const fmtHijri      = (h) => h ? `${h.d} ${h.month} ${h.y} AH` : '';
+const fmtHijriShort = (h) => h ? `${h.d} ${h.month}` : '';
+
+/* Day-of-week straight off the key, in UTC. parseKey builds a *local*
+   Date, and the notification planners work in the user's chosen timezone
+   rather than the device's — both have to agree on which day is Monday. */
+const dowOf = (dayKey) => {
+  const [y, m, d] = String(dayKey).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+};
+
+/* n days on from a date key, without a local Date in the middle. */
+const addDaysKey = (dayKey, n) => {
+  const [y, m, d] = String(dayKey).split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + n));
+  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+};
+
+/* Each rule is a pure test on a Hijri date. `on` is what applies to
+   someone who has never opened the Fasting tab: the fasts whose dates
+   are fixed in the calendar are on; the one whose days are a personal
+   choice — which six of Shawwal — is off. Weekday fasting is off by
+   default too, and lives in admin.fastingDays. */
+const FASTING_RULES = [
+  { id:'ramadan',   label:'Ramadan',        hint:'The whole month',          on:true,  test:h => h.m === 9 },
+  { id:'whiteDays', label:'Ayyam al-Bid',   hint:'13th-15th of every month', on:true,  test:h => h.d >= 13 && h.d <= 15 },
+  { id:'ashura',    label:'Ashura',         hint:'9th & 10th Muharram',      on:true,  test:h => h.m === 1 && (h.d === 9 || h.d === 10) },
+  { id:'arafah',    label:'Arafah',         hint:'9th Dhu al-Hijjah',        on:true,  test:h => h.m === 12 && h.d === 9 },
+  { id:'shawwal',   label:'Six of Shawwal', hint:'2nd-7th Shawwal',          on:false, test:h => h.m === 10 && h.d >= 2 && h.d <= 7 },
+];
+
+/* Days on which fasting is forbidden. Not a preference, so not
+   toggleable: they override every rule above and any weekday picked by
+   hand. This is exactly what a weekday list gets wrong every year — the
+   13th of Dhu al-Hijjah is a white day and a day of Tashriq at the same
+   time, and the prohibition is the half that counts. */
+const FASTING_FORBIDDEN = [
+  { label:'Eid al-Fitr',     test:h => h.m === 10 && h.d === 1 },
+  { label:'Eid al-Adha',     test:h => h.m === 12 && h.d === 10 },
+  { label:'Days of Tashriq', test:h => h.m === 12 && h.d >= 11 && h.d <= 13 },
+];
+
+const fastingRulesOn = (admin) =>
+  Object.fromEntries(FASTING_RULES.map(r => [r.id, admin?.fastingRules?.[r.id] ?? r.on]));
+
+/* When the night-before reminder goes out. Mirrored in
+   push-worker/index.js as FAST_REMINDER_DEFAULTS. */
+const FAST_REMINDER_DEFAULTS = { on: true, time: '20:00' };
+
+/* Everything there is to say about one day: its Hijri date, whether it
+   is a fast, and why. The "why" is the point — it is what the header
+   badge and the night-before reminder both show, and a reminder that
+   can't say which fast it means is one you learn to ignore. */
+function fastingInfo(dayKey, state) {
+  const admin = state?.admin;
+  const hijri = hijriOn(dayKey, admin?.hijriOffset);
+  const out = { hijri, fasting: false, reasons: [], forbidden: null };
+  if (hijri) {
+    const blocked = FASTING_FORBIDDEN.find(r => r.test(hijri));
+    if (blocked) { out.forbidden = blocked.label; return out; }
+    const on = fastingRulesOn(admin);
+    for (const r of FASTING_RULES) if (on[r.id] && r.test(hijri)) out.reasons.push(r.label);
+  }
+  const dow = dowOf(dayKey);
+  if ((admin?.fastingDays || []).includes(dow)) out.reasons.push(`${DAY_NAMES[dow]}s`);
+  out.fasting = out.reasons.length > 0;
+  return out;
+}
+
 /* Convert minutes from midnight ↔ "HH:MM" */
 const toHM = (mins) => `${String(Math.floor(mins/60)).padStart(2,'0')}:${String(mins%60).padStart(2,'0')}`;
 const fromHM = (s) => { const [h,m] = s.split(':').map(Number); return (h||0)*60 + (m||0); };
@@ -1832,11 +1965,18 @@ const SEED = () => ({
      judged by the model. See functions/api/parse.js.
      { id, name, aliases: [], weight: 1..5, modifiedAt } */
   people: [],
-  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null, salahOffsets: { Fajr: 0, Dhuhr: 0, Asr: 0, Maghrib: 0, Isha: 0 }, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' } },
+  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null, salahOffsets: { Fajr: 0, Dhuhr: 0, Asr: 0, Maghrib: 0, Isha: 0 }, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' }, fastReminder: { ...FAST_REMINDER_DEFAULTS } },
   admin: {
     pillars: {},          /* { [id]: { name?, color? } } */
     quads: {},            /* { [id]: { title?, sub?, hint? } } */
-    fastingDays: [1, 4],  /* Mon=1, Thu=4 */
+    /* Fasting is decided by the Hijri calendar (see FASTING_RULES), not
+       by a weekday. `fastingDays` is the manual override on top of that
+       — an empty list, because Mon/Thu used to be seeded here as though
+       everyone had asked for it. Pick them in Admin > Fasting if you
+       want them. */
+    fastingDays: [],      /* extra weekdays to fast — Sun=0 … Sat=6 */
+    fastingRules: {},     /* { [ruleId]: bool } — overrides FASTING_RULES defaults */
+    hijriOffset: 0,       /* +/- days, to match the local moonsighting */
   },
   /* coach: the last weekly review, plus the spend guard's own bookkeeping.
      Written by /api/coach server-side; the client only ever reads it.
@@ -1845,6 +1985,22 @@ const SEED = () => ({
   deleted: {},            /* { [id]: deletedAt } — tombstones, see mergeState */
   logsOff: {},            /* { 'YYYY-MM-DD': { [habitId]: unTickedAt } } */
 });
+
+/* Mon/Thu used to be seeded into admin.fastingDays as though every user
+   had chosen them. They are out of the seed now, but a device that has
+   already synced has the pair stored, and changing the seed alone never
+   reaches it. So clear it once on load — and only when it is still
+   exactly the seeded pair, leaving a hand-picked Mon/Thu alone. The flag
+   is what makes it happen once: without it, choosing Mon/Thu again by
+   hand would be wiped on the next load. */
+const SEEDED_FASTING_DAYS = [1, 4];
+function retireSeededFastingDays(admin) {
+  const days = Array.isArray(admin?.fastingDays) ? admin.fastingDays : [];
+  if (admin?.fastingDaysCleared) return days;
+  const stillSeeded = days.length === SEEDED_FASTING_DAYS.length
+    && SEEDED_FASTING_DAYS.every(d => days.includes(d));
+  return stillSeeded ? [] : days;
+}
 
 /* ── Delete bookkeeping ───────────────────────────────────────────
    Deleting has to be recorded, not just applied: the sync merge treats an
@@ -2240,6 +2396,23 @@ function buildPlan(state) {
     if (gr.eveningOn) fireGoalReminders('goals-pm', gr.eveningTime);
   }
 
+  /* "You're fasting tomorrow" — sent the evening before, because a fast
+     you find out about at breakfast is a fast that doesn't happen. Suhur
+     gets planned the night before or not at all, so this deliberately
+     fires today about tomorrow rather than on the morning itself.
+
+     It names the fast, so it can be acted on without opening the app:
+     Arafah and an ordinary white day are not the same decision. */
+  const fr = { ...FAST_REMINDER_DEFAULTS, ...(state.ui?.fastReminder || {}) };
+  if (fr.on && fr.time) {
+    const tomorrow = fastingInfo(addDaysKey(zonedKey, 1), state);
+    if (tomorrow.fasting) {
+      const [fh, fm] = String(fr.time).split(':').map(Number);
+      const body = [tomorrow.reasons.join(' · '), fmtHijri(tomorrow.hijri)].filter(Boolean).join(' — ');
+      push('fast-eve', 'Fasting tomorrow', body, atHm(fh, fm));
+    }
+  }
+
   return notifications;
 }
 
@@ -2573,11 +2746,16 @@ function App() {
                         evening reminder) gets its default even for a device
                         whose saved state predates it */
                      goalsReminder: { ...SEED().ui.goalsReminder, ...(data?.ui?.goalsReminder || {}) },
+                     fastReminder:  { ...FAST_REMINDER_DEFAULTS,  ...(data?.ui?.fastReminder  || {}) },
                    },
       pomodoro:    { ...SEED().pomodoro, ...(data?.pomodoro || {}) },
       admin:       { ...SEED().admin,    ...(data?.admin    || {}),
                      pillars: { ...(data?.admin?.pillars || {}) },
                      quads:   { ...(data?.admin?.quads   || {}) },
+                     fastingRules: { ...(data?.admin?.fastingRules || {}) },
+                     hijriOffset:  clampHijriOffset(data?.admin?.hijriOffset),
+                     fastingDays:  retireSeededFastingDays(data?.admin),
+                     fastingDaysCleared: true,
                    },
       pomodoroLogs: data?.pomodoroLogs || [],
       goals: data?.goals || [],
@@ -3091,8 +3269,12 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
   const today = new Date();
   const sel = parseKey(state.ui.selectedDate || todayKey());
   const dayName = DAY_NAMES[sel.getDay()];
-  const fastingDays = state.admin?.fastingDays ?? [1, 4];
-  const isFastingDay = fastingDays.includes(sel.getDay());
+  /* The selected day in the Hijri calendar, and whether it is a fast —
+     Ramadan, a white day, Ashura, Arafah, or a weekday chosen by hand.
+     `forbidden` is the other half of knowing the Islamic date: the two
+     Eids and the days of Tashriq are days you must NOT fast, and they
+     say so here rather than quietly showing nothing. */
+  const fast = fastingInfo(state.ui.selectedDate || todayKey(), state);
 
   /* compute a "today's pillar completion" summary */
   const dayKey = state.ui.selectedDate;
@@ -3159,7 +3341,23 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
               </div>
               <div className="text-xs text-bone-400 font-mono tracking-wider mt-1.5 flex items-center gap-2 flex-wrap">
                 <span>{sel.getDate()} {MONTHS[sel.getMonth()]} {sel.getFullYear()}</span>
-                {isFastingDay && <span className="px-1.5 py-0.5 rounded-md bg-deen/15 text-deen border border-deen/30">FASTING DAY</span>}
+                {fast.hijri && (
+                  <span data-testid="hijri-date" title={fmtHijri(fast.hijri)} className="text-deen/80">
+                    {fmtHijriShort(fast.hijri)}
+                  </span>
+                )}
+                {fast.fasting && (
+                  <span data-testid="fasting-badge" title={`Fasting — ${fast.reasons.join(' · ')}`}
+                    className="px-1.5 py-0.5 rounded-md bg-deen/15 text-deen border border-deen/30">
+                    FASTING · {fast.reasons[0]}
+                  </span>
+                )}
+                {fast.forbidden && (
+                  <span data-testid="no-fasting-badge" title={`Fasting is not allowed on ${fast.forbidden}`}
+                    className="px-1.5 py-0.5 rounded-md bg-ink-800 text-bone-300 border border-ink-700">
+                    {fast.forbidden}
+                  </span>
+                )}
                 {sameDay(sel, today) && <span className="px-1.5 py-0.5 rounded-md bg-strategy/15 text-strategy border border-strategy/30">TODAY</span>}
               </div>
             </div>
@@ -5292,7 +5490,7 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
         <div className="flex gap-2 mt-2">
           <button onClick={()=>setDays([0,1,2,3,4,5,6])} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-bone-100">DAILY</button>
           <button onClick={()=>setDays([1,2,3,4,5])} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-bone-100">WEEKDAYS</button>
-          <button onClick={()=>setDays([1,4])} className="text-[10px] font-mono tracking-wider text-deen hover:text-bone-100">MON/THU (FAST)</button>
+          <button onClick={()=>setDays([1,4])} className="text-[10px] font-mono tracking-wider text-deen hover:text-bone-100">MON/THU</button>
         </div>
       </Field>
       {/* A habit with a slot in the day is a block on the timeline, and
@@ -7035,14 +7233,47 @@ function AdminCard({ state, setState }) {
   const dismissWeight = (s) =>
     setSuggestions(p => ({ ...p, weights: p.weights.filter(w => w.personId !== s.personId) }));
 
-  /* ── Fasting days ── */
-  const fastingDays = admin.fastingDays ?? [1, 4];
+  /* ── Fasting ──────────────────────────────────────────────────
+     The Hijri rules do the work; the weekday list is the manual
+     override on top of them, and starts empty. */
+  const fastingDays = admin.fastingDays ?? [];
+  const rulesOn     = fastingRulesOn(admin);
+  const hijriOffset = clampHijriOffset(admin.hijriOffset);
+  const fastRem     = { ...FAST_REMINDER_DEFAULTS, ...(state.ui?.fastReminder || {}) };
+
   const toggleFasting = (d) =>
     setState(s => {
-      const cur = s.admin?.fastingDays ?? [1, 4];
+      const cur = s.admin?.fastingDays ?? [];
       const next = cur.includes(d) ? cur.filter(x => x !== d) : [...cur, d].sort();
       return { ...s, admin: { ...s.admin, fastingDays: next } };
     });
+  const toggleRule = (id) =>
+    setState(s => ({
+      ...s,
+      admin: { ...s.admin, fastingRules: { ...fastingRulesOn(s.admin), [id]: !fastingRulesOn(s.admin)[id] } },
+    }));
+  const setHijriOffset = (v) =>
+    setState(s => ({ ...s, admin: { ...s.admin, hijriOffset: clampHijriOffset(v) } }));
+  const setFastRem = (patch) =>
+    setState(s => ({
+      ...s,
+      ui: { ...s.ui, fastReminder: { ...FAST_REMINDER_DEFAULTS, ...s.ui?.fastReminder, ...patch } },
+    }));
+
+  /* The next fasts on the calendar. A rule like "13th-15th of every
+     month" is impossible to check by eye against a Gregorian date, so
+     the settings show their own consequences a year out — that is also
+     the fastest way to tell whether the Hijri adjustment below is set
+     the way your local mosque has it. */
+  const upcomingFasts = useMemo(() => {
+    const out = [];
+    for (let i = 0; i < 365 && out.length < 6; i++) {
+      const key  = addDaysKey(todayKey(), i);
+      const info = fastingInfo(key, state);
+      if (info.fasting) out.push({ key, info, inDays: i });
+    }
+    return out;
+  }, [admin.fastingRules, admin.fastingDays, admin.hijriOffset]);
 
   const TAB_CLS = (t) => `btn px-3 py-1.5 rounded-lg text-xs font-mono tracking-wider ${tab === t ? 'bg-bone-100 text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400 hover:bg-ink-800'}`;
 
@@ -7053,7 +7284,7 @@ function AdminCard({ state, setState }) {
 
       {/* Tab bar */}
       <div className="flex gap-1.5 flex-wrap mb-5">
-        {[['pillars','Pillars'],['quads','Quadrants'],['people','People'],['lists','Task lists'],['fasting','Fasting days']].map(([id,label]) => (
+        {[['pillars','Pillars'],['quads','Quadrants'],['people','People'],['lists','Task lists'],['fasting','Fasting']].map(([id,label]) => (
           <button key={id} onClick={()=>setTab(id)} className={TAB_CLS(id)}>{label}</button>
         ))}
       </div>
@@ -7222,17 +7453,107 @@ function AdminCard({ state, setState }) {
         </div>
       )}
 
-      {/* ── FASTING DAYS ── */}
+      {/* ── FASTING ── */}
       {tab === 'fasting' && (
-        <div>
-          <p className="text-xs text-bone-400 mb-4">Choose which days show the "FASTING DAY" badge in the header.</p>
-          <div className="flex gap-2 flex-wrap">
-            {DAY_NAMES.map((name, i) => (
-              <button key={i} onClick={() => toggleFasting(i)}
-                className={`btn px-4 py-2 rounded-lg border text-sm ${fastingDays.includes(i) ? 'bg-deen/20 border-deen/50 text-deen' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
-                {name.slice(0,3)}
+        <div className="space-y-6">
+          <div>
+            <div className="text-xs font-mono tracking-widest text-bone-400 mb-1">FROM THE HIJRI CALENDAR</div>
+            <p className="text-xs text-bone-400 mb-3">
+              These move with the Islamic year, so the app works them out from the Hijri date rather than the weekday.
+            </p>
+            <div className="space-y-1.5">
+              {FASTING_RULES.map(r => (
+                <button key={r.id} onClick={() => toggleRule(r.id)} data-testid={`fast-rule-${r.id}`}
+                  className={`btn w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border text-left ${rulesOn[r.id] ? 'bg-deen/10 border-deen/40' : 'border-ink-700 hover:bg-ink-800'}`}>
+                  <span className={`w-4 h-4 rounded shrink-0 border flex items-center justify-center ${rulesOn[r.id] ? 'bg-deen border-deen' : 'border-ink-600'}`}>
+                    {rulesOn[r.id] && <I.check className="w-3 h-3 text-ink-950"/>}
+                  </span>
+                  <span className="min-w-0">
+                    <span className={`block text-sm ${rulesOn[r.id] ? 'text-deen' : 'text-bone-300'}`}>{r.label}</span>
+                    <span className="block text-[10px] text-bone-500 font-mono tracking-wider">{r.hint}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-bone-500 mt-2">
+              The two Eids and the days of Tashriq are never marked — fasting is not allowed on them, whatever is set here.
+            </p>
+          </div>
+
+          <div>
+            <div className="text-xs font-mono tracking-widest text-bone-400 mb-1">ALSO EVERY</div>
+            <p className="text-xs text-bone-400 mb-3">
+              Weekdays to fast on top of the above. Empty by default — Mondays and Thursdays are a choice, not a setting the app should make for you.
+            </p>
+            <div className="flex gap-2 flex-wrap">
+              {DAY_NAMES.map((name, i) => (
+                <button key={i} onClick={() => toggleFasting(i)}
+                  className={`btn px-4 py-2 rounded-lg border text-sm ${fastingDays.includes(i) ? 'bg-deen/20 border-deen/50 text-deen' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
+                  {name.slice(0,3)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs font-mono tracking-widest text-bone-400 mb-1">THE NIGHT BEFORE</div>
+            <p className="text-xs text-bone-400 mb-3">
+              A notification the evening before a fast, naming which one. Suhur gets planned the night before or not at all.
+            </p>
+            <div className="flex items-center gap-2">
+              <input type="time" value={fastRem.time} aria-label="Fasting reminder time"
+                onChange={e => setFastRem({ time: e.target.value })}
+                className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 text-sm"/>
+              <button onClick={() => setFastRem({ on: !fastRem.on })} data-testid="fast-reminder-toggle"
+                className={`btn px-3 py-2 rounded-lg text-sm ${fastRem.on ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>
+                {fastRem.on ? 'Disable' : 'Enable'}
               </button>
-            ))}
+            </div>
+            {!state.ui?.notif && (
+              <p className="text-[10px] text-bone-500 mt-2">Notifications are off — turn them on in Admin → Alerts for this to reach you.</p>
+            )}
+          </div>
+
+          <div>
+            <div className="text-xs font-mono tracking-widest text-bone-400 mb-1">HIJRI DATE</div>
+            <p className="text-xs text-bone-400 mb-3">
+              Calculated with Umm al-Qura. Nudge it if your local moonsighting runs a day ahead or behind.
+            </p>
+            <div className="flex items-center gap-2 flex-wrap">
+              {[-2, -1, 0, 1, 2].map(o => (
+                <button key={o} onClick={() => setHijriOffset(o)}
+                  className={`btn px-3 py-2 rounded-lg border text-sm font-mono ${hijriOffset === o ? 'bg-deen/20 border-deen/50 text-deen' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
+                  {o > 0 ? `+${o}` : o}
+                </button>
+              ))}
+              <span className="text-xs text-bone-400 ml-1" data-testid="hijri-today">
+                Today is {fmtHijri(hijriOn(todayKey(), hijriOffset)) || 'not available on this device'}
+              </span>
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs font-mono tracking-widest text-bone-400 mb-2">NEXT FASTS</div>
+            {upcomingFasts.length === 0 ? (
+              <p className="text-xs text-bone-400">Nothing selected above, so no fasting days in the next year.</p>
+            ) : (
+              <div className="space-y-1" data-testid="upcoming-fasts">
+                {upcomingFasts.map(({ key, info, inDays }) => {
+                  const g = parseKey(key);
+                  return (
+                    <div key={key} className="flex items-center gap-3 text-xs px-3 py-2 rounded-lg border border-ink-700">
+                      <span className="font-mono text-bone-300 w-28 shrink-0">
+                        {DAY_SHORT[g.getDay()]} {g.getDate()} {MONTHS[g.getMonth()].slice(0, 3)}
+                      </span>
+                      <span className="text-deen truncate">{info.reasons.join(' · ')}</span>
+                      <span className="ml-auto font-mono text-bone-500 shrink-0">
+                        {inDays === 0 ? 'today' : inDays === 1 ? 'tomorrow' : `in ${inDays}d`}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}

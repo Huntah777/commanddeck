@@ -182,3 +182,31 @@ test.describe('mergeState — people', () => {
     expect(mergeState(existing, { people: [], deleted: { 'pp-1': NOW } }).people).toHaveLength(0);
   });
 });
+
+test.describe('mergeState — admin settings', () => {
+  test('per-pillar edits on two devices both survive', () => {
+    const merged = mergeState(
+      { admin: { pillars: { deen: { color: '#0f0' } } } },
+      { admin: { pillars: { work: { color: '#00f' } } } },
+    );
+    expect(merged.admin.pillars).toEqual({ deen: { color: '#0f0' }, work: { color: '#00f' } });
+  });
+
+  test('a setting the merge has never heard of is not dropped', () => {
+    /* This used to name admin's keys one by one and return only those, so
+       anything added later — the Hijri offset, the fasting rules — saved
+       locally, synced, and came back missing. */
+    const merged = mergeState(
+      { admin: { pillars: {} } },
+      { admin: { fastingRules: { whiteDays: false }, hijriOffset: 1 } },
+    );
+    expect(merged.admin.fastingRules).toEqual({ whiteDays: false });
+    expect(merged.admin.hijriOffset).toBe(1);
+  });
+
+  test('a device that says nothing about admin cannot wipe it', () => {
+    const merged = mergeState({ admin: { fastingDays: [1], hijriOffset: -1 } }, {});
+    expect(merged.admin.fastingDays).toEqual([1]);
+    expect(merged.admin.hijriOffset).toBe(-1);
+  });
+});

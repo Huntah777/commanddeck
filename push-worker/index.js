@@ -322,6 +322,103 @@ export function salahMinutes(raw, offsetMin) {
   return Math.max(0, Math.min(24 * 60 - 1, hh * 60 + mm + (Number(offsetMin) || 0)));
 }
 
+/* ── Hijri calendar + fasting days ───────────────────────────────
+   MIRRORED from index.html — the client and this Worker both decide
+   which days are fasts, and a disagreement shows up as a notification
+   about a fast the app isn't displaying (or the reverse). Change both.
+
+   Umm al-Qura through Intl: workerd carries the same ICU data the
+   browser does, so neither end needs a conversion table of its own. */
+const DAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const HIJRI_MONTHS = [
+  'Muharram', 'Safar', 'Rabi al-Awwal', 'Rabi al-Thani',
+  'Jumada al-Ula', 'Jumada al-Akhirah', 'Rajab', 'Shaban',
+  'Ramadan', 'Shawwal', 'Dhu al-Qadah', 'Dhu al-Hijjah',
+];
+const HIJRI_OFFSET_LIMIT = 2;
+
+let _hijriFmt;
+const hijriFormatter = () => {
+  if (_hijriFmt === undefined) {
+    try {
+      _hijriFmt = new Intl.DateTimeFormat('en-u-ca-islamic-umalqura', {
+        timeZone: 'UTC', year: 'numeric', month: 'numeric', day: 'numeric',
+      });
+    } catch { _hijriFmt = null; }
+  }
+  return _hijriFmt;
+};
+
+export const clampHijriOffset = (v) =>
+  Math.max(-HIJRI_OFFSET_LIMIT, Math.min(HIJRI_OFFSET_LIMIT, Math.round(Number(v) || 0)));
+
+/* 'YYYY-MM-DD' -> { y, m, d, month } in the Hijri calendar, or null.
+   Noon UTC so no timezone can drag the answer onto the next day. */
+export function hijriOn(dayKey, offset = 0) {
+  const f = hijriFormatter();
+  if (!f || !/^\d{4}-\d{2}-\d{2}$/.test(dayKey || '')) return null;
+  const [y, m, d] = dayKey.split('-').map(Number);
+  const at = new Date(Date.UTC(y, m - 1, d, 12) + clampHijriOffset(offset) * 86400000);
+  try {
+    const p = Object.fromEntries(f.formatToParts(at).map(x => [x.type, x.value]));
+    const hy = parseInt(p.year, 10), hm = Number(p.month), hd = Number(p.day);
+    if (![hy, hm, hd].every(Number.isFinite)) return null;
+    return { y: hy, m: hm, d: hd, month: HIJRI_MONTHS[hm - 1] || `Month ${hm}` };
+  } catch { return null; }
+}
+
+export const fmtHijri = (h) => h ? `${h.d} ${h.month} ${h.y} AH` : '';
+
+const dowOf = (dayKey) => {
+  const [y, m, d] = String(dayKey).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+};
+
+export const addDaysKey = (dayKey, n) => {
+  const [y, m, d] = String(dayKey).split('-').map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + n));
+  return `${t.getUTCFullYear()}-${String(t.getUTCMonth() + 1).padStart(2, '0')}-${String(t.getUTCDate()).padStart(2, '0')}`;
+};
+
+export const FASTING_RULES = [
+  { id:'ramadan',   label:'Ramadan',        on:true,  test:h => h.m === 9 },
+  { id:'whiteDays', label:'Ayyam al-Bid',   on:true,  test:h => h.d >= 13 && h.d <= 15 },
+  { id:'ashura',    label:'Ashura',         on:true,  test:h => h.m === 1 && (h.d === 9 || h.d === 10) },
+  { id:'arafah',    label:'Arafah',         on:true,  test:h => h.m === 12 && h.d === 9 },
+  { id:'shawwal',   label:'Six of Shawwal', on:false, test:h => h.m === 10 && h.d >= 2 && h.d <= 7 },
+];
+
+/* Fasting is forbidden on these — they override every rule above and any
+   weekday chosen by hand. 13 Dhu al-Hijjah is both a white day and a day
+   of Tashriq, and the prohibition is the half that counts. */
+const FASTING_FORBIDDEN = [
+  { label:'Eid al-Fitr',     test:h => h.m === 10 && h.d === 1 },
+  { label:'Eid al-Adha',     test:h => h.m === 12 && h.d === 10 },
+  { label:'Days of Tashriq', test:h => h.m === 12 && h.d >= 11 && h.d <= 13 },
+];
+
+const fastingRulesOn = (admin) =>
+  Object.fromEntries(FASTING_RULES.map(r => [r.id, admin?.fastingRules?.[r.id] ?? r.on]));
+
+export function fastingInfo(dayKey, state) {
+  const admin = state?.admin;
+  const hijri = hijriOn(dayKey, admin?.hijriOffset);
+  const out = { hijri, fasting: false, reasons: [], forbidden: null };
+  if (hijri) {
+    const blocked = FASTING_FORBIDDEN.find(r => r.test(hijri));
+    if (blocked) { out.forbidden = blocked.label; return out; }
+    const on = fastingRulesOn(admin);
+    for (const r of FASTING_RULES) if (on[r.id] && r.test(hijri)) out.reasons.push(r.label);
+  }
+  const dow = dowOf(dayKey);
+  if ((admin?.fastingDays || []).includes(dow)) out.reasons.push(`${DAY_NAMES[dow]}s`);
+  out.fasting = out.reasons.length > 0;
+  return out;
+}
+
+/* Mirrors SEED().ui.fastReminder in index.html. */
+const FAST_REMINDER_DEFAULTS = { on: true, time: '20:00' };
+
 /* Builds the FULL plan for today — entries already in the past are included.
    Callers depend on this being a pure function of (state, day), so it can be
    recomputed every tick and compared or replaced safely. What has actually
@@ -445,6 +542,20 @@ export async function buildTodaysSchedule(state, tz, parts) {
 
     if (gr.on)        fireGoalReminders('goals-am', gr.time);
     if (gr.eveningOn) fireGoalReminders('goals-pm', gr.eveningTime);
+  }
+
+  /* "You're fasting tomorrow" — the evening before, because a fast you
+     find out about at breakfast is a fast that doesn't happen. It names
+     which fast it is: Arafah and an ordinary white day are not the same
+     decision. Mirrors index.html's buildPlan. */
+  const fr = { ...FAST_REMINDER_DEFAULTS, ...(state.ui?.fastReminder || {}) };
+  if (fr.on && fr.time) {
+    const tomorrow = fastingInfo(addDaysKey(todayKey, 1), state);
+    if (tomorrow.fasting) {
+      const [fh, fm] = String(fr.time).split(':').map(Number);
+      const body = [tomorrow.reasons.join(' · '), fmtHijri(tomorrow.hijri)].filter(Boolean).join(' — ');
+      push('fast-eve', 'Fasting tomorrow', body, zonedHmToUtcMs(y, mo, d, fh, fm, tz));
+    }
   }
 
   return { schedule, ok: salahOk };

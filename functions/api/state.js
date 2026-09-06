@@ -154,13 +154,20 @@ function mergeLogState(existing, incoming, now) {
 
 /* admin.pillars/quads are small override maps keyed by fixed ids — shallow
    per-key merge so edits to different pillars/quads on different devices
-   don't clobber each other. fastingDays/pomodoro/ui are flat, low-edit-
-   frequency settings — whole-value last-write-wins is proportionate. */
+   don't clobber each other. Everything else in admin — the fasting rules
+   and days, the Hijri offset — is a flat, low-edit-frequency setting
+   where whole-value last-write-wins is proportionate.
+
+   The spread is what carries the rest: this used to name its keys one by
+   one and return only those, which silently DROPPED any admin setting
+   added later — the setting would save locally, sync, and come back
+   missing. Keeping only the two maps explicit means new keys survive on
+   their own. */
 function mergeAdmin(existing, incoming) {
   return {
-    pillars:     { ...(existing?.pillars || {}), ...(incoming?.pillars || {}) },
-    quads:       { ...(existing?.quads   || {}), ...(incoming?.quads   || {}) },
-    fastingDays: incoming?.fastingDays ?? existing?.fastingDays,
+    ...(existing || {}), ...(incoming || {}),
+    pillars: { ...(existing?.pillars || {}), ...(incoming?.pillars || {}) },
+    quads:   { ...(existing?.quads   || {}), ...(incoming?.quads   || {}) },
   };
 }
 
