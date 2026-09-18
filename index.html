@@ -5268,19 +5268,33 @@ function HabitsView({ state, setState }) {
   const pillars = resolvePillars(state);
   const inFilter = (h) => pillar === 'all' || h.pillar === pillar;
 
+  /* Respect explicit user ordering; fall back to created timestamp for
+     habits that have never been through reorder (sortOrder absent). */
+  const sorted = [...state.habits].sort((a, b) =>
+    (a.sortOrder ?? Infinity) - (b.sortOrder ?? Infinity) ||
+    (a.created ?? 0) - (b.created ?? 0)
+  );
+
   /* Done sinks to the bottom, so what is left to do is what is under
      your thumb. Array sort is stable, so two undone habits keep the
-     order they were created in. */
-  const due  = state.habits.filter(h => inFilter(h) && h.days.includes(dow))
-                           .sort((a, b) => (log[a.id] ? 1 : 0) - (log[b.id] ? 1 : 0));
-  const rest = state.habits.filter(h => inFilter(h) && !h.days.includes(dow));
+     order they were placed in. */
+  const due  = sorted.filter(h => inFilter(h) && h.days.includes(dow))
+                     .sort((a, b) => (log[a.id] ? 1 : 0) - (log[b.id] ? 1 : 0));
+  const rest = sorted.filter(h => inFilter(h) && !h.days.includes(dow));
 
   const done = due.filter(h => log[h.id]).length;
   const pct  = due.length ? Math.round(done / due.length * 100) : 0;
 
-  const enterReorder = () => { setLocalHabits([...state.habits]); setReordering(true); };
+  const enterReorder = () => { setLocalHabits([...sorted]); setReordering(true); };
   const exitReorder  = () => {
-    if (localHabits) setState(s => ({ ...s, habits: localHabits }));
+    if (localHabits) {
+      const now = Date.now();
+      /* Stamp every habit with its new position. modifiedAt is bumped so
+         the server merge (which picks the newer item per id) keeps this
+         device's sortOrder rather than restoring the old server order. */
+      const ordered = localHabits.map((h, i) => ({ ...h, sortOrder: i, modifiedAt: now }));
+      setState(s => ({ ...s, habits: ordered }));
+    }
     setLocalHabits(null); setReordering(false); setDragId(null); setDragOverId(null);
   };
 

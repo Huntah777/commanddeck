@@ -17,9 +17,9 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: 'python3 -m http.server 8788 --directory .',
+    command: 'npx serve -p 8788 .',
     url: 'http://localhost:8788',
     reuseExistingServer: !process.env.CI,
-    timeout: 15_000,
+    timeout: 30_000,
   },
 });

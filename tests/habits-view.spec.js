@@ -196,3 +196,82 @@ test.describe('a habit’s icon', () => {
     await expect(row(page, 'Fajr')).toContainText('🕌');
   });
 });
+
+test.describe('reordering habits', () => {
+  /* Seed with explicit sortOrder so the display order is predictable. */
+  const ORDERED_STATE = () => STATE({
+    habits: [
+      { ...HABITS[0], sortOrder: 0 },   // Quran — deen
+      { ...HABITS[1], sortOrder: 1 },   // Fajr  — deen
+      { ...HABITS[2], sortOrder: 2 },   // Ship  — tech
+      { ...HABITS[3], sortOrder: 3 },   // Gym   — combat
+      { ...HABITS[4], sortOrder: 4 },   // Call  — character
+    ],
+  });
+
+  test('sortOrder is written to storage when Done is clicked', async ({ page }) => {
+    await boot(page);
+
+    await page.getByRole('button', { name: 'Reorder' }).click();
+    /* Drag Fajr on top of Quran so Fajr becomes first. */
+    await page.locator('[data-habit="h-fajr"]').dragTo(page.locator('[data-habit="h-quran"]'));
+    await page.getByRole('button', { name: 'Done' }).click();
+
+    await expect.poll(async () => {
+      const s = await stored(page);
+      const fajr  = s.habits?.find(h => h.id === 'h-fajr');
+      const quran = s.habits?.find(h => h.id === 'h-quran');
+      return typeof fajr?.sortOrder === 'number' && typeof quran?.sortOrder === 'number'
+        && fajr.sortOrder < quran.sortOrder;
+    }, { timeout: 5_000 }).toBe(true);
+  });
+
+  test('the reordered display survives navigating to another day and back', async ({ page }) => {
+    /* Seed with Quran first, then confirm Fajr-first order persists after
+       navigation — this is the regression: the sync response used to
+       restore the old server-insertion order on every push. */
+    await boot(page, ORDERED_STATE());
+
+    await page.getByRole('button', { name: 'Reorder' }).click();
+    await page.locator('[data-habit="h-fajr"]').dragTo(page.locator('[data-habit="h-quran"]'));
+    await page.getByRole('button', { name: 'Done' }).click();
+
+    /* Navigate to the next day then back. */
+    await page.locator('[data-testid="week-strip-day"][data-date="2026-08-21"]').click();
+    await page.locator('[data-testid="week-strip-day"][data-date="2026-08-20"]').click();
+
+    const displayed = await names(page);
+    expect(displayed.indexOf('Fajr')).toBeLessThan(displayed.indexOf('Quran'));
+  });
+
+  test('habits with sortOrder sort before habits without one', async ({ page }) => {
+    /* Legacy habits (no sortOrder) fall back to created timestamp.
+       Any habit that has gone through reorder should appear first. */
+    await boot(page, STATE({
+      habits: [
+        { ...HABITS[0], sortOrder: 0 },              // Quran  — sortOrder 0
+        { ...HABITS[1] },                            // Fajr   — no sortOrder, created: 2
+        { ...HABITS[2], sortOrder: 1 },              // Ship   — sortOrder 1
+      ],
+    }));
+
+    /* Thu: Quran(0), Ship(1) are scheduled, Fajr(no sortOrder) is also scheduled. */
+    /* Expected order: Quran, Ship, then Fajr (falls back to created=2, after sortOrders). */
+    /* Actually: sortOrder Infinity > 0 and 1, so Fajr goes last regardless of created. */
+    const displayed = await names(page);
+    expect(displayed.indexOf('Quran')).toBeLessThan(displayed.indexOf('Fajr'));
+    expect(displayed.indexOf('Ship a commit')).toBeLessThan(displayed.indexOf('Fajr'));
+  });
+
+  test('pillar filter restricts which habits appear in reorder mode', async ({ page }) => {
+    await boot(page, ORDERED_STATE());
+
+    await page.getByRole('button', { name: 'Reorder' }).click();
+    await page.getByTestId('pillar-chip').filter({ hasText: 'Deen' }).click();
+
+    /* In Deen-filtered reorder mode only Deen habits should be listed. */
+    const reorderNames = await names(page);
+    expect(reorderNames.every(n => ['Quran', 'Fajr'].includes(n))).toBe(true);
+    expect(reorderNames).toHaveLength(2);
+  });
+});
