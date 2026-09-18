@@ -1460,11 +1460,28 @@ const habitIcon = (state, habitId) =>
    emoji picker on a phone is four taps and a search; this is one, and
    it can't end up holding a paragraph. */
 const HABIT_ICONS = [
+  /* Deen */
   '📿','🕋','🕌','📖','🤲','☪️','🌙','⭐',
+  '🛐','📜','🌊','💎','🌺','🌿','✨','🙏',
+  /* Tech & Mind */
   '💻','⌨️','🧠','📝','📚','🔬','✍️','🎯',
+  /* Body & Combat */
   '🏋️','🏃','🥊','🎾','🧘','💧','🥗','😴',
+  /* Life & Character */
   '🗓️','💬','☎️','❤️','🤝','🧹','💰','🌱',
 ];
+
+/* Move a habit earlier or later in the habits array so users can set
+   a logical sequence (e.g. Fajr → Quran → Dhikr). */
+function reorderHabits(s, fromId, toId) {
+  const habits = [...s.habits];
+  const fromIdx = habits.findIndex(h => h.id === fromId);
+  const toIdx   = habits.findIndex(h => h.id === toId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return s;
+  const [moved] = habits.splice(fromIdx, 1);
+  habits.splice(toIdx, 0, moved);
+  return { ...s, habits };
+}
 
 /* Write a habit and its calendar slot together. `slot` is { start, end },
    or null for "not on the calendar". One transaction because the two are
@@ -5232,9 +5249,12 @@ function PillarFilter({ pillars, value, onChange }) {
 }
 
 function HabitsView({ state, setState }) {
-  const [adding, setAdding]   = useState(false);
-  const [editing, setEditing] = useState(null);
-  const [pillar, setPillar]   = useState('all');
+  const [adding, setAdding]       = useState(false);
+  const [editing, setEditing]     = useState(null);
+  const [pillar, setPillar]       = useState('all');
+  const [reordering, setReordering] = useState(false);
+  const [dragId, setDragId]       = useState(null);
+  const [dragOverId, setDragOverId] = useState(null);
 
   const dKey = state.ui.selectedDate;
   const sel  = parseKey(dKey);
@@ -5257,52 +5277,91 @@ function HabitsView({ state, setState }) {
   const done = due.filter(h => log[h.id]).length;
   const pct  = due.length ? Math.round(done / due.length * 100) : 0;
 
+  const handleDrop = (toId) => {
+    if (dragId && dragId !== toId) setState(s => reorderHabits(s, dragId, toId));
+    setDragId(null);
+    setDragOverId(null);
+  };
+
   return (
     <div className="pt-6 fadeUp">
       <div className="flex items-start justify-between gap-3 mb-4 flex-wrap">
         <SectionHeading kicker="Discipline" title="Habits across the five pillars"
-          sub={`${DAY_NAMES[dow]} ${sel.getDate()} ${MONTHS[sel.getMonth()]} · tap the circle to tick one off`}/>
-        <button onClick={()=>setAdding(true)} className="btn-primary text-sm flex items-center gap-1.5 shrink-0"><I.plus className="w-4 h-4"/>New habit</button>
+          sub={reordering
+            ? 'Drag habits into your preferred order'
+            : `${DAY_NAMES[dow]} ${sel.getDate()} ${MONTHS[sel.getMonth()]} · tap the circle to tick one off`}/>
+        <div className="flex gap-2 shrink-0">
+          {!reordering && (
+            <button onClick={()=>setAdding(true)} className="btn-primary text-sm flex items-center gap-1.5"><I.plus className="w-4 h-4"/>New habit</button>
+          )}
+          {state.habits.length > 1 && (
+            <button onClick={()=>{ setReordering(r=>!r); setDragId(null); setDragOverId(null); }}
+              className={`btn text-sm flex items-center gap-1.5 ${reordering ? 'btn-primary' : 'border border-ink-700 text-bone-300'}`}>
+              <I.drag className="w-4 h-4"/>
+              {reordering ? 'Done' : 'Reorder'}
+            </button>
+          )}
+        </div>
       </div>
 
-      <WeekStrip state={state} sel={sel} setDate={setDate}/>
-      <PillarFilter pillars={pillars} value={pillar} onChange={setPillar}/>
-
-      {due.length > 0 && (
-        <div className="flex items-center gap-3 mb-3" data-testid="habits-progress">
-          <div className="flex-1 h-1.5 rounded-full bg-ink-700 overflow-hidden">
-            <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: '#10b981' }}/>
-          </div>
-          <div className="font-mono text-[10px] tracking-widest text-bone-400 shrink-0">{done} / {due.length} DONE</div>
+      {reordering ? (
+        /* Flat ordered list of ALL habits so user can see the full
+           sequence regardless of today's day or pillar filter. */
+        <div className="space-y-2" data-testid="habit-list"
+          onDragEnd={() => { setDragId(null); setDragOverId(null); }}>
+          {state.habits.map(h => (
+            <HabitRow key={h.id} h={h} state={state} sel={sel} on={!!log[h.id]}
+              reordering
+              isDragging={dragId === h.id}
+              isDragOver={dragOverId === h.id}
+              onDragStart={() => setDragId(h.id)}
+              onDragOver={(e) => { e.preventDefault(); setDragOverId(h.id); }}
+              onDrop={() => handleDrop(h.id)}
+              onEdit={()=>setEditing(h)}/>
+          ))}
         </div>
-      )}
+      ) : (
+        <>
+          <WeekStrip state={state} sel={sel} setDate={setDate}/>
+          <PillarFilter pillars={pillars} value={pillar} onChange={setPillar}/>
 
-      <div className="space-y-2" data-testid="habit-list">
-        {due.length === 0
-          ? <EmptyHint text={state.habits.some(inFilter)
-              ? `Nothing scheduled for ${DAY_NAMES[dow]}.`
-              : 'No habits here yet — add your first.'}/>
-          : due.map(h => (
-              <HabitRow key={h.id} h={h} state={state} sel={sel} on={!!log[h.id]}
-                onToggle={()=>toggle(h.id)} onEdit={()=>setEditing(h)}/>
-            ))}
-      </div>
+          {due.length > 0 && (
+            <div className="flex items-center gap-3 mb-3" data-testid="habits-progress">
+              <div className="flex-1 h-1.5 rounded-full bg-ink-700 overflow-hidden">
+                <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: '#10b981' }}/>
+              </div>
+              <div className="font-mono text-[10px] tracking-widest text-bone-400 shrink-0">{done} / {due.length} DONE</div>
+            </div>
+          )}
 
-      {/* Habits that don't run today still belong on this page — it is
-          where you come to find and edit one, and a habit you can't see
-          is a habit you can't fix. They just don't get a tick. */}
-      {rest.length > 0 && (
-        <div className="mt-6" data-testid="habit-list-off">
-          <div className="font-mono text-[10px] tracking-widest text-bone-400 mb-2">
-            NOT ON {DAY_NAMES[dow].toUpperCase()}
+          <div className="space-y-2" data-testid="habit-list">
+            {due.length === 0
+              ? <EmptyHint text={state.habits.some(inFilter)
+                  ? `Nothing scheduled for ${DAY_NAMES[dow]}.`
+                  : 'No habits here yet — add your first.'}/>
+              : due.map(h => (
+                  <HabitRow key={h.id} h={h} state={state} sel={sel} on={!!log[h.id]}
+                    onToggle={()=>toggle(h.id)} onEdit={()=>setEditing(h)}/>
+                ))}
           </div>
-          <div className="space-y-2">
-            {rest.map(h => (
-              <HabitRow key={h.id} h={h} state={state} sel={sel} on={false} offDay
-                onEdit={()=>setEditing(h)}/>
-            ))}
-          </div>
-        </div>
+
+          {/* Habits that don't run today still belong on this page — it is
+              where you come to find and edit one, and a habit you can't see
+              is a habit you can't fix. They just don't get a tick. */}
+          {rest.length > 0 && (
+            <div className="mt-6" data-testid="habit-list-off">
+              <div className="font-mono text-[10px] tracking-widest text-bone-400 mb-2">
+                NOT ON {DAY_NAMES[dow].toUpperCase()}
+              </div>
+              <div className="space-y-2">
+                {rest.map(h => (
+                  <HabitRow key={h.id} h={h} state={state} sel={sel} on={false} offDay
+                    onEdit={()=>setEditing(h)}/>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
 
       {(adding || editing) && (
@@ -5326,7 +5385,8 @@ function HabitsView({ state, setState }) {
    stays findable and editable, but loses the tick: every completion
    figure in the app counts scheduled days only, so a tick there would
    be a control that changes nothing you can see. */
-function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit }) {
+function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit,
+                    reordering, isDragging, isDragOver, onDragStart, onDragOver, onDrop }) {
   const p    = pillarByIdFromState(h.pillar, state);
   const slot = slotForHabit(state, h.id);
   const selKey = fmtKey(sel);
@@ -5342,8 +5402,19 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit }) {
 
   return (
     <div data-testid="habit-row" data-habit={h.id} data-done={on ? '1' : '0'}
-      className={`card-soft flex items-center gap-3 p-3 ${offDay ? 'opacity-55' : ''}`}
-      style={on ? { background: `${p.color}14`, borderColor: `${p.color}44` } : undefined}>
+      className={`card-soft flex items-center gap-3 p-3 transition-opacity ${offDay && !reordering ? 'opacity-55' : ''} ${isDragging ? 'opacity-40' : ''} ${reordering ? 'cursor-grab' : ''}`}
+      draggable={reordering}
+      onDragStart={reordering ? onDragStart : undefined}
+      onDragOver={reordering ? onDragOver : undefined}
+      onDrop={reordering ? onDrop : undefined}
+      style={{
+        ...(on && !reordering ? { background: `${p.color}14`, borderColor: `${p.color}44` } : {}),
+        ...(isDragOver ? { borderColor: p.color, background: `${p.color}14` } : {}),
+      }}>
+
+      {reordering && (
+        <I.drag className="w-4 h-4 text-bone-500 shrink-0"/>
+      )}
 
       {/* Stays the pillar's colour whether or not it's done — the tile
           says which habit this is, not how it's going. */}
@@ -5387,7 +5458,7 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit }) {
         </div>
       )}
 
-      {!offDay && (
+      {!offDay && !reordering && (
         <button onClick={onToggle} data-testid="habit-row-tick" aria-pressed={on}
           aria-label={`${on ? 'Untick' : 'Tick'} ${h.name}`}
           className="btn w-9 h-9 rounded-full border-2 flex items-center justify-center shrink-0"
