@@ -5253,6 +5253,7 @@ function HabitsView({ state, setState }) {
   const [editing, setEditing]     = useState(null);
   const [pillar, setPillar]       = useState('all');
   const [reordering, setReordering] = useState(false);
+  const [localHabits, setLocalHabits] = useState(null);
   const [dragId, setDragId]       = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
 
@@ -5277,8 +5278,24 @@ function HabitsView({ state, setState }) {
   const done = due.filter(h => log[h.id]).length;
   const pct  = due.length ? Math.round(done / due.length * 100) : 0;
 
+  const enterReorder = () => { setLocalHabits([...state.habits]); setReordering(true); };
+  const exitReorder  = () => {
+    if (localHabits) setState(s => ({ ...s, habits: localHabits }));
+    setLocalHabits(null); setReordering(false); setDragId(null); setDragOverId(null);
+  };
+
   const handleDrop = (toId) => {
-    if (dragId && dragId !== toId) setState(s => reorderHabits(s, dragId, toId));
+    if (dragId && dragId !== toId) {
+      setLocalHabits(prev => {
+        const arr = [...prev];
+        const fi = arr.findIndex(h => h.id === dragId);
+        const ti = arr.findIndex(h => h.id === toId);
+        if (fi === -1 || ti === -1) return prev;
+        const [moved] = arr.splice(fi, 1);
+        arr.splice(ti, 0, moved);
+        return arr;
+      });
+    }
     setDragId(null);
     setDragOverId(null);
   };
@@ -5295,7 +5312,7 @@ function HabitsView({ state, setState }) {
             <button onClick={()=>setAdding(true)} className="btn-primary text-sm flex items-center gap-1.5"><I.plus className="w-4 h-4"/>New habit</button>
           )}
           {state.habits.length > 1 && (
-            <button onClick={()=>{ setReordering(r=>!r); setDragId(null); setDragOverId(null); }}
+            <button onClick={reordering ? exitReorder : enterReorder}
               className={`${reordering ? 'btn-primary' : 'btn-ghost'} text-sm flex items-center gap-1.5`}>
               <I.drag className="w-4 h-4"/>
               {reordering ? 'Done' : 'Reorder'}
@@ -5309,7 +5326,7 @@ function HabitsView({ state, setState }) {
           <PillarFilter pillars={pillars} value={pillar} onChange={setPillar}/>
           <div className="space-y-2" data-testid="habit-list"
             onDragEnd={() => { setDragId(null); setDragOverId(null); }}>
-          {state.habits.filter(inFilter).map(h => (
+          {(localHabits || state.habits).filter(inFilter).map(h => (
             <HabitRow key={h.id} h={h} state={state} sel={sel} on={!!log[h.id]}
               reordering
               isDragging={dragId === h.id}
