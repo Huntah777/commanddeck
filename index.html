@@ -1471,6 +1471,16 @@ const HABIT_ICONS = [
   '🗓️','💬','☎️','❤️','🤝','🧹','💰','🌱',
 ];
 
+/* Sort a habits array by explicit sortOrder, falling back to created
+   timestamp for habits that have never been through a reorder. Used
+   everywhere habits are listed so the user's preferred sequence is
+   consistent across tabs. */
+const sortHabits = (habits) =>
+  [...habits].sort((a, b) =>
+    (a.sortOrder ?? Infinity) - (b.sortOrder ?? Infinity) ||
+    (a.created ?? 0) - (b.created ?? 0)
+  );
+
 /* Move a habit earlier or later in the habits array so users can set
    a logical sequence (e.g. Fajr → Quran → Dhikr). */
 function reorderHabits(s, fromId, toId) {
@@ -3483,7 +3493,7 @@ function TodayView({ state, setState }) {
      answers that in a screen where the grid needs scrolling. */
   const openDay  = (k) => { setDate(k); setScope('agenda'); };
 
-  const habitsToday = state.habits.filter(h => h.days.includes(dow));
+  const habitsToday = sortHabits(state.habits).filter(h => h.days.includes(dow));
   const log = state.logs[dKey] || {};
   /* A tick stores when it happened and an un-tick is recorded in logsOff,
      rather than a tick being bare presence in logs — see toggleHabitLog.
@@ -5268,12 +5278,7 @@ function HabitsView({ state, setState }) {
   const pillars = resolvePillars(state);
   const inFilter = (h) => pillar === 'all' || h.pillar === pillar;
 
-  /* Respect explicit user ordering; fall back to created timestamp for
-     habits that have never been through reorder (sortOrder absent). */
-  const sorted = [...state.habits].sort((a, b) =>
-    (a.sortOrder ?? Infinity) - (b.sortOrder ?? Infinity) ||
-    (a.created ?? 0) - (b.created ?? 0)
-  );
+  const sorted = sortHabits(state.habits);
 
   /* Done sinks to the bottom, so what is left to do is what is under
      your thumb. Array sort is stable, so two undone habits keep the
