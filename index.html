@@ -5296,7 +5296,7 @@ function HabitsView({ state, setState }) {
           )}
           {state.habits.length > 1 && (
             <button onClick={()=>{ setReordering(r=>!r); setDragId(null); setDragOverId(null); }}
-              className={`btn text-sm flex items-center gap-1.5 ${reordering ? 'btn-primary' : 'border border-ink-700 text-bone-300'}`}>
+              className={`${reordering ? 'btn-primary' : 'btn-ghost'} text-sm flex items-center gap-1.5`}>
               <I.drag className="w-4 h-4"/>
               {reordering ? 'Done' : 'Reorder'}
             </button>
@@ -5305,11 +5305,11 @@ function HabitsView({ state, setState }) {
       </div>
 
       {reordering ? (
-        /* Flat ordered list of ALL habits so user can see the full
-           sequence regardless of today's day or pillar filter. */
-        <div className="space-y-2" data-testid="habit-list"
-          onDragEnd={() => { setDragId(null); setDragOverId(null); }}>
-          {state.habits.map(h => (
+        <>
+          <PillarFilter pillars={pillars} value={pillar} onChange={setPillar}/>
+          <div className="space-y-2" data-testid="habit-list"
+            onDragEnd={() => { setDragId(null); setDragOverId(null); }}>
+          {state.habits.filter(inFilter).map(h => (
             <HabitRow key={h.id} h={h} state={state} sel={sel} on={!!log[h.id]}
               reordering
               isDragging={dragId === h.id}
@@ -5319,7 +5319,8 @@ function HabitsView({ state, setState }) {
               onDrop={() => handleDrop(h.id)}
               onEdit={()=>setEditing(h)}/>
           ))}
-        </div>
+          </div>
+        </>
       ) : (
         <>
           <WeekStrip state={state} sel={sel} setDate={setDate}/>
