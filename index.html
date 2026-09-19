@@ -524,7 +524,11 @@ const PHASES = [
   { id: 'short', label: 'Short break', color: '#10b981' },
   { id: 'long',  label: 'Long break',  color: '#22d3ee' },
 ];
-const phaseMins = (cfg, i) => Math.max(1, Number([cfg.workMins, cfg.shortMins, cfg.longMins][i]) || 25);
+const phaseMins     = (cfg, i) => Math.max(1, Number([cfg.workMins, cfg.shortMins, cfg.longMins][i]) || 25);
+const effectiveMins = (cfg, session) =>
+  (session.timerMode === 'session')
+    ? Math.max(1, Number(cfg.sessionMins) || 25)
+    : phaseMins(cfg, session.phase);
 
 /* breakAfter defaults true — a completed Focus session rolls into a break
    unless this device has explicitly turned it off. That default is what
@@ -1985,7 +1989,7 @@ const SEED = () => ({
      one, { id, taskId, date, start, end } with the title/list/done read
      off the task. See resolveBlocks. */
   blocks: [],
-  pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4 },
+  pomodoro: { workMins: 25, shortMins: 5, longMins: 15, longAfter: 4, sessionMins: 25, savedTimers: [] },
   pomodoroLogs: [],
   goals: [],
   /* people: who a task concerns, and how much that raises its
@@ -2647,7 +2651,7 @@ function usePomodoro(state, setState) {
   const check = useCallback(() => {
     const { session: s, cfg: c } = live.current;
     if (!s.running || !Number.isFinite(s.endsAt)) return;
-    if (Date.now() >= s.endsAt) finish(s.endsAt, phaseMins(c, s.phase) * 60_000);
+    if (Date.now() >= s.endsAt) finish(s.endsAt, effectiveMins(c, s) * 60_000);
   }, [finish]);
   const checkRef = useRef(check);
   checkRef.current = check;
@@ -2688,7 +2692,7 @@ function usePomodoro(state, setState) {
      never yanks one that is mid-run. Keyed rather than dependency-
      triggered so a reload doesn't read as a change and wipe the
      remainder of a paused session. */
-  const cfgKey = `${cfg.workMins}/${cfg.shortMins}/${cfg.longMins}`;
+  const cfgKey = `${cfg.workMins}/${cfg.shortMins}/${cfg.longMins}/${cfg.sessionMins}`;
   const lastCfgKey = useRef(cfgKey);
   useEffect(() => {
     if (lastCfgKey.current === cfgKey) return;
@@ -2700,7 +2704,7 @@ function usePomodoro(state, setState) {
     primeAudio();
     setSession(s => {
       if (s.running) return s;
-      const left = Number.isFinite(s.leftMs) ? s.leftMs : phaseMins(live.current.cfg, s.phase) * 60_000;
+      const left = Number.isFinite(s.leftMs) ? s.leftMs : effectiveMins(live.current.cfg, s) * 60_000;
       return { ...s, running: true, endsAt: Date.now() + left, leftMs: null };
     });
   };
@@ -2722,7 +2726,7 @@ function usePomodoro(state, setState) {
   }));
   const skip = () => {
     const { session: s, cfg: c } = live.current;
-    const totalMs = phaseMins(c, s.phase) * 60_000;
+    const totalMs = effectiveMins(c, s) * 60_000;
     const left = s.running
       ? Math.max(0, (s.endsAt || 0) - Date.now())
       : (Number.isFinite(s.leftMs) ? s.leftMs : totalMs);
@@ -2743,7 +2747,7 @@ function useCountdown(session, cfg) {
     return () => clearInterval(id);
   }, [session.running]);
 
-  const totalMs = phaseMins(cfg, session.phase) * 60_000;
+  const totalMs = effectiveMins(cfg, session) * 60_000;
   const leftMs = session.running
     ? Math.max(0, (session.endsAt || 0) - Date.now())
     : (Number.isFinite(session.leftMs) ? session.leftMs : totalMs);
@@ -8052,6 +8056,23 @@ function PomodoroView({ state, setState, pomo }) {
             <span className="font-mono text-[10px] text-bone-400 ml-auto">SESSION #{session.doneCount + 1}</span>
           </div>
 
+          {/* Saved timers — single session mode only */}
+          {timerMode === 'session' && (cfg.savedTimers || []).length > 0 && (
+            <div className="flex items-center gap-2 flex-wrap">
+              {(cfg.savedTimers || []).map(t => (
+                <button key={t.id}
+                  onClick={() => { if (!session.running) updateCfg({ ...cfg, sessionMins: t.mins }); }}
+                  title={`${t.name} · ${t.mins}m`}
+                  className="btn px-3 py-1.5 rounded-full text-xs font-mono tracking-wider"
+                  style={Number(cfg.sessionMins) === t.mins
+                    ? { background: '#f59e0b20', color: '#f59e0b', border: '1px solid #f59e0b55' }
+                    : { color: '#9a9788', border: '1px solid #1f1f24' }}>
+                  {t.name} · {t.mins}m
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Ring + clock */}
           <div className="card flex flex-col items-center py-10 gap-6">
             <div className="relative" style={{ width: 220, height: 220 }}>
@@ -8264,20 +8285,113 @@ function PomodoroView({ state, setState, pomo }) {
           {/* Settings */}
           <div className="card p-4">
             <button className="w-full flex items-center justify-between mb-2" onClick={() => setShowCfg(v => !v)}>
-              <div className="text-[10px] font-mono tracking-widest text-bone-400">TIMER SETTINGS</div>
+              <div className="text-[10px] font-mono tracking-widest text-bone-400">
+                {timerMode === 'session' ? 'SESSION SETTINGS' : 'POMODORO SETTINGS'}
+              </div>
               <span className="text-[10px] font-mono text-bone-400">{showCfg ? '▲' : '▼'}</span>
             </button>
-            {!showCfg && (
+            {!showCfg && timerMode === 'pomodoro' && (
               <div className="text-sm text-bone-400">
                 {cfg.workMins}m focus · {cfg.shortMins}m short · {cfg.longMins}m long · every {cfg.longAfter}
               </div>
             )}
-            {showCfg && (
+            {!showCfg && timerMode === 'session' && (
+              <div className="text-sm text-bone-400">
+                {cfg.sessionMins || 25}m per session
+              </div>
+            )}
+            {showCfg && timerMode === 'pomodoro' && (
               <PomodoroSettings cfg={cfg} onChange={next => { updateCfg(next); setShowCfg(false); }}/>
+            )}
+            {showCfg && timerMode === 'session' && (
+              <SingleSessionSettings cfg={cfg} onChange={next => { updateCfg(next); setShowCfg(false); }}/>
             )}
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function SingleSessionSettings({ cfg, onChange }) {
+  const [mins,    setMins]    = useState(String(cfg.sessionMins || 25));
+  const [timers,  setTimers]  = useState(cfg.savedTimers || []);
+  const [newName, setNewName] = useState('');
+  const [newMins, setNewMins] = useState('');
+  const clamp = (v) => Math.max(1, Math.min(480, Math.round(Number(v)) || 25));
+  const PRESETS = [15, 25, 30, 45, 60, 90];
+
+  const addTimer = () => {
+    const n = newName.trim();
+    const m = clamp(newMins);
+    if (!n || !newMins) return;
+    setTimers(ts => [...ts, { id: `st-${Date.now()}`, name: n, mins: m }]);
+    setNewName(''); setNewMins('');
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Quick presets */}
+      <div>
+        <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-2">QUICK PRESETS</div>
+        <div className="grid grid-cols-3 gap-1.5">
+          {PRESETS.map(p => (
+            <button key={p} onClick={() => setMins(String(p))}
+              className="btn py-2 rounded-lg text-xs font-mono"
+              style={Number(mins) === p
+                ? { background: '#f59e0b20', color: '#f59e0b', border: '1px solid #f59e0b55' }
+                : { color: '#9a9788', border: '1px solid #1f1f24' }}>
+              {p}m
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Custom duration field */}
+      <Field label="Custom duration (min)">
+        <input type="number" value={mins} min={1} max={480} aria-label="Session duration (min)"
+          onChange={e => setMins(e.target.value)}
+          onBlur={e => setMins(String(clamp(e.target.value)))}
+          className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono text-sm"/>
+      </Field>
+
+      {/* Saved timers */}
+      <div>
+        <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-2">SAVED TIMERS</div>
+        {timers.length > 0 && (
+          <div className="space-y-1.5 mb-2">
+            {timers.map(t => (
+              <div key={t.id} className="flex items-center gap-2">
+                <span className="flex-1 text-sm text-bone-200 truncate">{t.name}</span>
+                <span className="font-mono text-xs text-bone-400 shrink-0">{t.mins}m</span>
+                <button onClick={() => setTimers(ts => ts.filter(x => x.id !== t.id))}
+                  className="btn w-6 h-6 rounded flex items-center justify-center text-bone-500 hover:text-red-400 border border-ink-700 text-xs shrink-0">
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex gap-2">
+          <input type="text" value={newName} placeholder="Name…" maxLength={30}
+            onChange={e => setNewName(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addTimer()}
+            className="flex-1 min-w-0 bg-ink-800 border border-ink-700 rounded-lg px-2.5 py-1.5 text-bone-100 text-sm placeholder-bone-500"/>
+          <input type="number" value={newMins} min={1} max={480} placeholder="min"
+            onChange={e => setNewMins(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addTimer()}
+            className="w-16 bg-ink-800 border border-ink-700 rounded-lg px-2 py-1.5 text-bone-100 font-mono text-sm"/>
+          <button onClick={addTimer}
+            className="btn px-3 py-1.5 rounded-lg text-xs font-mono border border-ink-700 hover:bg-ink-800 text-bone-300 shrink-0">
+            Add
+          </button>
+        </div>
+      </div>
+
+      <button onClick={() => onChange({ ...cfg, sessionMins: clamp(mins), savedTimers: timers })}
+        className="btn-primary w-full text-sm">
+        Apply
+      </button>
     </div>
   );
 }
