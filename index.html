@@ -5896,7 +5896,7 @@ function rangeBuckets(range, today = new Date()) {
 }
 
 /* The numbers half of Admin. Reads state; changes nothing about it. */
-function AdminOverview({ state, syncStatus, onSyncNow }) {
+function AdminOverview({ state, setState, syncStatus, onSyncNow }) {
   const [statsRange, setStatsRange] = useState(30);
 
   /* Pillar performance over selected range */
@@ -6257,7 +6257,7 @@ function AdminView({ state, setState, hydrate, theme, setTheme, background, chan
 
       <div className="space-y-6">
         {tab === 'overview' && (
-          <AdminOverview state={state} syncStatus={syncStatus} onSyncNow={onSyncNow}/>
+          <AdminOverview state={state} setState={setState} syncStatus={syncStatus} onSyncNow={onSyncNow}/>
         )}
 
         {tab === 'setup' && (
