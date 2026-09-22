@@ -183,7 +183,10 @@ export function extractJson(text) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
-async function askClaude(digest, notes, env) {
+async function askClaude(digest, notes, env, customPrompt) {
+  const system = customPrompt
+    ? `${SYSTEM}\n\nAdditional instructions from the user:\n${customPrompt}`
+    : SYSTEM;
   const call = env.AI.run(MODEL, {
     max_tokens: MAX_TOKENS,
     /* Opus 5 calibrates its own reasoning per task; passing a fixed
@@ -191,7 +194,7 @@ async function askClaude(digest, notes, env) {
        supported capability on the model's own Workers AI page — unlike
        output_config below, this isn't a guess. */
     thinking: { type: 'adaptive' },
-    system: SYSTEM,
+    system,
     messages: [{
       role: 'user',
       content: [
@@ -273,6 +276,9 @@ export async function onRequest({ request, env }) {
     let body = {};
     try { body = await request.json(); } catch {}
     const force = body?.force === true;
+    const customPrompt = typeof body?.customPrompt === 'string' && body.customPrompt.trim()
+      ? body.customPrompt.trim().slice(0, 2000)
+      : null;
 
     const row = await env.DB.prepare('SELECT data FROM state WHERE id = 1').first();
     let state = {};
@@ -300,7 +306,7 @@ export async function onRequest({ request, env }) {
 
     let review, usage;
     try {
-      ({ review, usage } = await askClaude(digest, coach?.notes || [], env));
+      ({ review, usage } = await askClaude(digest, coach?.notes || [], env, customPrompt));
     } catch (err) {
       /* Nothing is written and no run is recorded, so a failure costs
          the user neither money nor their weekly allowance. */
