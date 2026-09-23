@@ -1208,19 +1208,19 @@ const readSalahLoc = () => {
 function normalizePrayerName(n) {
   const VARIANTS = {
     // Fajr
-    fajir:’fajr’, fajer:’fajr’, fajor:’fajr’, fejr:’fajr’,
+    fajir:'fajr', fajer:'fajr', fajor:'fajr', fejr:'fajr',
     // Dhuhr
-    dhur:’dhuhr’, zuhr:’dhuhr’, zuhur:’dhuhr’, duhr:’dhuhr’, zohr:’dhuhr’, dhohr:’dhuhr’, dohur:’dhuhr’, zuhor:’dhuhr’,
+    dhur:'dhuhr', zuhr:'dhuhr', zuhur:'dhuhr', duhr:'dhuhr', zohr:'dhuhr', dhohr:'dhuhr', dohur:'dhuhr', zuhor:'dhuhr',
     // Asr
-    aser:’asr’, asar:’asr’, asur:’asr’, assr:’asr’,
+    aser:'asr', asar:'asr', asur:'asr', assr:'asr',
     // Maghrib
-    magrib:’maghrib’, mughrib:’maghrib’, moghrib:’maghrib’, maghreb:’maghrib’, magreb:’maghrib’, moghreb:’maghrib’, mugrib:’maghrib’,
+    magrib:'maghrib', mughrib:'maghrib', moghrib:'maghrib', maghreb:'maghrib', magreb:'maghrib', moghreb:'maghrib', mugrib:'maghrib',
     // Isha
-    esha:’isha’, ishaa:’isha’, eshaa:’isha’, ishha:’isha’,
+    esha:'isha', ishaa:'isha', eshaa:'isha', ishha:'isha',
     // Tahajjud
-    tahajud:’tahajjud’, tahajjut:’tahajjud’, tahajut:’tahajjud’, qiyam:’tahajjud’, qiyamullail:’tahajjud’, qiyamallayl:’tahajjud’, qiyamulleil:’tahajjud’,
+    tahajud:'tahajjud', tahajjut:'tahajjud', tahajut:'tahajjud', qiyam:'tahajjud', qiyamullail:'tahajjud', qiyamallayl:'tahajjud', qiyamulleil:'tahajjud',
   };
-  const s = (n || ‘’).toLowerCase().replace(/[‘’\s\-]/g, ‘’);
+  const s = (n || '').toLowerCase().replace(/[''\s\-]/g, '');
   return VARIANTS[s] || s;
 }
 
