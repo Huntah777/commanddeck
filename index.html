@@ -3696,9 +3696,10 @@ function WeekStrip({ state, sel, setDate }) {
 ------------------------------------------------------------------- */
 function HabitChips({ habits, log, toggle, state }) {
   if (!habits.length) return null;
+  const sorted = [...habits].sort((a, b) => (log[a.id] ? 1 : 0) - (log[b.id] ? 1 : 0));
   return (
     <div className="flex gap-2 overflow-x-auto no-scrollbar pb-1 mb-3" data-testid="habit-chips">
-      {habits.map(h => {
+      {sorted.map(h => {
         const p  = pillarByIdFromState(h.pillar, state);
         const on = !!log[h.id];
         return (
