@@ -3910,13 +3910,11 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
                  block are all just "a thing on the day" once you are
                  stood in front of them — see toggleBlockDone. */
               const inset = Math.min(r.depth || 0, 2) * 16;
-              const dur = b.end > b.start ? b.end - b.start : (1440 - b.start) + b.end;
-              const rowMinH = Math.max(56, Math.min(280, 44 + dur * 1.5));
 
               return (
                 <div key={r.id} data-testid="agenda-row" data-done={isDone ? '1' : undefined}
                   data-block={b.id} data-depth={r.depth || 0} className="flex items-stretch gap-3"
-                  style={{ minHeight: rowMinH, ...(r.depth ? { marginLeft: inset, paddingLeft: 8, borderLeft: '1px solid #2a2a31' } : {}) }}>
+                  style={r.depth ? { marginLeft: inset, paddingLeft: 8, borderLeft: '1px solid #2a2a31' } : undefined}>
                   <div className="w-10 shrink-0 text-right font-mono text-[10px] text-bone-400 pt-3.5">{toHM(b.start)}</div>
 
                   {/* Bubble, and the line joining it to whatever is next */}
@@ -3929,7 +3927,7 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
                           ? <Glyph className="w-5 h-5" style={{ color: isDone ? p.color : '#0a0a0b' }}/>
                           : <span className="text-lg leading-none" style={{ color: isDone ? p.color : '#0a0a0b' }}>☽</span>}
                     </span>
-                    {!last && <span className="flex-1 w-1 rounded-full my-1" style={{ background: `${p.color}55` }}/>}
+                    {!last && <span className="flex-1 w-px my-1" style={{ background: '#2a2a31' }}/>}
                   </div>
 
                   <button onClick={()=>{ if (!b.isSalah) setEditing(b); }}
