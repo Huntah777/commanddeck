@@ -1226,18 +1226,24 @@ function normalizePrayerName(n) {
 
 function salahBlocksFrom(timings, offsets) {
   if (!timings) return [];
+  const sunriseMin = salahMinutes(timings['Sunrise'], 0);
+  const fajrStart  = salahMinutes(timings['Fajr'],    offsets?.['Fajr'] || 0);
+
   const blocks = Object.entries(SALAH_NAMES).map(([key, names]) => {
     const start = salahMinutes(timings[key], offsets?.[key] || 0);
     if (start == null) return null;
-    return { id:`salah-${key}`, title:names.en, subtitle:names.ar, pillar:'deen', start, end: start + SALAH_DURATION, isSalah:true };
+    /* Fajr window closes at sunrise — that's when prayer becomes impermissible */
+    const end = (key === 'Fajr' && sunriseMin != null) ? sunriseMin : start + SALAH_DURATION;
+    return { id:`salah-${key}`, title:names.en, subtitle:names.ar, pillar:'deen', start, end, isSalah:true };
   }).filter(Boolean);
 
-  /* Tahajjud — Aladhan returns Lastthird (start of last third of night)
-     in the same HH:MM format. It sits between Midnight and Fajr. */
+  /* Tahajjud — Aladhan returns Lastthird (start of last third of night).
+     Window runs from Lastthird until 5 min before Fajr begins. */
   if (timings['Lastthird']) {
     const start = salahMinutes(timings['Lastthird'], 0);
     if (start != null) {
-      blocks.push({ id:'salah-Tahajjud', title:'Tahajjud', subtitle:'التهجد', pillar:'deen', start, end: start + SALAH_DURATION, isSalah:true });
+      const end = fajrStart != null ? fajrStart - 5 : start + SALAH_DURATION;
+      blocks.push({ id:'salah-Tahajjud', title:'Tahajjud', subtitle:'التهجد', pillar:'deen', start, end, isSalah:true });
     }
   }
 
@@ -2402,6 +2408,24 @@ function buildPlan(state) {
         if (mins == null) return;
         push(`salah-${key}`, names.en, `${names.ar} · Time to pray`, atMins(mins));
       });
+
+      /* Impermissible prayer times — notify at the start of each forbidden window.
+         Three windows exist in Islamic law: sunrise, solar noon (zawal), post-Asr. */
+      const sunriseMins = salahMinutes(todaySalah['Sunrise'], 0);
+      if (sunriseMins != null)
+        push('forbidden-sunrise', 'Impermissible to Pray',
+          'Prayer is forbidden while the sun is rising — wait ~20 min after sunrise', atMins(sunriseMins));
+
+      /* Zawal fires ~5 min before Dhuhr — that is when the sun is at its zenith */
+      const dhuhrMins = salahMinutes(todaySalah['Dhuhr'], offsets['Dhuhr'] || 0);
+      if (dhuhrMins != null)
+        push('forbidden-zawal', 'Impermissible to Pray',
+          'Sun at its zenith (zawal) — brief forbidden window before Dhuhr begins', atMins(dhuhrMins - 5));
+
+      const asrMins = salahMinutes(todaySalah['Asr'], offsets['Asr'] || 0);
+      if (asrMins != null)
+        push('forbidden-asr', 'Impermissible to Pray',
+          'No voluntary prayers from Asr until Maghrib — pray Asr now if not yet done', atMins(asrMins));
     }
   } catch(e) {}
 
