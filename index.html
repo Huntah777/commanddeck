@@ -1219,6 +1219,8 @@ function normalizePrayerName(n) {
     esha:'isha', ishaa:'isha', eshaa:'isha', ishha:'isha',
     // Tahajjud
     tahajud:'tahajjud', tahajjut:'tahajjud', tahajut:'tahajjud', qiyam:'tahajjud', qiyamullail:'tahajjud', qiyamallayl:'tahajjud', qiyamulleil:'tahajjud',
+    // Duha
+    duha:'duha', dhuha:'duha', doha:'duha', aldhuha:'duha', alduha:'duha', dhoha:'duha', chuha:'duha',
   };
   const s = (n || '').toLowerCase().replace(/[''\s\-]/g, '');
   return VARIANTS[s] || s;
@@ -3910,9 +3912,40 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
                  block are all just "a thing on the day" once you are
                  stood in front of them — see toggleBlockDone. */
               const inset = Math.min(r.depth || 0, 2) * 16;
+              const dur = b.end > b.start ? b.end - b.start : (1440 - b.start) + b.end;
+              const hasChildren = r.inside > 0;
+              const nextRow = rows[i + 1];
+              const isLastInGroup = r.depth > 0 && (!nextRow || nextRow.kind !== 'block' || nextRow.depth === 0);
+
+              // When this is the last nested child, build the ancestor parent's duration bar
+              let parentBar = null;
+              if (isLastInGroup) {
+                for (let j = i - 1; j >= 0; j--) {
+                  if (rows[j].kind === 'block' && (rows[j].depth || 0) < r.depth) {
+                    const pb = rows[j].block;
+                    const pDur = pb.end > pb.start ? pb.end - pb.start : (1440 - pb.start) + pb.end;
+                    const pP = pb.isSalah ? { color: '#10b981' } : blockAccent(pb, state);
+                    const pDone = blockDone(pb, log);
+                    const pInset = Math.min(rows[j].depth || 0, 2) * 16;
+                    parentBar = (
+                      <div key={`dur-${rows[j].id}`} className="flex gap-3 pb-2"
+                        style={rows[j].depth ? { marginLeft: pInset, paddingLeft: 8 } : undefined}>
+                        <div className="w-10 shrink-0"/>
+                        <div className="w-11 shrink-0"/>
+                        <div className="flex-1 min-w-0 pt-1 flex items-center gap-2">
+                          <div className="h-1 rounded-full shrink-0" style={{ width: Math.max(8, Math.min(200, pDur * 56 / 60)), background: pDone ? `${pP.color}33` : `${pP.color}66` }}/>
+                          <span className="text-[9px] font-mono uppercase tracking-wider truncate" style={{ color: `${pP.color}99` }}>{pb.title}</span>
+                        </div>
+                      </div>
+                    );
+                    break;
+                  }
+                }
+              }
 
               return (
-                <div key={r.id} data-testid="agenda-row" data-done={isDone ? '1' : undefined}
+                <React.Fragment key={r.id}>
+                <div data-testid="agenda-row" data-done={isDone ? '1' : undefined}
                   data-block={b.id} data-depth={r.depth || 0} className="flex items-stretch gap-3"
                   style={r.depth ? { marginLeft: inset, paddingLeft: 8, borderLeft: '1px solid #2a2a31' } : undefined}>
                   <div className="w-10 shrink-0 text-right font-mono text-[10px] text-bone-400 pt-3.5">{toHM(b.start)}</div>
@@ -3954,6 +3987,10 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
                     <div className="text-[10px] font-mono tracking-wider uppercase mt-0.5" style={{ color: p.color }}>
                       {b.isSalah ? b.subtitle : b.habitId ? `${p.name} · habit` : b.taskId ? `${p.name} · task` : p.name}
                     </div>
+                    {/* Duration bar — only for blocks with no nested children */}
+                    {!hasChildren && (
+                      <div className="mt-1.5 h-1 rounded-full" style={{ width: Math.max(8, Math.min(200, dur * 56 / 60)), background: isDone ? `${p.color}33` : `${p.color}66` }}/>
+                    )}
                   </button>
 
                   <button onClick={()=>toggleRow(b)} data-testid="agenda-tick"
@@ -3967,6 +4004,8 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
                     </span>
                   </button>
                 </div>
+                {parentBar}
+                </React.Fragment>
               );
             })}
 
