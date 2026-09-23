@@ -1237,6 +1237,13 @@ function salahBlocksFrom(timings, offsets) {
     return { id:`salah-${key}`, title:names.en, subtitle:names.ar, pillar:'deen', start, end, isSalah:true };
   }).filter(Boolean);
 
+  /* Duha — starts 20 min after sunrise (sun fully risen, first forbidden
+     window over) and ends 5 min before Dhuhr (zawal, second forbidden window). */
+  const dhuhrMin = salahMinutes(timings['Dhuhr'], offsets?.['Dhuhr'] || 0);
+  if (sunriseMin != null && dhuhrMin != null) {
+    blocks.push({ id:'salah-Duha', title:'Duha', subtitle:'الضحى', pillar:'deen', start: sunriseMin + 20, end: dhuhrMin - 5, isSalah:true });
+  }
+
   /* Tahajjud — Aladhan returns Lastthird (start of last third of night).
      Window runs from Lastthird until 5 min before Fajr begins. */
   if (timings['Lastthird']) {
