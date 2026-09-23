@@ -1203,13 +1203,45 @@ const readSalahLoc = () => {
 /* One day's Aladhan timings → timeline blocks. Shared by the day strip
    and the week grid so both draw prayer at the same place, with the same
    per-prayer offsets applied. */
+/* Normalise a prayer/habit name so user-typed variants ("Dhur", "Zuhr")
+   match the canonical Aladhan key ("Dhuhr"). */
+function normalizePrayerName(n) {
+  const VARIANTS = {
+    // Fajr
+    fajir:’fajr’, fajer:’fajr’, fajor:’fajr’, fejr:’fajr’,
+    // Dhuhr
+    dhur:’dhuhr’, zuhr:’dhuhr’, zuhur:’dhuhr’, duhr:’dhuhr’, zohr:’dhuhr’, dhohr:’dhuhr’, dohur:’dhuhr’, zuhor:’dhuhr’,
+    // Asr
+    aser:’asr’, asar:’asr’, asur:’asr’, assr:’asr’,
+    // Maghrib
+    magrib:’maghrib’, mughrib:’maghrib’, moghrib:’maghrib’, maghreb:’maghrib’, magreb:’maghrib’, moghreb:’maghrib’, mugrib:’maghrib’,
+    // Isha
+    esha:’isha’, ishaa:’isha’, eshaa:’isha’, ishha:’isha’,
+    // Tahajjud
+    tahajud:’tahajjud’, tahajjut:’tahajjud’, tahajut:’tahajjud’, qiyam:’tahajjud’, qiyamullail:’tahajjud’, qiyamallayl:’tahajjud’, qiyamulleil:’tahajjud’,
+  };
+  const s = (n || ‘’).toLowerCase().replace(/[‘’\s\-]/g, ‘’);
+  return VARIANTS[s] || s;
+}
+
 function salahBlocksFrom(timings, offsets) {
   if (!timings) return [];
-  return Object.entries(SALAH_NAMES).map(([key, names]) => {
+  const blocks = Object.entries(SALAH_NAMES).map(([key, names]) => {
     const start = salahMinutes(timings[key], offsets?.[key] || 0);
     if (start == null) return null;
     return { id:`salah-${key}`, title:names.en, subtitle:names.ar, pillar:'deen', start, end: start + SALAH_DURATION, isSalah:true };
   }).filter(Boolean);
+
+  /* Tahajjud — Aladhan returns Lastthird (start of last third of night)
+     in the same HH:MM format. It sits between Midnight and Fajr. */
+  if (timings['Lastthird']) {
+    const start = salahMinutes(timings['Lastthird'], 0);
+    if (start != null) {
+      blocks.push({ id:'salah-Tahajjud', title:'Tahajjud', subtitle:'التهجد', pillar:'deen', start, end: start + SALAH_DURATION, isSalah:true });
+    }
+  }
+
+  return blocks;
 }
 
 function useSalahTimes(dKey, method, school, syncedLoc, offsets, onLocationConfirmed) {
@@ -1610,10 +1642,25 @@ const blockDone = (b, log) =>
    Deliberately NOT by promoting a plain block into a task first: a
    block you ticked off is a block you ticked off, and it has no
    business turning up in the task list afterwards. */
-const toggleBlockDone = (s, dKey, b) =>
-  b.habitId ? toggleHabitLog(s, dKey, b.habitId)
-  : b.taskId ? toggleTaskDone(s, b.taskId)
-  : toggleHabitLog(s, dKey, b.id);
+const toggleBlockDone = (s, dKey, b) => {
+  if (b.habitId) return toggleHabitLog(s, dKey, b.habitId);
+  if (b.taskId)  return toggleTaskDone(s, b.taskId);
+
+  /* For prayer/salah blocks, also sync any habit whose name matches
+     the prayer (e.g. ticking "Dhuhr" prayer also ticks a "Dhur" habit). */
+  let next = toggleHabitLog(s, dKey, b.id);
+  if (b.isSalah) {
+    const prayerNorm = normalizePrayerName(b.title);
+    const matchingHabit = (s.habits || []).find(h => normalizePrayerName(h.name) === prayerNorm);
+    if (matchingHabit) {
+      /* Sync habit state to match the prayer's new state */
+      const prayerNowOn = !!(next.logs?.[dKey]?.[b.id]);
+      const habitNowOn  = !!(next.logs?.[dKey]?.[matchingHabit.id]);
+      if (prayerNowOn !== habitNowOn) next = toggleHabitLog(next, dKey, matchingHabit.id);
+    }
+  }
+  return next;
+};
 
 /* ------------------------------------------------------------------
    TASKS ON THE CALENDAR
