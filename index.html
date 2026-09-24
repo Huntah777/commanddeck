@@ -3580,6 +3580,201 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
    Week and month go full width and push tasks and habits below them;
    seven columns squeezed into half a screen is not a week you can read.
 ------------------------------------------------------------------- */
+
+/* ─── DAILY WISDOM ─────────────────────────────────────────────────────────
+   Three rotating cards: a Rabbana dua, a hadith, and a motivational quote.
+   Period = 2-hour slot; 40 items per category → no repeat for 80 hours.    */
+const WISDOM_RABBANA = [
+  { ar:'رَبَّنَا تَقَبَّلْ مِنَّا إِنَّكَ أَنتَ السَّمِيعُ الْعَلِيمُ', en:'Our Lord, accept [this] from us. Indeed You are the Hearing, the Knowing.', ref:'Quran 2:127' },
+  { ar:'رَبَّنَا آتِنَا فِي الدُّنْيَا حَسَنَةً وَفِي الْآخِرَةِ حَسَنَةً وَقِنَا عَذَابَ النَّارِ', en:'Our Lord, give us good in this world and good in the Hereafter, and protect us from the torment of the Fire.', ref:'Quran 2:201' },
+  { ar:'رَبَّنَا أَفْرِغْ عَلَيْنَا صَبْرًا وَثَبِّتْ أَقْدَامَنَا وَانصُرْنَا عَلَى الْقَوْمِ الْكَافِرِينَ', en:'Our Lord, pour upon us patience, plant firmly our feet, and give us victory over the disbelieving people.', ref:'Quran 2:250' },
+  { ar:'رَبَّنَا لَا تُؤَاخِذْنَا إِن نَّسِينَا أَوْ أَخْطَأْنَا', en:'Our Lord, do not take us to account if we forget or err.', ref:'Quran 2:286' },
+  { ar:'رَبَّنَا وَلَا تَحْمِلْ عَلَيْنَا إِصْرًا كَمَا حَمَلْتَهُ عَلَى الَّذِينَ مِن قَبْلِنَا', en:'Our Lord, do not lay upon us a burden like that which You laid upon those before us.', ref:'Quran 2:286' },
+  { ar:'رَبَّنَا وَلَا تُحَمِّلْنَا مَا لَا طَاقَةَ لَنَا بِهِ', en:'Our Lord, burden us not with that which we have no ability to bear.', ref:'Quran 2:286' },
+  { ar:'رَبَّنَا لَا تُزِغْ قُلُوبَنَا بَعْدَ إِذْ هَدَيْتَنَا وَهَبْ لَنَا مِن لَّدُنكَ رَحْمَةً', en:'Our Lord, do not let our hearts deviate after You have guided us, and grant us mercy from Yourself.', ref:'Quran 3:8' },
+  { ar:'رَبَّنَا إِنَّنَا آمَنَّا فَاغْفِرْ لَنَا ذُنُوبَنَا وَقِنَا عَذَابَ النَّارِ', en:'Our Lord, indeed we have believed, so forgive us our sins and protect us from the punishment of the Fire.', ref:'Quran 3:16' },
+  { ar:'رَبَّنَا آمَنَّا بِمَا أَنزَلْتَ وَاتَّبَعْنَا الرَّسُولَ فَاكْتُبْنَا مَعَ الشَّاهِدِينَ', en:'Our Lord, we have believed in what You revealed and followed the messenger, so register us among the witnesses.', ref:'Quran 3:53' },
+  { ar:'رَبَّنَا اغْفِرْ لَنَا ذُنُوبَنَا وَإِسْرَافَنَا فِي أَمْرِنَا وَثَبِّتْ أَقْدَامَنَا', en:'Our Lord, forgive us our sins and our excesses in our affairs, and plant firmly our feet.', ref:'Quran 3:147' },
+  { ar:'رَبَّنَا مَا خَلَقْتَ هَٰذَا بَاطِلًا سُبْحَانَكَ', en:'Our Lord, You did not create this in vain; exalted are You above that.', ref:'Quran 3:191' },
+  { ar:'رَبَّنَا إِنَّكَ مَن تُدْخِلِ النَّارَ فَقَدْ أَخْزَيْتَهُ', en:'Our Lord, indeed whoever You admit to the Fire — You have disgraced him.', ref:'Quran 3:192' },
+  { ar:'رَبَّنَا فَاغْفِرْ لَنَا ذُنُوبَنَا وَكَفِّرْ عَنَّا سَيِّئَاتِنَا وَتَوَفَّنَا مَعَ الْأَبْرَارِ', en:'Our Lord, forgive us our sins, remove our misdeeds, and cause us to die among the righteous.', ref:'Quran 3:193' },
+  { ar:'رَبَّنَا وَآتِنَا مَا وَعَدتَّنَا عَلَىٰ رُسُلِكَ وَلَا تُخْزِنَا يَوْمَ الْقِيَامَةِ', en:'Our Lord, grant us what You promised through Your messengers and do not disgrace us on the Day of Resurrection.', ref:'Quran 3:194' },
+  { ar:'رَبَّنَا ظَلَمْنَا أَنفُسَنَا وَإِن لَّمْ تَغْفِرْ لَنَا وَتَرْحَمْنَا لَنَكُونَنَّ مِنَ الْخَاسِرِينَ', en:'Our Lord, we have wronged ourselves, and if You do not forgive us and have mercy upon us, we will surely be among the losers.', ref:'Quran 7:23' },
+  { ar:'رَبَّنَا لَا تَجْعَلْنَا مَعَ الْقَوْمِ الظَّالِمِينَ', en:'Our Lord, do not place us with the wrongdoing people.', ref:'Quran 7:47' },
+  { ar:'رَبَّنَا لَا تَجْعَلْنَا فِتْنَةً لِّلْقَوْمِ الظَّالِمِينَ وَنَجِّنَا بِرَحْمَتِكَ', en:'Our Lord, do not make us a trial for the wrongdoing people, and save us by Your mercy.', ref:'Quran 10:85–86' },
+  { ar:'رَبَّنَا إِنِّي أَسْكَنتُ مِن ذُرِّيَّتِي بِوَادٍ غَيْرِ ذِي زَرْعٍ عِندَ بَيْتِكَ الْمُحَرَّمِ', en:'Our Lord, I have settled some of my descendants in an uncultivated valley near Your sacred House.', ref:'Quran 14:37' },
+  { ar:'رَبَّنَا اغْفِرْ لِي وَلِوَالِدَيَّ وَلِلْمُؤْمِنِينَ يَوْمَ يَقُومُ الْحِسَابُ', en:'Our Lord, forgive me and my parents and the believers on the Day the account is established.', ref:'Quran 14:41' },
+  { ar:'رَبَّنَا آتِنَا مِن لَّدُنكَ رَحْمَةً وَهَيِّئْ لَنَا مِنْ أَمْرِنَا رَشَدًا', en:'Our Lord, grant us mercy from Yourself and prepare for us right guidance in our affair.', ref:'Quran 18:10' },
+  { ar:'رَبَّنَا هَبْ لَنَا مِنْ أَزْوَاجِنَا وَذُرِّيَّاتِنَا قُرَّةَ أَعْيُنٍ وَاجْعَلْنَا لِلْمُتَّقِينَ إِمَامًا', en:'Our Lord, grant us from our spouses and offspring comfort to our eyes and make us leaders of the righteous.', ref:'Quran 25:74' },
+  { ar:'رَبَّنَا وَسِعْتَ كُلَّ شَيْءٍ رَّحْمَةً وَعِلْمًا فَاغْفِرْ لِلَّذِينَ تَابُوا', en:'Our Lord, You have encompassed all things in mercy and knowledge, so forgive those who have repented.', ref:'Quran 40:7' },
+  { ar:'رَبَّنَا وَأَدْخِلْهُمْ جَنَّاتِ عَدْنٍ الَّتِي وَعَدتَّهُمْ', en:'Our Lord, admit them to gardens of perpetual residence which You have promised them.', ref:'Quran 40:8' },
+  { ar:'رَبَّنَا أَتْمِمْ لَنَا نُورَنَا وَاغْفِرْ لَنَا إِنَّكَ عَلَىٰ كُلِّ شَيْءٍ قَدِيرٌ', en:'Our Lord, perfect for us our light and forgive us. Indeed, You are over all things competent.', ref:'Quran 66:8' },
+  { ar:'رَبَّنَا عَلَيْكَ تَوَكَّلْنَا وَإِلَيْكَ أَنَبْنَا وَإِلَيْكَ الْمَصِيرُ', en:'Our Lord, upon You we have relied, and to You we have returned, and to You is the final destination.', ref:'Quran 60:4' },
+  { ar:'رَبَّنَا لَا تَجْعَلْنَا فِتْنَةً لِّلَّذِينَ كَفَرُوا وَاغْفِرْ لَنَا', en:'Our Lord, do not make us a trial for those who disbelieve, and forgive us.', ref:'Quran 60:5' },
+  { ar:'رَبَّنَا اغْفِرْ لَنَا وَلِإِخْوَانِنَا الَّذِينَ سَبَقُونَا بِالْإِيمَانِ', en:'Our Lord, forgive us and our brothers who preceded us in faith.', ref:'Quran 59:10' },
+  { ar:'رَبَّنَا وَقِهِمُ السَّيِّئَاتِ وَمَن تَقِ السَّيِّئَاتِ يَوْمَئِذٍ فَقَدْ رَحِمْتَهُ', en:'Our Lord, protect them from the evil consequences of their deeds; and whoever You protect from the evil consequences, You have shown mercy.', ref:'Quran 40:9' },
+  { ar:'رَبَّنَا اصْرِفْ عَنَّا عَذَابَ جَهَنَّمَ إِنَّ عَذَابَهَا كَانَ غَرَامًا', en:'Our Lord, avert from us the punishment of Hell. Indeed, its punishment is a persisting affliction.', ref:'Quran 25:65' },
+  { ar:'رَبَّنَا هَبْ لَنَا مِن لَّدُنكَ رَحْمَةً إِنَّكَ أَنتَ الْوَهَّابُ', en:'Our Lord, grant us mercy from Yourself. Indeed, You are the Bestower.', ref:'Quran 3:8' },
+  { ar:'رَبَّنَا إِنَّكَ تَعْلَمُ مَا نُخْفِي وَمَا نُعْلِنُ وَمَا يَخْفَىٰ عَلَى اللَّهِ مِن شَيْءٍ', en:'Our Lord, indeed You know what we conceal and what we declare, and nothing is hidden from Allah.', ref:'Quran 14:38' },
+  { ar:'رَبَّنَا لَا تُؤَاخِذْنَا بِمَا فَعَلَ السُّفَهَاءُ مِنَّا', en:'Our Lord, do not punish us for what the foolish among us have done.', ref:'Quran 7:155' },
+  { ar:'رَبَّنَا افْتَحْ بَيْنَنَا وَبَيْنَ قَوْمِنَا بِالْحَقِّ وَأَنتَ خَيْرُ الْفَاتِحِينَ', en:'Our Lord, decide between us and our people in truth, and You are the best of those who give decision.', ref:'Quran 7:89' },
+  { ar:'رَبَّنَا أَخْرِجْنَا مِنْ هَٰذِهِ الْقَرْيَةِ الظَّالِمِ أَهْلُهَا وَاجْعَل لَّنَا مِن لَّدُنكَ وَلِيًّا', en:'Our Lord, take us out of this city of oppressive people and appoint for us a protector from Yourself.', ref:'Quran 4:75' },
+  { ar:'رَبَّنَا لَا تَجْعَلْ فِي قُلُوبِنَا غِلًّا لِّلَّذِينَ آمَنُوا', en:'Our Lord, do not put in our hearts any resentment toward those who have believed.', ref:'Quran 59:10' },
+  { ar:'رَبَّنَا إِنِّي وَضَعْتُهَا أُنثَىٰ وَاللَّهُ أَعْلَمُ بِمَا وَضَعَتْ وَلَيْسَ الذَّكَرُ كَالْأُنثَىٰ', en:'Our Lord, I have delivered a female, and I have named her Mary, and I seek Your protection for her and her descendants from the expelled Satan.', ref:'Quran 3:36' },
+  { ar:'رَبَّنَا ظَلَمْنَا أَنفُسَنَا وَإِن لَّمْ تَغْفِرْ لَنَا وَتَرْحَمْنَا', en:'Our Lord, we have wronged ourselves; if You do not forgive us and have mercy on us, we shall certainly be of the losers.', ref:'Quran 7:23' },
+  { ar:'رَبَّنَا وَابْعَثْ فِيهِمْ رَسُولًا مِّنْهُمْ يَتْلُو عَلَيْهِمْ آيَاتِكَ', en:'Our Lord, send among them a messenger from themselves who will recite to them Your verses.', ref:'Quran 2:129' },
+  { ar:'رَبَّنَا إِنَّكَ جَامِعُ النَّاسِ لِيَوْمٍ لَّا رَيْبَ فِيهِ إِنَّ اللَّهَ لَا يُخْلِفُ الْمِيعَادَ', en:'Our Lord, You will gather the people for a Day about which there is no doubt. Indeed, Allah does not break His promise.', ref:'Quran 3:9' },
+  { ar:'رَبَّنَا آمَنَّا فَاغْفِرْ لَنَا وَارْحَمْنَا وَأَنتَ خَيْرُ الرَّاحِمِينَ', en:'Our Lord, we have believed, so forgive us and have mercy upon us, for You are the best of the merciful.', ref:'Quran 23:109' },
+  { ar:'رَبَّنَا أَفْرِغْ عَلَيْنَا صَبْرًا وَتَوَفَّنَا مُسْلِمِينَ', en:'Our Lord, pour upon us patience and let us die as Muslims [in submission to You].', ref:'Quran 7:126' },
+];
+
+const WISDOM_HADITHS = [
+  { text:'Actions are judged by intentions, and every person will get what they intended.', ref:'Bukhari & Muslim' },
+  { text:'The strongest among you is the one who controls himself when angry.', ref:'Bukhari' },
+  { text:'The best of you are those who are best to their families.', ref:'Tirmidhi' },
+  { text:'None of you truly believes until he loves for his brother what he loves for himself.', ref:'Bukhari & Muslim' },
+  { text:'The most beloved of deeds to Allah are those that are most consistent, even if they are small.', ref:'Bukhari & Muslim' },
+  { text:'Make things easy, not difficult; give glad tidings, not cause aversion.', ref:'Bukhari & Muslim' },
+  { text:'Speak a good word or remain silent.', ref:'Bukhari & Muslim' },
+  { text:'Every act of kindness is a charity.', ref:'Bukhari & Muslim' },
+  { text:'Whoever follows a path seeking knowledge, Allah will make easy for him a path to Paradise.', ref:'Muslim' },
+  { text:'Take advantage of five before five: youth before old age, health before illness, wealth before poverty, free time before being busy, and life before death.', ref:'Hakim' },
+  { text:'Tie your camel; then put your trust in Allah.', ref:'Tirmidhi' },
+  { text:'The believer who mixes with people and bears their harm with patience is better than the one who does not mix with people.', ref:'Ibn Majah' },
+  { text:'The dua of a Muslim for his brother in his absence is answered.', ref:'Muslim' },
+  { text:'Truthfulness leads to righteousness and righteousness leads to Paradise.', ref:'Bukhari & Muslim' },
+  { text:'Whoever is humble for the sake of Allah, Allah will raise him.', ref:'Muslim' },
+  { text:'The world is the prison of the believer and the paradise of the disbeliever.', ref:'Muslim' },
+  { text:'Rich is not the one who has much wealth, but rich is the one who is content.', ref:'Bukhari & Muslim' },
+  { text:'Do not belittle any good deed, even meeting your brother with a cheerful face.', ref:'Muslim' },
+  { text:'Whoever believes in Allah and the Last Day should speak good or remain silent.', ref:'Bukhari & Muslim' },
+  { text:'The best prayers after the obligatory ones are night prayers.', ref:'Muslim' },
+  { text:'The best fasting after Ramadan is the month of Allah, Al-Muharram.', ref:'Muslim' },
+  { text:'Paradise lies under the feet of mothers.', ref:'Ibn Majah' },
+  { text:'Help your brother whether he is an oppressor or being oppressed.', ref:'Bukhari' },
+  { text:'Modesty brings nothing but good.', ref:'Bukhari & Muslim' },
+  { text:'The upper hand is better than the lower hand — the upper hand gives and the lower hand takes.', ref:'Bukhari & Muslim' },
+  { text:'A man is on the religion of his close friend, so be careful about who you befriend.', ref:'Abu Dawud & Tirmidhi' },
+  { text:'Verily, I was sent to perfect noble character.', ref:'Ahmad & Malik' },
+  { text:'Seek knowledge, even if you have to go to China.', ref:'Bayhaqi' },
+  { text:'The best of you are those who learn the Quran and teach it.', ref:'Bukhari' },
+  { text:'If Allah wants good for someone, He gives them understanding of the religion.', ref:'Bukhari & Muslim' },
+  { text:'Do not look at the prayer of your neighbour to compare it; look at those whose prayer is better than yours.', ref:'Bukhari (paraphrase)' },
+  { text:'Whoever removes a worldly grief from a believer, Allah will remove from him one of the griefs of the Day of Resurrection.', ref:'Muslim' },
+  { text:'The one who looks after a widow or a poor person is like the one who fights in the way of Allah.', ref:'Bukhari & Muslim' },
+  { text:'Leave what makes you doubt for what does not make you doubt.', ref:'Tirmidhi & Nasai' },
+  { text:'No fatigue, illness, anxiety, sadness, harm, or distress befalls a Muslim — even a thorn that pricks him — but Allah expiates some of his sins for it.', ref:'Bukhari & Muslim' },
+  { text:'The prayer is the pillar of the religion; whoever abandons it has demolished the religion.', ref:'Bayhaqi' },
+  { text:'Make du\'a to Allah while being certain that it will be accepted, and know that Allah does not accept the du\'a of a heart that is negligent and distracted.', ref:'Tirmidhi' },
+  { text:'Verily, with every difficulty comes ease, and with every difficulty comes ease.', ref:'Quran 94:5–6 (context of hadith)' },
+  { text:'Be in this world as though you are a stranger or a traveller passing through.', ref:'Bukhari' },
+  { text:'The best supplication is the supplication of the day of Arafah.', ref:'Tirmidhi' },
+];
+
+const WISDOM_QUOTES = [
+  { text:'Verily, with hardship comes ease.', source:'Allah ﷻ', ref:'Quran 94:5' },
+  { text:'Call upon Me; I will respond to you.', source:'Allah ﷻ', ref:'Quran 40:60' },
+  { text:'Allah does not burden a soul beyond that it can bear.', source:'Allah ﷻ', ref:'Quran 2:286' },
+  { text:'Indeed, Allah is with the patient.', source:'Allah ﷻ', ref:'Quran 2:153' },
+  { text:'Verily, Allah will not change the condition of a people until they change what is in themselves.', source:'Allah ﷻ', ref:'Quran 13:11' },
+  { text:'Do not lose hope, nor be sad.', source:'Allah ﷻ', ref:'Quran 3:139' },
+  { text:'And He found you lost and guided you.', source:'Allah ﷻ', ref:'Quran 93:7' },
+  { text:'You will not reach righteousness until you spend from that which you love.', source:'Allah ﷻ', ref:'Quran 3:92' },
+  { text:'No soul knows what is kept hidden for them of comfort for eyes as reward for what they used to do.', source:'Allah ﷻ', ref:'Quran 32:17' },
+  { text:'Establish prayer; indeed, prayer prevents immorality and wrongdoing.', source:'Allah ﷻ', ref:'Quran 29:45' },
+  { text:'Make your intention sincere — then little work will suffice you.', source:'Imam Al-Shafi\'i', ref:'Classical scholar' },
+  { text:'Knowledge is not what is memorised. Knowledge is what benefits.', source:'Imam Al-Shafi\'i', ref:'Classical scholar' },
+  { text:'Be patient, for patience is a pillar of faith like the head is to the body.', source:'Imam Ali ibn Abi Talib', ref:'Nahj al-Balagha' },
+  { text:'A man\'s value is determined by what he struggles with, not what he achieves without effort.', source:'Imam Ali ibn Abi Talib', ref:'Attributed' },
+  { text:'Two things define you: your patience when you have nothing, and your attitude when you have everything.', source:'Imam Ali ibn Abi Talib', ref:'Attributed' },
+  { text:'Yesterday I was clever, so I wanted to change the world. Today I am wise, so I am changing myself.', source:'Rumi', ref:'Masnavi' },
+  { text:'Don\'t grieve. Everything you lose comes round in another form.', source:'Rumi', ref:'Masnavi' },
+  { text:'Out beyond ideas of wrongdoing and rightdoing, there is a field. I will meet you there.', source:'Rumi', ref:'Masnavi' },
+  { text:'The wound is the place where the light enters you.', source:'Rumi', ref:'Masnavi' },
+  { text:'Seek the wisdom that will untie your knot. Seek the path that demands your whole being.', source:'Rumi', ref:'Masnavi' },
+  { text:'The vision of things to be done may come a long time before the way of doing it becomes clear.', source:'Ibn Khaldun', ref:'Muqaddimah' },
+  { text:'The discipline of desire is the background of character.', source:'John Locke', ref:'Some Thoughts Concerning Education' },
+  { text:'Discipline is the bridge between goals and accomplishment.', source:'Jim Rohn', ref:'Personal development' },
+  { text:'We are what we repeatedly do. Excellence, then, is not an act but a habit.', source:'Aristotle', ref:'Nicomachean Ethics' },
+  { text:'The roots of education are bitter, but the fruit is sweet.', source:'Aristotle', ref:'Classical philosophy' },
+  { text:'First say to yourself what you would be; then do what you have to do.', source:'Epictetus', ref:'Discourses' },
+  { text:'It is not death that a man should fear, but he should fear never beginning to live.', source:'Marcus Aurelius', ref:'Meditations' },
+  { text:'If you are distressed by anything external, the pain is not due to the thing itself but to your estimate of it; and this you have the power to revoke at any moment.', source:'Marcus Aurelius', ref:'Meditations' },
+  { text:'The secret of getting ahead is getting started.', source:'Mark Twain', ref:'Attributed' },
+  { text:'Success is not final, failure is not fatal: it is the courage to continue that counts.', source:'Winston Churchill', ref:'Attributed' },
+  { text:'Do not wait to strike till the iron is hot; but make it hot by striking.', source:'William Butler Yeats', ref:'Attributed' },
+  { text:'An investment in knowledge pays the best interest.', source:'Benjamin Franklin', ref:'Poor Richard\'s Almanack' },
+  { text:'The only way to do great work is to love what you do.', source:'Steve Jobs', ref:'Stanford commencement, 2005' },
+  { text:'In the middle of difficulty lies opportunity.', source:'Albert Einstein', ref:'Attributed' },
+  { text:'He who has health has hope; and he who has hope has everything.', source:'Arabian proverb', ref:'Traditional' },
+  { text:'A journey of a thousand miles begins with a single step.', source:'Lao Tzu', ref:'Tao Te Ching' },
+  { text:'Knowledge is a treasure, but practice is the key to it.', source:'Lao Tzu', ref:'Tao Te Ching' },
+  { text:'The best time to plant a tree was twenty years ago. The second best time is now.', source:'Chinese proverb', ref:'Traditional' },
+  { text:'Hardships often prepare ordinary people for an extraordinary destiny.', source:'C.S. Lewis', ref:'Attributed' },
+  { text:'The future belongs to those who believe in the beauty of their dreams.', source:'Eleanor Roosevelt', ref:'Attributed' },
+];
+
+function WisdomCard({ kind, item }) {
+  const cfg = {
+    rabbana: { label:'RABBANA DU\'A',         color:'#f59e0b' },
+    hadith:  { label:'HADITH',                color:'#10b981' },
+    quote:   { label:'MOTIVATIONAL QUOTE',    color:'#8b5cf6' },
+  }[kind];
+
+  return (
+    <div className="rounded-2xl p-5 flex flex-col gap-3"
+      style={{ background:`${cfg.color}0a`, border:`1px solid ${cfg.color}22`, minHeight:200 }}>
+      <div className="text-[9px] font-mono tracking-[0.2em] uppercase" style={{ color:`${cfg.color}aa` }}>
+        {cfg.label}
+      </div>
+
+      {kind === 'rabbana' && (
+        <p className="text-xl leading-relaxed text-bone-100 text-right" dir="rtl"
+          style={{ fontFamily:"'Noto Naskh Arabic','Amiri',serif", lineHeight:2 }}>
+          {item.ar}
+        </p>
+      )}
+
+      <p className="font-display text-[15px] leading-relaxed text-bone-200 flex-1 italic">
+        "{kind === 'rabbana' ? item.en : item.text}"
+      </p>
+
+      <div className="flex items-end justify-between gap-2 pt-2"
+        style={{ borderTop:`1px solid ${cfg.color}18` }}>
+        {(item.source) && (
+          <span className="text-[11px] text-bone-300 leading-snug">— {item.source}</span>
+        )}
+        <span className="text-[10px] font-mono text-bone-500 ml-auto shrink-0">{item.ref}</span>
+      </div>
+    </div>
+  );
+}
+
+function DailyWisdom() {
+  const [period, setPeriod] = React.useState(() => Math.floor(Date.now() / (2 * 3600 * 1000)));
+
+  React.useEffect(() => {
+    const msUntilNext = (2 * 3600 * 1000) - (Date.now() % (2 * 3600 * 1000));
+    const t = setTimeout(() => setPeriod(Math.floor(Date.now() / (2 * 3600 * 1000))), msUntilNext);
+    return () => clearTimeout(t);
+  }, [period]);
+
+  const rabbana = WISDOM_RABBANA[period % WISDOM_RABBANA.length];
+  const hadith  = WISDOM_HADITHS[period % WISDOM_HADITHS.length];
+  const quote   = WISDOM_QUOTES[period % WISDOM_QUOTES.length];
+
+  return (
+    <section className="col-span-12">
+      <SectionHeading kicker="04 / Wisdom" title="Daily reflections" sub="One of each · rotates every 2 h · no repeats for 80 h"/>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <WisdomCard kind="rabbana" item={rabbana}/>
+        <WisdomCard kind="hadith"  item={hadith}/>
+        <WisdomCard kind="quote"   item={quote}/>
+      </div>
+    </section>
+  );
+}
+
 function TodayView({ state, setState }) {
   const sel = parseKey(state.ui.selectedDate);
   const dow = sel.getDay();
@@ -3672,6 +3867,9 @@ function TodayView({ state, setState }) {
           ? <EmptyHint text="Inbox zero. Add the next move."/>
           : tasksToday.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState} dayKey={dKey}/>)}
       </section>
+
+      {/* Daily Wisdom */}
+      <DailyWisdom/>
 
       {/* Habits */}
       <section className={wide ? 'col-span-12 md:col-span-6' : 'col-span-12 lg:col-span-3'}>
