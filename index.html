@@ -4114,8 +4114,12 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
               const inset = Math.min(r.depth || 0, 2) * 16;
               const dur = b.end > b.start ? b.end - b.start : (1440 - b.start) + b.end;
               const hasChildren = r.inside > 0;
-              const nextRow = rows[i + 1];
-              const isLastInGroup = r.depth > 0 && (!nextRow || nextRow.kind !== 'block' || nextRow.depth === 0);
+              // Skip 'now'/'gap' rows — they must not break the last-child test
+              let nextBlockRow = null;
+              for (let k = i + 1; k < rows.length; k++) {
+                if (rows[k].kind === 'block') { nextBlockRow = rows[k]; break; }
+              }
+              const isLastInGroup = r.depth > 0 && (!nextBlockRow || nextBlockRow.depth < r.depth);
 
               // When this is the last nested child, build the ancestor parent's duration bar
               let parentBar = null;
