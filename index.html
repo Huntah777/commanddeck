@@ -3764,14 +3764,14 @@ function DailyWisdom() {
   const quote   = WISDOM_QUOTES[period % WISDOM_QUOTES.length];
 
   return (
-    <section className="col-span-12">
+    <div className="mt-5">
       <SectionHeading kicker="04 / Wisdom" title="Daily reflections" sub="One of each · rotates every 2 h · no repeats for 80 h"/>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="flex flex-col gap-3">
         <WisdomCard kind="rabbana" item={rabbana}/>
         <WisdomCard kind="hadith"  item={hadith}/>
         <WisdomCard kind="quote"   item={quote}/>
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -3866,10 +3866,8 @@ function TodayView({ state, setState }) {
         {tasksToday.length === 0
           ? <EmptyHint text="Inbox zero. Add the next move."/>
           : tasksToday.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState} dayKey={dKey}/>)}
+        <DailyWisdom/>
       </section>
-
-      {/* Daily Wisdom */}
-      <DailyWisdom/>
 
       {/* Habits */}
       <section className={wide ? 'col-span-12 md:col-span-6' : 'col-span-12 lg:col-span-3'}>
