@@ -463,8 +463,10 @@ export async function buildTodaysSchedule(state, tz, parts) {
         for (const [key, names] of Object.entries(SALAH_NAMES)) {
           const mins = salahMinutes(timings[key], offsets[key]);
           if (mins == null) continue;
-          push(`salah-${key}`, names.en, `${names.ar} · Time to pray`,
-               zonedHmToUtcMs(y, mo, d, Math.floor(mins / 60), mins % 60, tz));
+          const atMin = (m) => zonedHmToUtcMs(y, mo, d, Math.floor(m / 60), m % 60, tz);
+          push(`salah-${key}-10`, `${names.en} in 10 min`, `${names.ar} · Prayer time approaching`, atMin(mins - 10));
+          push(`salah-${key}-3`,  `${names.en} in 3 min`,  `${names.ar} · Prepare for prayer`,      atMin(mins - 3));
+          push(`salah-${key}`,     names.en,               `${names.ar} · Time to pray`,             atMin(mins));
         }
       } else {
         salahOk = false;
