@@ -172,8 +172,9 @@ self.addEventListener('message', (event) => {
     const timer = setTimeout(() => {
       if (alreadyShown(id)) { pendingTimers.delete(id); return; }
       swNotify(title, body, id, false);
-      /* For salah notifications: also signal open pages to play adhan tone */
-      if (id.startsWith('salah-')) {
+      /* For exact prayer-time notifications only: signal open pages to play adhan.
+         Advance reminders (-10, -3) must not trigger it. */
+      if (/^salah-[A-Z][a-z]+$/.test(id)) {
         self.clients.matchAll({ type: 'window', includeUncontrolled: true })
           .then(list => list.forEach(c => c.postMessage({ type: 'PLAY_ADHAN', tag: id })));
       }

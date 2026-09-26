@@ -87,7 +87,18 @@ export const blockOnDay = (b, dayKey, dow) =>
 
 /* Ids are stable and prefixed by kind — see buildTodaysSchedule. */
 const isUrgent  = (id) => id.startsWith('salah-') || id.startsWith('b-');
-export const staleAfter = (id) => (isUrgent(id) ? URGENT_LATE_MS : RELAXED_LATE_MS);
+
+/* Advance prayer reminders (salah-Fajr-10, salah-Fajr-3) fire N minutes
+   BEFORE the prayer. With a flat URGENT_LATE_MS window, a cron tick that
+   arrives 1 second after the prayer time retires the -10 advance as stale
+   — its fireAt was 10 min ago, which is exactly the limit. Extend those
+   windows so the prayer time arriving doesn't immediately kill them. */
+export const staleAfter = (id) => {
+  if (!isUrgent(id)) return RELAXED_LATE_MS;
+  const advance = id.match(/^salah-\w+-(\d+)$/);
+  if (advance) return (parseInt(advance[1], 10) + 10) * 60_000;
+  return URGENT_LATE_MS;
+};
 
 /* A notification due within this window is sent on this tick rather than
    waiting for the next one — keeps sub-minute accuracy despite a 1-min cron. */
@@ -635,7 +646,7 @@ async function tick(env) {
           title:   n.title,
           body:    n.body || '',
           tag:     n.id,
-          isSalah: n.id.startsWith('salah-'),
+          isSalah: /^salah-[A-Z][a-z]+$/.test(n.id),
         }, env.VAPID_PRIVATE_KEY, env.VAPID_SUBJECT, staleAfter(n.id));
       }));
 
