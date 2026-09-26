@@ -6368,7 +6368,7 @@ function AdminOverview({ state, setState, syncStatus, onSyncNow }) {
     <div className="space-y-6">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <SectionHeading kicker="Admin · 01" title="The numbers don't lie" sub={`${rangeLabel} view across the five pillars`}/>
-        <div className="seg flex-wrap" role="group" aria-label="Stats range">
+        <div className="seg overflow-x-auto no-scrollbar" role="group" aria-label="Stats range">
           {STAT_RANGES.map(r => (
             <button key={r.value} onClick={() => setStatsRange(r.value)}
               aria-pressed={statsRange === r.value}
@@ -6592,7 +6592,7 @@ function AdminView({ state, setState, hydrate, theme, setTheme, background, chan
           the old page made you scroll back to the top to go anywhere. */}
       <div style={{ top: 'var(--header-h, 140px)' }}
         className="sticky z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-2 mb-5 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700">
-        <nav data-testid="admin-nav" className="seg flex-wrap">
+        <nav data-testid="admin-nav" className="seg overflow-x-auto no-scrollbar">
           {ADMIN_SECTIONS.map(s => (
             <button key={s.id} onClick={() => go(s.id)}
               aria-current={tab === s.id ? 'page' : undefined}
@@ -7845,7 +7845,7 @@ function AdminCard({ state, setState }) {
     return out;
   }, [admin.fastingRules, admin.fastingDays, admin.hijriOffset]);
 
-  const TAB_CLS = (t) => `btn px-3 py-1.5 rounded-lg text-xs font-mono tracking-wider ${tab === t ? 'bg-bone-100 text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400 hover:bg-ink-800'}`;
+  const TAB_CLS = (t) => `btn px-3 py-1.5 rounded-lg text-xs font-mono tracking-wider whitespace-nowrap ${tab === t ? 'bg-bone-100 text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400 hover:bg-ink-800'}`;
 
   return (
     <div className="card p-5">
@@ -7853,7 +7853,7 @@ function AdminCard({ state, setState }) {
       <div className="font-display text-xl text-bone-100 mt-1 mb-4">Configuration</div>
 
       {/* Tab bar */}
-      <div className="flex gap-1.5 flex-wrap mb-5">
+      <div className="flex gap-1.5 overflow-x-auto no-scrollbar mb-5">
         {[['pillars','Pillars'],['quads','Quadrants'],['people','People'],['lists','Task lists'],['fasting','Fasting']].map(([id,label]) => (
           <button key={id} onClick={()=>setTab(id)} className={TAB_CLS(id)}>{label}</button>
         ))}
