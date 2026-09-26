@@ -689,6 +689,32 @@ test.describe('the habit chips', () => {
       .getByRole('button', { name: 'Untick Gym' })).toBeVisible();
   });
 
+  test('ticking a chip marks the corresponding agenda block as done', async ({ page }) => {
+    /* A habit that has a time slot appears both as a chip above the
+       timeline AND as a block row in the timeline itself. Ticking the
+       chip must make the block row reflect done — they are two views of
+       the same log entry. */
+    await boot(page, STATE({ blocks: [{ id: 'b-h-fajr', habitId: 'h-fajr', start: 6*60, end: 6*60+30 }] }));
+    const agendaBlock = page.getByTestId('agenda-row').filter({ hasText: 'Fajr in jama' }).first();
+    await expect(agendaBlock).not.toHaveAttribute('data-done', '1');
+
+    await chip(page, 'Fajr in jama').click();
+    await expect(chip(page, 'Fajr in jama')).toHaveAttribute('aria-pressed', 'true');
+    await expect(agendaBlock).toHaveAttribute('data-done', '1');
+  });
+
+  test('ticking a checklist habit marks the corresponding agenda block as done', async ({ page }) => {
+    /* The same log entry drives both the checklist tick and the agenda
+       block's done state — ticking via the checklist must propagate. */
+    await boot(page, STATE({ blocks: [{ id: 'b-h-fajr', habitId: 'h-fajr', start: 6*60, end: 6*60+30 }] }));
+    const agendaBlock = page.getByTestId('agenda-row').filter({ hasText: 'Fajr in jama' }).first();
+    await expect(agendaBlock).not.toHaveAttribute('data-done', '1');
+
+    await page.getByTestId('checklist-habit').filter({ hasText: 'Fajr in jama' })
+      .getByRole('button', { name: 'Tick Fajr in jama' }).click();
+    await expect(agendaBlock).toHaveAttribute('data-done', '1');
+  });
+
   test('only the agenda carries them — the grid has its own blocks', async ({ page }) => {
     await boot(page);
     await expect(page.getByTestId('habit-chips')).toBeVisible();

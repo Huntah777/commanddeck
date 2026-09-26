@@ -1090,6 +1090,15 @@ const SALAH_NAMES = {
   Isha:    { en:'Isha',    ar:'العشاء' },
 };
 
+/* Maps a normalised prayer name → the salah block id in the logs.
+   Used to keep prayer-named habits and their calendar blocks in sync
+   in both directions — see toggleHabitLog and toggleBlockDone. */
+const PRAYER_SALAH_BLOCK_ID = {
+  fajr:'salah-Fajr', dhuhr:'salah-Dhuhr', asr:'salah-Asr',
+  maghrib:'salah-Maghrib', isha:'salah-Isha',
+  duha:'salah-Duha', tahajjud:'salah-Tahajjud',
+};
+
 /* Per-prayer adjustment in minutes — e.g. praying Dhuhr with a jama'ah that
    starts 5 minutes after the calculated time. Applied after the API response
    rather than through Aladhan's `tune` parameter, so the client and the Cron
@@ -1625,16 +1634,36 @@ function tickHabit(s, dKey, id, at = Date.now()) {
    stored tick unions straight back over it, and the box re-ticks itself
    a second after you cleared it. */
 function toggleHabitLog(s, dKey, id) {
-  if (!(s.logs?.[dKey] || {})[id]) return tickHabit(s, dKey, id);
-  const logs    = { ...(s.logs?.[dKey]    || {}) };
-  const logsOff = { ...(s.logsOff?.[dKey] || {}) };
-  delete logs[id];
-  logsOff[id] = Date.now();
-  return {
-    ...s,
-    logs:    { ...s.logs,            [dKey]: logs },
-    logsOff: { ...(s.logsOff || {}), [dKey]: logsOff },
-  };
+  let next;
+  if (!(s.logs?.[dKey] || {})[id]) {
+    next = tickHabit(s, dKey, id);
+  } else {
+    const logs    = { ...(s.logs?.[dKey]    || {}) };
+    const logsOff = { ...(s.logsOff?.[dKey] || {}) };
+    delete logs[id];
+    logsOff[id] = Date.now();
+    next = {
+      ...s,
+      logs:    { ...s.logs,            [dKey]: logs },
+      logsOff: { ...(s.logsOff || {}), [dKey]: logsOff },
+    };
+  }
+
+  /* If this habit is named after a prayer, keep the calendar's salah block
+     in sync — the same bidirectionality toggleBlockDone has the other way.
+     The recursive call uses the salah block's own id, which is never found in
+     habits, so there is no further recursion. */
+  const habit = (next.habits || []).find(h => h.id === id);
+  if (habit) {
+    const salahId = PRAYER_SALAH_BLOCK_ID[normalizePrayerName(habit.name)];
+    if (salahId) {
+      const habitOn = !!(next.logs?.[dKey]?.[id]);
+      const salahOn = !!(next.logs?.[dKey]?.[salahId]);
+      if (habitOn !== salahOn) next = toggleHabitLog(next, dKey, salahId);
+    }
+  }
+
+  return next;
 }
 
 /* Whether a block counts as done on the day whose log this is.
