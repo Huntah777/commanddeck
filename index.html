@@ -5739,7 +5739,7 @@ function HabitTraction({ state, sel, pillarFilter }) {
     if (!cw || !nCols) return fallback;
     const avail = cw - NW - GAP - WD_W - (nCols - 1) * GAP;
     const raw   = Math.floor(avail / nCols);
-    const mins  = { week: 36, month: 10, quarter: 12, year: 8  };
+    const mins  = { week: 28, month: 10, quarter: 12, year: 8  };
     const maxs  = { week: 72, month: 22, quarter: 28, year: 14 };
     return Math.max(mins[scope], Math.min(maxs[scope], raw));
   }, [cw, scope, nCols, useGrid]);
@@ -5803,9 +5803,11 @@ function HabitTraction({ state, sel, pillarFilter }) {
             const p = pillarByIdFromState(h.pillar, state);
             const pct = pctFor(h);
             return (
-              <div key={h.id} className="flex items-center mb-2" style={{ gap: GAP }}>
-                <div style={{ width: NW, flexShrink: 0 }}
-                  className="text-xs text-bone-300 truncate pr-2 leading-none" title={h.name}>{h.name}</div>
+              <div key={h.id} className="flex items-start mb-2" style={{ gap: GAP }}>
+                <div style={{ width: NW, flexShrink: 0 }} className="pr-2">
+                  <div className="text-xs text-bone-300 truncate leading-none" title={h.name}>{h.name}</div>
+                  {pct !== null && <div className="font-mono text-[9px] text-bone-500 mt-1">{pct}%</div>}
+                </div>
 
                 {useGrid && (
                   <div className="flex flex-col shrink-0" style={{ width: WD_W, gap: 2 }}>
@@ -5854,9 +5856,6 @@ function HabitTraction({ state, sel, pillarFilter }) {
                   </div>
                 ))}
 
-                {pct !== null && (
-                  <div className="font-mono text-xs text-bone-400 shrink-0 ml-2">{pct}%</div>
-                )}
               </div>
             );
           })}
