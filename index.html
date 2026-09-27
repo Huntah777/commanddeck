@@ -5775,7 +5775,7 @@ function HabitTraction({ state, sel, pillarFilter }) {
               const isToday = fmtKey(d) === endKey;
               return (
                 <div key={fmtKey(d)} style={{ width: CELL, flexShrink: 0 }}
-                  className={`font-mono text-[10px] text-center leading-snug ${isToday ? 'text-amber-400' : 'text-bone-400'}`}>
+                  className={`font-mono text-[11px] font-semibold text-center leading-snug ${isToday ? 'text-amber-400' : 'text-bone-200'}`}>
                   {DAY_SHORT[d.getDay()].slice(0, 3)}<br/>{d.getDate()}
                 </div>
               );
@@ -5783,16 +5783,16 @@ function HabitTraction({ state, sel, pillarFilter }) {
 
             {scope === 'month' && dates.map((d, i) => (
               <div key={i} style={{ width: CELL, flexShrink: 0 }}
-                className="font-mono text-[8px] text-bone-500 text-center overflow-visible whitespace-nowrap">
+                className="font-mono text-[9px] font-medium text-bone-300 text-center overflow-visible whitespace-nowrap">
                 {d.getDate() === 1
-                  ? <span className="text-bone-300">{MONTHS[d.getMonth()].slice(0, 3).toUpperCase()}</span>
+                  ? <span className="text-bone-100 font-semibold">{MONTHS[d.getMonth()].slice(0, 3).toUpperCase()}</span>
                   : d.getDate() % 7 === 1 ? String(d.getDate()) : null}
               </div>
             ))}
 
             {useGrid && weeks.map((_, i) => (
               <div key={i} style={{ width: CELL, flexShrink: 0 }}
-                className="font-mono text-[8px] text-bone-500 leading-none overflow-visible whitespace-nowrap">
+                className="font-mono text-[9px] font-semibold text-bone-200 leading-none overflow-visible whitespace-nowrap">
                 {monthCols[i] || ''}
               </div>
             ))}
@@ -5805,15 +5805,15 @@ function HabitTraction({ state, sel, pillarFilter }) {
             return (
               <div key={h.id} className="flex items-start mb-2" style={{ gap: GAP }}>
                 <div style={{ width: NW, flexShrink: 0 }} className="pr-2">
-                  <div className="text-xs text-bone-300 truncate leading-none" title={h.name}>{h.name}</div>
-                  {pct !== null && <div className="font-mono text-[9px] text-bone-500 mt-1">{pct}%</div>}
+                  <div className="text-xs font-semibold text-bone-100 truncate leading-none" title={h.name}>{h.name}</div>
+                  {pct !== null && <div className="font-mono text-[9px] text-bone-300 mt-1">{pct}%</div>}
                 </div>
 
                 {useGrid && (
                   <div className="flex flex-col shrink-0" style={{ width: WD_W, gap: 2 }}>
                     {WD.map((l, i) => (
                       <div key={i} style={{ height: CELL }}
-                        className="font-mono text-[8px] text-bone-600 flex items-center">
+                        className="font-mono text-[8px] font-medium text-bone-400 flex items-center">
                         {[0, 2, 4].includes(i) ? l : ''}
                       </div>
                     ))}
@@ -5866,7 +5866,7 @@ function HabitTraction({ state, sel, pillarFilter }) {
             {[['Done', '#10b981'], ['Missed', '#10b98128'], ['Off day', 'var(--s2)']].map(([l, c]) => (
               <div key={l} className="flex items-center gap-1.5">
                 <div style={{ width: 10, height: 10, borderRadius: 2, background: c, flexShrink: 0 }}/>
-                <span className="font-mono text-[10px] text-bone-500">{l}</span>
+                <span className="font-mono text-[10px] font-medium text-bone-300">{l}</span>
               </div>
             ))}
           </div>
