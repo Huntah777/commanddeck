@@ -5670,10 +5670,205 @@ function PillarFilter({ pillars, value, onChange }) {
   );
 }
 
+/* ── Habit Traction — calendar / contribution view ───────────────
+   Four scopes:
+   · WEEK    7 large day tiles per habit row
+   · MONTH   30 compact cells per row
+   · QUARTER 13-column × 7-row contribution grid per habit
+   · YEAR    52-column × 7-row contribution grid per habit         */
+function HabitTraction({ state, sel, pillarFilter }) {
+  const [scope, setScope] = useState('month');
+
+  const nDays = { week: 7, month: 30, quarter: 91, year: 365 }[scope];
+  const endKey = fmtKey(sel);
+
+  const dates = useMemo(
+    () => Array.from({ length: nDays }, (_, i) => addDays(sel, -(nDays - 1 - i))),
+    [scope, endKey],
+  );
+
+  const habits = sortHabits(state.habits || [])
+    .filter(h => pillarFilter === 'all' || h.pillar === pillarFilter);
+
+  const useGrid = scope === 'quarter' || scope === 'year';
+
+  /* Mon-anchored week columns, padded to full weeks, for the grid scopes. */
+  const weeks = useMemo(() => {
+    if (!useGrid) return null;
+    const first = dates[0], last = dates[dates.length - 1];
+    const firstK = fmtKey(first), lastK = fmtKey(last);
+    const dow0 = first.getDay();
+    const start = addDays(first, -(dow0 === 0 ? 6 : dow0 - 1));
+    const cols = [];
+    let cur = new Date(start);
+    while (fmtKey(cur) <= lastK) {
+      cols.push(Array.from({ length: 7 }, (_, d) => {
+        const date = addDays(cur, d), k = fmtKey(date);
+        return { date, k, inRange: k >= firstK && k <= lastK };
+      }));
+      cur = addDays(cur, 7);
+    }
+    return cols;
+  }, [scope, endKey]);
+
+  /* Month abbreviation shown at the first column of each calendar month. */
+  const monthCols = useMemo(() => {
+    if (!weeks) return null;
+    return weeks.map((wk, i) => {
+      const d = wk.find(c => c.inRange)?.date;
+      if (!d) return null;
+      return (i === 0 || d.getDate() <= 7) ? MONTHS[d.getMonth()].slice(0, 3).toUpperCase() : null;
+    });
+  }, [weeks]);
+
+  const CELL = { week: 36, month: 11, quarter: 10, year: 8 }[scope];
+  const GAP  = scope === 'week' ? 4 : 2;
+  const NW   = 96; /* habit name column px */
+  const WD   = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+
+  /* Scheduled-day completion % over the visible range. */
+  const pctFor = (h) => {
+    const sched = dates.filter(d => h.days.includes(d.getDay()));
+    if (!sched.length) return null;
+    const done = sched.filter(d => !!(state.logs?.[fmtKey(d)]?.[h.id])).length;
+    return Math.round(done / sched.length * 100);
+  };
+
+  return (
+    <div>
+      {/* Scope switcher */}
+      <div className="seg overflow-x-auto no-scrollbar mb-5">
+        {['week', 'month', 'quarter', 'year'].map(s => (
+          <button key={s} onClick={() => setScope(s)} aria-pressed={scope === s}
+            className="font-mono tracking-wider text-xs whitespace-nowrap">
+            {s.toUpperCase()}
+          </button>
+        ))}
+      </div>
+
+      {habits.length === 0 ? <EmptyHint text="No habits here yet."/> : (
+        <div className={scope !== 'week' ? 'overflow-x-auto pb-2' : ''}>
+
+          {/* Column headers */}
+          <div className="flex items-end mb-1.5" style={{ gap: GAP }}>
+            <div style={{ width: NW + (useGrid ? 10 + GAP : 0), flexShrink: 0 }}/>
+
+            {scope === 'week' && dates.map(d => {
+              const isToday = fmtKey(d) === endKey;
+              return (
+                <div key={fmtKey(d)} style={{ width: CELL, flexShrink: 0 }}
+                  className={`font-mono text-[8px] text-center leading-snug ${isToday ? 'text-amber-400' : 'text-bone-400'}`}>
+                  {DAY_SHORT[d.getDay()].slice(0, 1)}<br/>{d.getDate()}
+                </div>
+              );
+            })}
+
+            {scope === 'month' && dates.map((d, i) => (
+              <div key={i} style={{ width: CELL, flexShrink: 0 }}
+                className="font-mono text-[7px] text-bone-500 text-center overflow-visible whitespace-nowrap">
+                {d.getDate() === 1
+                  ? <span className="text-bone-300">{MONTHS[d.getMonth()].slice(0, 3).toUpperCase()}</span>
+                  : d.getDate() % 7 === 1 ? String(d.getDate()) : null}
+              </div>
+            ))}
+
+            {useGrid && weeks.map((_, i) => (
+              <div key={i} style={{ width: CELL, flexShrink: 0 }}
+                className="font-mono text-[7px] text-bone-500 leading-none overflow-visible whitespace-nowrap">
+                {monthCols[i] || ''}
+              </div>
+            ))}
+          </div>
+
+          {/* Habit rows */}
+          {habits.map(h => {
+            const p = pillarByIdFromState(h.pillar, state);
+            const pct = pctFor(h);
+            return (
+              <div key={h.id} className="flex items-center mb-1.5" style={{ gap: GAP }}>
+                {/* Habit name */}
+                <div style={{ width: NW, flexShrink: 0 }}
+                  className="text-xs text-bone-300 truncate pr-2 leading-none" title={h.name}>{h.name}</div>
+
+                {/* Day-of-week label strip (grid only) */}
+                {useGrid && (
+                  <div className="flex flex-col shrink-0" style={{ width: 10, gap: 2 }}>
+                    {WD.map((l, i) => (
+                      <div key={i} style={{ height: CELL }}
+                        className="font-mono text-[7px] text-bone-600 flex items-center">
+                        {[0, 2, 4].includes(i) ? l : ''}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Linear cells (week / month) */}
+                {!useGrid && dates.map(date => {
+                  const k = fmtKey(date);
+                  const scheduled = h.days.includes(date.getDay());
+                  const done = !!(state.logs?.[k]?.[h.id]);
+                  return (
+                    <div key={k}
+                      title={`${k} · ${!scheduled ? 'off day' : done ? 'done' : 'missed'}`}
+                      style={{
+                        width: CELL, height: scope === 'week' ? 32 : CELL,
+                        flexShrink: 0,
+                        borderRadius: scope === 'week' ? 6 : 2,
+                        background: !scheduled ? 'var(--s2)' : done ? p.color : `${p.color}28`,
+                        outline: k === endKey ? `1px solid ${p.color}70` : 'none',
+                      }}/>
+                  );
+                })}
+
+                {/* Contribution-grid cells (quarter / year) */}
+                {useGrid && weeks.map((wk, wi) => (
+                  <div key={wi} className="flex flex-col shrink-0" style={{ gap: 2 }}>
+                    {wk.map(({ date, k, inRange }, di) => {
+                      const scheduled = inRange && h.days.includes(date.getDay());
+                      const done = inRange && !!(state.logs?.[k]?.[h.id]);
+                      return (
+                        <div key={di}
+                          title={inRange ? `${k} · ${!h.days.includes(date.getDay()) ? 'off day' : done ? 'done' : 'missed'}` : ''}
+                          style={{
+                            width: CELL, height: CELL, borderRadius: 2,
+                            background: !inRange ? 'transparent'
+                              : !scheduled ? 'var(--s2)'
+                              : done ? p.color : `${p.color}28`,
+                          }}/>
+                      );
+                    })}
+                  </div>
+                ))}
+
+                {/* Period completion % */}
+                {pct !== null && (
+                  <div className="font-mono text-[10px] text-bone-400 shrink-0 ml-1">{pct}%</div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Legend */}
+          <div className="flex gap-4 mt-4"
+            style={{ paddingLeft: NW + GAP + (useGrid ? 10 + GAP : 0) }}>
+            {[['Done', '#10b981'], ['Missed', '#10b98128'], ['Off day', 'var(--s2)']].map(([l, c]) => (
+              <div key={l} className="flex items-center gap-1.5">
+                <div style={{ width: 8, height: 8, borderRadius: 2, background: c, flexShrink: 0 }}/>
+                <span className="font-mono text-[9px] text-bone-500">{l}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HabitsView({ state, setState }) {
   const [adding, setAdding]       = useState(false);
   const [editing, setEditing]     = useState(null);
   const [pillar, setPillar]       = useState('all');
+  const [view, setView]           = useState('list');
   const [reordering, setReordering] = useState(false);
   const [localHabits, setLocalHabits] = useState(null);
   const [dragId, setDragId]       = useState(null);
@@ -5771,44 +5966,58 @@ function HabitsView({ state, setState }) {
         </>
       ) : (
         <>
+          {/* LIST / TRACTION view toggle */}
+          <div className="seg overflow-x-auto no-scrollbar mb-3">
+            {[['list','LIST'],['traction','TRACTION']].map(([id,label]) => (
+              <button key={id} onClick={() => setView(id)} aria-pressed={view === id}
+                className="font-mono tracking-wider text-xs whitespace-nowrap">{label}</button>
+            ))}
+          </div>
+
           <WeekStrip state={state} sel={sel} setDate={setDate}/>
           <PillarFilter pillars={pillars} value={pillar} onChange={setPillar}/>
 
-          {due.length > 0 && (
-            <div className="flex items-center gap-3 mb-3" data-testid="habits-progress">
-              <div className="flex-1 h-1.5 rounded-full bg-ink-700 overflow-hidden">
-                <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: '#10b981' }}/>
-              </div>
-              <div className="font-mono text-[10px] tracking-widest text-bone-400 shrink-0">{done} / {due.length} DONE</div>
-            </div>
-          )}
+          {view === 'traction' ? (
+            <HabitTraction state={state} sel={sel} pillarFilter={pillar}/>
+          ) : (
+            <>
+              {due.length > 0 && (
+                <div className="flex items-center gap-3 mb-3" data-testid="habits-progress">
+                  <div className="flex-1 h-1.5 rounded-full bg-ink-700 overflow-hidden">
+                    <div className="h-full rounded-full transition-all" style={{ width: `${pct}%`, background: '#10b981' }}/>
+                  </div>
+                  <div className="font-mono text-[10px] tracking-widest text-bone-400 shrink-0">{done} / {due.length} DONE</div>
+                </div>
+              )}
 
-          <div className="space-y-2" data-testid="habit-list">
-            {due.length === 0
-              ? <EmptyHint text={state.habits.some(inFilter)
-                  ? `Nothing scheduled for ${DAY_NAMES[dow]}.`
-                  : 'No habits here yet — add your first.'}/>
-              : due.map(h => (
-                  <HabitRow key={h.id} h={h} state={state} sel={sel} on={!!log[h.id]}
-                    onToggle={()=>toggle(h.id)} onEdit={()=>setEditing(h)}/>
-                ))}
-          </div>
+              <div className="space-y-2" data-testid="habit-list">
+                {due.length === 0
+                  ? <EmptyHint text={state.habits.some(inFilter)
+                      ? `Nothing scheduled for ${DAY_NAMES[dow]}.`
+                      : 'No habits here yet — add your first.'}/>
+                  : due.map(h => (
+                      <HabitRow key={h.id} h={h} state={state} sel={sel} on={!!log[h.id]}
+                        onToggle={()=>toggle(h.id)} onEdit={()=>setEditing(h)}/>
+                    ))}
+              </div>
 
-          {/* Habits that don't run today still belong on this page — it is
-              where you come to find and edit one, and a habit you can't see
-              is a habit you can't fix. They just don't get a tick. */}
-          {rest.length > 0 && (
-            <div className="mt-6" data-testid="habit-list-off">
-              <div className="font-mono text-[10px] tracking-widest text-bone-400 mb-2">
-                NOT ON {DAY_NAMES[dow].toUpperCase()}
-              </div>
-              <div className="space-y-2">
-                {rest.map(h => (
-                  <HabitRow key={h.id} h={h} state={state} sel={sel} on={false} offDay
-                    onEdit={()=>setEditing(h)}/>
-                ))}
-              </div>
-            </div>
+              {/* Habits that don't run today still belong on this page — it is
+                  where you come to find and edit one, and a habit you can't see
+                  is a habit you can't fix. They just don't get a tick. */}
+              {rest.length > 0 && (
+                <div className="mt-6" data-testid="habit-list-off">
+                  <div className="font-mono text-[10px] tracking-widest text-bone-400 mb-2">
+                    NOT ON {DAY_NAMES[dow].toUpperCase()}
+                  </div>
+                  <div className="space-y-2">
+                    {rest.map(h => (
+                      <HabitRow key={h.id} h={h} state={state} sel={sel} on={false} offDay
+                        onEdit={()=>setEditing(h)}/>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
           )}
         </>
       )}
