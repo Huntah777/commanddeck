@@ -5607,11 +5607,20 @@ function habitStreak(state, h, end) {
 
 const MILESTONE_STORE_KEY = 'madinah_habit_milestones_v1';
 const HABIT_MILESTONES = [22, 44, 66];
-const MILESTONE_MSG = {
-  22: (n) => ({ title: `${n} — 22 days straight`, body: "You've built it. Consider adding a day or extending the session." }),
-  44: (n) => ({ title: `${n} — 44 days in a row`,  body: 'Halfway to automatic. Push it further.' }),
-  66: (n) => ({ title: `${n} — 66 days. Locked in.`, body: 'This one belongs to you now. Level up when ready.' }),
-};
+const MILESTONE_MSG = [
+  (n, s) => ({ title: `${n} — foundation built`,  body: `${s} sessions straight. You've built it — consider adding a day or extending the session.` }),
+  (n, s) => ({ title: `${n} — halfway locked`,     body: `${s} sessions in a row. Halfway to automatic. Push it further.` }),
+  (n, s) => ({ title: `${n} — locked in.`,         body: `${s} sessions. This one belongs to you now.` }),
+];
+
+/* Scales the 22/44/66 milestones so non-daily habits reach each level after
+   the same calendar duration as a daily habit would — a 3×/week habit hits
+   level 1 after ~3 weeks (10 sessions) instead of needing 22 sessions (7 weeks). */
+function habitMilestoneThresholds(h) {
+  const n = (h.days || []).length;
+  if (n === 0 || n === 7) return HABIT_MILESTONES;
+  return HABIT_MILESTONES.map(m => Math.max(1, Math.ceil(m * n / 7)));
+}
 
 function checkHabitMilestones(state) {
   if (!notifEnabled()) return;
@@ -5621,11 +5630,14 @@ function checkHabitMilestones(state) {
   catch { store = {}; }
   let changed = false;
   for (const h of (state.habits || [])) {
-    const streak = habitStreak(state, h, today);
-    for (const ms of HABIT_MILESTONES) {
-      const key = `${h.id}-${ms}`;
-      if (streak >= ms && !store[key]) {
-        const m = MILESTONE_MSG[ms](h.name);
+    const streak     = habitStreak(state, h, today);
+    const thresholds = habitMilestoneThresholds(h);
+    for (let i = 0; i < thresholds.length; i++) {
+      /* Store key uses the original 22/44/66 index so existing milestones
+         are not re-fired when a habit's schedule changes. */
+      const key = `${h.id}-${HABIT_MILESTONES[i]}`;
+      if (streak >= thresholds[i] && !store[key]) {
+        const m = MILESTONE_MSG[i](h.name, streak);
         showNotificationViaSW(m.title, m.body, `habit-ms-${key}`);
         store[key] = Date.now();
         changed = true;
@@ -5830,6 +5842,7 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit,
 
   const days   = useMemo(() => habitWindow(state, h, sel, HABIT_WINDOW_DAYS), [state.logs, h.id, h.days, selKey]);
   const streak = useMemo(() => habitStreak(state, h, sel), [state.logs, h.id, h.days, selKey]);
+  const [msLevel1, , msLocked] = habitMilestoneThresholds(h);
   const sched      = days.filter(d => d.scheduled);
   const completion = sched.length ? Math.round(sched.filter(d => d.done).length / sched.length * 100) : 0;
 
@@ -5891,17 +5904,17 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit,
       {streak > 0 && (
         <div className="flex items-center gap-1.5 shrink-0" data-testid="habit-streak">
           <span className="font-mono text-xs flex items-center gap-0.5"
-            style={{ color: streak >= 66 ? '#10b981' : streak >= 21 ? '#f59e0b' : p.color }}
-            title={streak >= 66 ? `${streak} days — habit locked in` : streak >= 21 ? `${streak} days — ready to level up` : `${streak} scheduled days in a row`}>
+            style={{ color: streak >= msLocked ? '#10b981' : streak >= msLevel1 - 1 ? '#f59e0b' : p.color }}
+            title={streak >= msLocked ? `${streak} sessions — habit locked in` : streak >= msLevel1 - 1 ? `${streak} sessions — ready to level up` : `${streak} scheduled sessions in a row`}>
             <I.flame className="w-3.5 h-3.5"/>{streak}
           </span>
-          {streak >= 66 && (
+          {streak >= msLocked && (
             <span className="font-mono text-[9px] px-1.5 py-px rounded-full leading-tight"
               style={{ color: '#10b981', border: '1px solid #10b98140', background: '#10b98110' }}>
               LOCKED
             </span>
           )}
-          {streak >= 21 && streak < 66 && (
+          {streak >= msLevel1 - 1 && streak < msLocked && (
             <span className="font-mono text-[9px] px-1.5 py-px rounded-full leading-tight"
               style={{ color: '#f59e0b', border: '1px solid #f59e0b40', background: '#f59e0b10' }}>
               ↑ LEVEL UP
