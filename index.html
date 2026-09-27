@@ -5729,12 +5729,23 @@ function HabitTraction({ state, sel, pillarFilter }) {
     });
   }, [weeks]);
 
+  /* On narrow screens the horizontal contribution graph would require scrolling.
+     Flip QUARTER/YEAR to vertical: weeks become rows, days become 7 fixed columns. */
+  const verticalGrid = useGrid && cw > 0 && cw < 500;
+
   const NW   = 108;
-  const WD_W = useGrid ? 16 : 0;
+  const WD_W = useGrid && !verticalGrid ? 16 : 0;
   const nCols = useGrid ? (weeks?.length ?? 0) : dates.length;
   const GAP  = scope === 'week' ? 5 : 2;
 
   const CELL = useMemo(() => {
+    if (verticalGrid) {
+      const avail = cw - 6 * 2;
+      const raw   = Math.floor(avail / 7);
+      const mins  = { quarter: 16, year: 10 };
+      const maxs  = { quarter: 30, year: 16 };
+      return Math.max(mins[scope] || 10, Math.min(maxs[scope] || 30, raw));
+    }
     const fallback = { week: 40, month: 12, quarter: 12, year: 9 }[scope];
     if (!cw || !nCols) return fallback;
     const avail = cw - NW - GAP - WD_W - (nCols - 1) * GAP;
@@ -5742,9 +5753,10 @@ function HabitTraction({ state, sel, pillarFilter }) {
     const mins  = { week: 28, month: 10, quarter: 12, year: 8  };
     const maxs  = { week: 72, month: 22, quarter: 28, year: 14 };
     return Math.max(mins[scope], Math.min(maxs[scope], raw));
-  }, [cw, scope, nCols, useGrid]);
+  }, [cw, scope, nCols, verticalGrid]);
 
-  const WD = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+  const WD     = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+  const WD_LBL = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
   const pctFor = (h) => {
     const sched = dates.filter(d => h.days.includes(d.getDay()));
@@ -5752,6 +5764,17 @@ function HabitTraction({ state, sel, pillarFilter }) {
     const done = sched.filter(d => !!(state.logs?.[fmtKey(d)]?.[h.id])).length;
     return Math.round(done / sched.length * 100);
   };
+
+  const Legend = () => (
+    <div className="flex gap-5 mt-5">
+      {[['Done', '#10b981'], ['Missed', '#10b98128'], ['Off day', 'var(--s2)']].map(([l, c]) => (
+        <div key={l} className="flex items-center gap-1.5">
+          <div style={{ width: 10, height: 10, borderRadius: 2, background: c, flexShrink: 0 }}/>
+          <span className="font-mono text-[10px] font-medium text-bone-300">{l}</span>
+        </div>
+      ))}
+    </div>
+  );
 
   return (
     <div ref={containerRef}>
@@ -5764,7 +5787,60 @@ function HabitTraction({ state, sel, pillarFilter }) {
         ))}
       </div>
 
-      {habits.length === 0 ? <EmptyHint text="No habits here yet."/> : (
+      {habits.length === 0 ? <EmptyHint text="No habits here yet."/> : verticalGrid ? (
+
+        /* ── Vertical grid (mobile QUARTER / YEAR) ─────────────────────
+           Weeks are rows; Mon–Sun are the 7 fixed columns.
+           No horizontal scroll — everything fits and reads top-to-bottom. */
+        <div>
+          <div className="flex mb-2" style={{ gap: 2 }}>
+            {WD_LBL.map((l, i) => (
+              <div key={i} style={{ width: CELL, flexShrink: 0 }}
+                className="font-mono text-[9px] font-semibold text-bone-300 text-center">{l}</div>
+            ))}
+          </div>
+
+          {habits.map(h => {
+            const p = pillarByIdFromState(h.pillar, state);
+            const pct = pctFor(h);
+            const rowGap = scope === 'year' ? 1 : 2;
+            return (
+              <div key={h.id} className="mb-6">
+                <div className="flex items-baseline gap-2 mb-2">
+                  <span className="text-sm font-semibold text-bone-100 truncate" title={h.name}>{h.name}</span>
+                  {pct !== null && <span className="font-mono text-[9px] text-bone-300 shrink-0">{pct}%</span>}
+                </div>
+                {weeks.map((wk, wi) => (
+                  <div key={wi} className="flex items-center" style={{ gap: 2, marginBottom: rowGap }}>
+                    {wk.map(({ date, k, inRange }, di) => {
+                      const scheduled = inRange && h.days.includes(date.getDay());
+                      const done      = inRange && !!(state.logs?.[k]?.[h.id]);
+                      return (
+                        <div key={di}
+                          title={inRange ? `${k} · ${!h.days.includes(date.getDay()) ? 'off day' : done ? 'done' : 'missed'}` : ''}
+                          style={{
+                            width: CELL, height: CELL, borderRadius: 2, flexShrink: 0,
+                            background: !inRange     ? 'transparent'
+                              : !scheduled           ? 'var(--s2)'
+                              : done                 ? p.color
+                                                     : `${p.color}28`,
+                          }}/>
+                      );
+                    })}
+                    {monthCols[wi] && (
+                      <span className="font-mono text-[9px] font-semibold text-bone-200 ml-2 whitespace-nowrap">{monthCols[wi]}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+          <Legend/>
+        </div>
+
+      ) : (
+
+        /* ── Horizontal grid / linear layout (desktop + WEEK/MONTH) ─── */
         <div className={useGrid && CELL <= 8 ? 'overflow-x-auto pb-2' : ''}>
 
           {/* Column headers */}
@@ -5860,7 +5936,6 @@ function HabitTraction({ state, sel, pillarFilter }) {
             );
           })}
 
-          {/* Legend */}
           <div className="flex gap-5 mt-5"
             style={{ paddingLeft: NW + GAP + (useGrid ? WD_W + GAP : 0) }}>
             {[['Done', '#10b981'], ['Missed', '#10b98128'], ['Off day', 'var(--s2)']].map(([l, c]) => (
