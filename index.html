@@ -1393,7 +1393,7 @@ function useSalahTimes(dKey, method, school, syncedLoc, offsets, onLocationConfi
 
   const salahBlocks = useMemo(() => salahBlocksFrom(timings, offsets), [timings, offsets]);
 
-  return { salahBlocks, location, status, resyncLocation, setManualLocation, retry };
+  return { salahBlocks, timings, offsets, location, status, resyncLocation, setManualLocation, retry };
 }
 
 /* Prayer times for a run of days, for the week grid.
@@ -1506,6 +1506,32 @@ const blockAccent = (b, state) => {
 /* The slot a habit occupies, if it has one. */
 const slotForHabit = (state, habitId) =>
   (state?.blocks || []).find(b => b?.habitId === habitId) || null;
+
+/* Compute the calendar slot for a habit that carries a salahAnchor.
+   Returns { start, end } in minutes-since-midnight, or null when prayer
+   times are not yet available. Never persisted — computed fresh each
+   render so it tracks sunrise/sunset as they shift through the year. */
+function computeAnchoredSlot(habit, timings, offsets) {
+  const a = habit?.salahAnchor;
+  if (!a || !timings) return null;
+  const s = salahMinutes(timings[a.startPrayer], offsets?.[a.startPrayer] ?? 0);
+  const e = salahMinutes(timings[a.endPrayer],   offsets?.[a.endPrayer]   ?? 0);
+  if (s == null || e == null) return null;
+  return { start: s + (a.startOffset ?? 0), end: e - (a.endOffset ?? 0) };
+}
+
+/* Build synthetic calendar blocks for all habits that carry a salahAnchor.
+   Same shape as blocks in state.blocks so every timeline view can merge
+   them in without special-casing. */
+function habitAnchorBlocksFrom(habits, timings, offsets) {
+  if (!timings || !habits?.length) return [];
+  return habits.flatMap(h => {
+    if (!h.salahAnchor) return [];
+    const slot = computeAnchoredSlot(h, timings, offsets);
+    if (!slot) return [];
+    return [{ id: `anchor-${h.id}`, habitId: h.id, title: h.name, pillar: h.pillar, icon: h.icon, ...slot }];
+  });
+}
 
 /* A habit can carry an emoji of its own. It is what makes a list of ten
    habits scannable without reading any of them — you find the prayer
@@ -4056,6 +4082,7 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
 
   const salah = useDaySalah(state, setState, dKey);
   const salahBlocks = salah.salahBlocks;
+  const anchorBlocks = useMemo(() => habitAnchorBlocksFrom(state.habits, salah.timings, salah.offsets), [state.habits, salah.timings, salah.offsets]);
 
   const toggleRow = (b) => setState(s => toggleBlockDone(s, dKey, b));
 
@@ -4067,8 +4094,8 @@ function AgendaTimeline({ state, setState, dow, dKey, sel }) {
 
   const isToday = sameDay(sel, new Date());
   const rows = useMemo(
-    () => agendaRows([...blocks, ...salahBlocks], isToday ? nowMin : null),
-    [blocks, salahBlocks, isToday, nowMin]);
+    () => agendaRows([...blocks, ...salahBlocks, ...anchorBlocks], isToday ? nowMin : null),
+    [blocks, salahBlocks, anchorBlocks, isToday, nowMin]);
 
   const [editing, setEditing] = useState(null);
   const [adding,  setAdding]  = useState(null);
@@ -4398,8 +4425,9 @@ function Timeline({ state, setState, dow, dKey, sel }) {
   const [adding,  setAdding]  = useState(null);
   const salah = useDaySalah(state, setState, dKey);
   const salahBlocks = salah.salahBlocks;
+  const anchorBlocks = useMemo(() => habitAnchorBlocksFrom(state.habits, salah.timings, salah.offsets), [state.habits, salah.timings, salah.offsets]);
 
-  const layouts = useMemo(() => layoutBlocks([...blocks, ...salahBlocks]), [blocks, salahBlocks]);
+  const layouts = useMemo(() => layoutBlocks([...blocks, ...salahBlocks, ...anchorBlocks]), [blocks, salahBlocks, anchorBlocks]);
 
   const [nowMin, setNowMin] = useState(() => { const n = new Date(); return n.getHours()*60 + n.getMinutes(); });
   useEffect(() => {
@@ -5524,6 +5552,9 @@ function HabitChecklist({ habits, log, toggle, state, setState }) {
                         {slot && (
                           <div className="font-mono text-[9px] text-bone-400 mt-0.5">{toHM(slot.start)}–{toHM(slot.end)}</div>
                         )}
+                        {!slot && h.salahAnchor && (
+                          <div className="font-mono text-[9px] text-deen mt-0.5">⚓ {h.salahAnchor.startPrayer}</div>
+                        )}
                       </div>
                     </button>
                     {s > 0 && <div className="font-mono text-[10px] text-bone-400 flex items-center gap-0.5 shrink-0"><I.flame className="w-3 h-3"/>{s}</div>}
@@ -6177,7 +6208,9 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit,
             {offDay ? '—' : on ? '1/1' : '0/1'}
           </span>
           <span className="font-mono text-[10px] tracking-wider text-bone-400">{dayLabel}</span>
-          {slot && <span className="font-mono text-[10px] text-bone-400">{toHM(slot.start)}</span>}
+          {h.salahAnchor
+            ? <span className="font-mono text-[10px] text-deen">⚓ {h.salahAnchor.startPrayer}</span>
+            : slot && <span className="font-mono text-[10px] text-bone-400">{toHM(slot.start)}</span>}
         </div>
       </button>
 
@@ -6252,19 +6285,24 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
   const [slotAt,  setSlotAt]  = useState(existingSlot ? toHM(existingSlot.start) : '');
   const [slotFor, setSlotFor] = useState(existingSlot ? Math.max(5, existingSlot.end - existingSlot.start) : 30);
 
+  /* Prayer anchor — when set, the calendar slot is computed live from prayer
+     times instead of a fixed clock time. Mutually exclusive with slotAt. */
+  const [anchor, setAnchor] = useState(habit?.salahAnchor || null);
+  const ANCHOR_PRAYERS = ['Fajr','Sunrise','Dhuhr','Asr','Maghrib','Isha'];
+  const updateAnchor = (k, v) => setAnchor(a => ({ ...a, [k]: v }));
+
   const toggleDay = (d) => setDays(ds => ds.includes(d) ? ds.filter(x=>x!==d) : [...ds, d].sort());
 
   const save = () => {
     if (!name.trim()) { setError('Give this habit a name.'); return; }
     if (!days.length) { setError('Pick at least one day.'); return; }
     const id = habit?.id || `h-${Date.now()}`;
-    const start = slotAt ? fromHM(slotAt) : null;
+    const start = (!anchor && slotAt) ? fromHM(slotAt) : null;
     onSave(
-      { id, name: name.trim(), pillar, days, created: habit?.created || Date.now(), reminder: reminder || null, icon: icon || null, modifiedAt: Date.now() },
-      /* The slot travels with the save so the habit and its block can never
-         be written apart — a block pointing at a habit that wasn't saved is
-         a ghost on the timeline. null means "not on the calendar". */
-      start === null ? null : { start, end: (start + slotFor) % 1440 },
+      { id, name: name.trim(), pillar, days, created: habit?.created || Date.now(), reminder: reminder || null, icon: icon || null, salahAnchor: anchor || null, modifiedAt: Date.now() },
+      /* When using a prayer anchor the slot is computed dynamically — no
+         static block needed. Otherwise pass the manual time as before. */
+      anchor ? null : (start === null ? null : { start, end: (start + slotFor) % 1440 }),
     );
   };
 
@@ -6329,26 +6367,78 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
           picks up the block alerts — 15 and 5 minutes before, 5 before
           the end — without a reminder time of its own. */}
       <Field label="On the calendar (optional)">
-        <div className="flex items-center gap-2 flex-wrap">
-          <input type="time" value={slotAt} aria-label="Calendar time"
-            onChange={e=>setSlotAt(e.target.value)}
-            className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono min-w-0"/>
-          {slotAt && (
-            <select value={slotFor} aria-label="Length" onChange={e=>setSlotFor(Number(e.target.value))}
-              className="bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 text-sm">
-              {HABIT_SLOT_MINS.map(m => <option key={m} value={m}>{m} min</option>)}
-              {!HABIT_SLOT_MINS.includes(slotFor) && <option value={slotFor}>{slotFor} min</option>}
-            </select>
-          )}
-          {slotAt
-            ? <button onClick={()=>setSlotAt('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat shrink-0">REMOVE</button>
-            : <span className="text-[10px] font-mono text-bone-400">Not on the calendar</span>}
+        {/* Mode toggle */}
+        <div className="flex gap-2 mb-2">
+          <button onClick={()=>{ setAnchor(null); }}
+            className={`btn px-3 py-1.5 rounded-md text-xs font-mono tracking-wider ${!anchor ? 'bg-strategy text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400'}`}>
+            FIXED TIME
+          </button>
+          <button onClick={()=>{ setAnchor(a => a || { startPrayer:'Fajr', endPrayer:'Sunrise', startOffset:5, endOffset:5 }); setSlotAt(''); }}
+            className={`btn px-3 py-1.5 rounded-md text-xs font-mono tracking-wider ${anchor ? 'bg-deen text-ink-950 font-semibold' : 'border border-ink-700 text-bone-400'}`}>
+            PRAYER ANCHOR
+          </button>
         </div>
-        <div className="text-[10px] text-bone-400/80 mt-1.5">
-          {slotAt
-            ? 'Appears on the timeline every day this habit runs, and alerts 15 and 5 minutes before — no reminder time needed.'
-            : 'Give it a time and it shows up on your day, alongside blocks and prayer times.'}
-        </div>
+
+        {anchor ? (
+          <div>
+            <div className="grid grid-cols-2 gap-2 mb-2">
+              <div>
+                <div className="text-[10px] font-mono text-bone-400 mb-1">START AFTER</div>
+                <select value={anchor.startPrayer || 'Fajr'} onChange={e=>updateAnchor('startPrayer', e.target.value)}
+                  className="w-full bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 text-sm">
+                  {ANCHOR_PRAYERS.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
+              <div>
+                <div className="text-[10px] font-mono text-bone-400 mb-1">END BEFORE</div>
+                <select value={anchor.endPrayer || 'Sunrise'} onChange={e=>updateAnchor('endPrayer', e.target.value)}
+                  className="w-full bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 text-sm">
+                  {ANCHOR_PRAYERS.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <div className="text-[10px] font-mono text-bone-400 mb-1">START OFFSET (min)</div>
+                <input type="number" min={0} max={60} value={anchor.startOffset ?? 5}
+                  onChange={e=>updateAnchor('startOffset', Math.max(0, Number(e.target.value)))}
+                  className="w-full bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 font-mono text-sm"/>
+              </div>
+              <div>
+                <div className="text-[10px] font-mono text-bone-400 mb-1">END OFFSET (min)</div>
+                <input type="number" min={0} max={60} value={anchor.endOffset ?? 5}
+                  onChange={e=>updateAnchor('endOffset', Math.max(0, Number(e.target.value)))}
+                  className="w-full bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 font-mono text-sm"/>
+              </div>
+            </div>
+            <div className="text-[10px] text-bone-400/80 mt-1.5">
+              Appears {anchor.startOffset > 0 ? `${anchor.startOffset} min after` : 'at'} {anchor.startPrayer || 'Fajr'}, ends {anchor.endOffset > 0 ? `${anchor.endOffset} min before` : 'at'} {anchor.endPrayer || 'Sunrise'}. Shifts daily with prayer times.
+            </div>
+          </div>
+        ) : (
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input type="time" value={slotAt} aria-label="Calendar time"
+                onChange={e=>setSlotAt(e.target.value)}
+                className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono min-w-0"/>
+              {slotAt && (
+                <select value={slotFor} aria-label="Length" onChange={e=>setSlotFor(Number(e.target.value))}
+                  className="bg-ink-800 border border-ink-700 rounded-lg px-2 py-2 text-bone-100 text-sm">
+                  {HABIT_SLOT_MINS.map(m => <option key={m} value={m}>{m} min</option>)}
+                  {!HABIT_SLOT_MINS.includes(slotFor) && <option value={slotFor}>{slotFor} min</option>}
+                </select>
+              )}
+              {slotAt
+                ? <button onClick={()=>setSlotAt('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat shrink-0">REMOVE</button>
+                : <span className="text-[10px] font-mono text-bone-400">Not on the calendar</span>}
+            </div>
+            <div className="text-[10px] text-bone-400/80 mt-1.5">
+              {slotAt
+                ? 'Appears on the timeline every day this habit runs, and alerts 15 and 5 minutes before — no reminder time needed.'
+                : 'Give it a time and it shows up on your day, alongside blocks and prayer times.'}
+            </div>
+          </div>
+        )}
       </Field>
       <Field label={slotAt ? 'Daily reminder (covered by the calendar slot)' : 'Daily reminder (optional)'}>
         <div className="flex items-center gap-2 flex-wrap">
