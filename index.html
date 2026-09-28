@@ -5720,13 +5720,34 @@ function HabitTraction({ state, sel, pillarFilter }) {
     return () => ro.disconnect();
   }, []);
 
-  const nDays = { week: 7, month: 30, quarter: 91, year: 365 }[scope];
   const endKey = fmtKey(sel);
 
-  const dates = useMemo(
-    () => Array.from({ length: nDays }, (_, i) => addDays(sel, -(nDays - 1 - i))),
-    [scope, endKey],
-  );
+  /* Each scope shows the exact calendar period containing `sel`:
+     week = Mon–Sun, month = 1st–last, quarter = fixed Q1/Q2/Q3/Q4,
+     year = Jan 1 – Dec 31. No rolling windows. */
+  const dates = useMemo(() => {
+    let start, end;
+    if (scope === 'week') {
+      const dow = sel.getDay();
+      start = addDays(sel, -(dow === 0 ? 6 : dow - 1)); // Monday
+      end   = addDays(start, 6);                         // Sunday
+    } else if (scope === 'month') {
+      start = new Date(sel.getFullYear(), sel.getMonth(), 1);
+      end   = new Date(sel.getFullYear(), sel.getMonth() + 1, 0);
+    } else if (scope === 'quarter') {
+      const q = Math.floor(sel.getMonth() / 3);          // 0=Q1 … 3=Q4
+      start = new Date(sel.getFullYear(), q * 3, 1);
+      end   = new Date(sel.getFullYear(), (q + 1) * 3, 0);
+    } else {                                              // year
+      start = new Date(sel.getFullYear(), 0, 1);
+      end   = new Date(sel.getFullYear(), 11, 31);
+    }
+    const result = [];
+    let cur = new Date(start);
+    const endStr = fmtKey(end);
+    while (fmtKey(cur) <= endStr) { result.push(new Date(cur)); cur = addDays(cur, 1); }
+    return result;
+  }, [scope, endKey]);
 
   const habits = sortHabits(state.habits || [])
     .filter(h => pillarFilter === 'all' || h.pillar === pillarFilter);
@@ -5879,7 +5900,7 @@ function HabitTraction({ state, sel, pillarFilter }) {
             <div style={{ width: NW + (useGrid ? WD_W + GAP : 0), flexShrink: 0 }}/>
 
             {scope === 'week' && dates.map(d => {
-              const isToday = fmtKey(d) === endKey;
+              const isToday = fmtKey(d) === fmtKey(new Date());
               return (
                 <div key={fmtKey(d)} style={{ width: CELL, flexShrink: 0 }}
                   className={`font-mono text-[11px] font-semibold text-center leading-snug ${isToday ? 'text-amber-400' : 'text-bone-200'}`}>
