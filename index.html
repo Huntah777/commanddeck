@@ -5712,6 +5712,11 @@ function HabitTraction({ state, sel, pillarFilter }) {
   const containerRef = useRef(null);
   const [cw, setCw] = useState(0);
 
+  /* Local anchor date — starts at the global selected date, then navigates
+     independently so the user can page through periods without moving the
+     global day picker. */
+  const [anchor, setAnchor] = useState(() => sel);
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -5720,34 +5725,57 @@ function HabitTraction({ state, sel, pillarFilter }) {
     return () => ro.disconnect();
   }, []);
 
-  const endKey = fmtKey(sel);
+  const anchorKey = fmtKey(anchor);
 
-  /* Each scope shows the exact calendar period containing `sel`:
+  /* Each scope shows the exact calendar period containing `anchor`:
      week = Mon–Sun, month = 1st–last, quarter = fixed Q1/Q2/Q3/Q4,
      year = Jan 1 – Dec 31. No rolling windows. */
   const dates = useMemo(() => {
     let start, end;
     if (scope === 'week') {
-      const dow = sel.getDay();
-      start = addDays(sel, -(dow === 0 ? 6 : dow - 1)); // Monday
-      end   = addDays(start, 6);                         // Sunday
+      const dow = anchor.getDay();
+      start = addDays(anchor, -(dow === 0 ? 6 : dow - 1)); // Monday
+      end   = addDays(start, 6);                            // Sunday
     } else if (scope === 'month') {
-      start = new Date(sel.getFullYear(), sel.getMonth(), 1);
-      end   = new Date(sel.getFullYear(), sel.getMonth() + 1, 0);
+      start = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+      end   = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
     } else if (scope === 'quarter') {
-      const q = Math.floor(sel.getMonth() / 3);          // 0=Q1 … 3=Q4
-      start = new Date(sel.getFullYear(), q * 3, 1);
-      end   = new Date(sel.getFullYear(), (q + 1) * 3, 0);
-    } else {                                              // year
-      start = new Date(sel.getFullYear(), 0, 1);
-      end   = new Date(sel.getFullYear(), 11, 31);
+      const q = Math.floor(anchor.getMonth() / 3);          // 0=Q1 … 3=Q4
+      start = new Date(anchor.getFullYear(), q * 3, 1);
+      end   = new Date(anchor.getFullYear(), (q + 1) * 3, 0);
+    } else {                                                 // year
+      start = new Date(anchor.getFullYear(), 0, 1);
+      end   = new Date(anchor.getFullYear(), 11, 31);
     }
     const result = [];
     let cur = new Date(start);
     const endStr = fmtKey(end);
     while (fmtKey(cur) <= endStr) { result.push(new Date(cur)); cur = addDays(cur, 1); }
     return result;
-  }, [scope, endKey]);
+  }, [scope, anchorKey]);
+
+  /* Step one period forward (+1) or backward (-1). */
+  const navigate = (dir) => setAnchor(a => {
+    if (scope === 'week')    return addDays(a, dir * 7);
+    if (scope === 'month')   return new Date(a.getFullYear(), a.getMonth() + dir, 1);
+    if (scope === 'quarter') return new Date(a.getFullYear(), a.getMonth() + dir * 3, 1);
+    return new Date(a.getFullYear() + dir, a.getMonth(), 1);   // year
+  });
+
+  const periodLabel = useMemo(() => {
+    if (!dates.length) return '';
+    const fmt = d => `${d.getDate()} ${MONTHS[d.getMonth()].slice(0, 3)}`;
+    if (scope === 'week') {
+      const s = dates[0], e = dates[dates.length - 1];
+      return `${fmt(s)} – ${fmt(e)} ${e.getFullYear()}`;
+    }
+    if (scope === 'month') return `${MONTHS[anchor.getMonth()]} ${anchor.getFullYear()}`;
+    if (scope === 'quarter') {
+      const q = Math.floor(anchor.getMonth() / 3) + 1;
+      return `Q${q} ${anchor.getFullYear()}`;
+    }
+    return `${anchor.getFullYear()}`;
+  }, [scope, anchorKey, dates]);
 
   const habits = sortHabits(state.habits || [])
     .filter(h => pillarFilter === 'all' || h.pillar === pillarFilter);
@@ -5770,7 +5798,7 @@ function HabitTraction({ state, sel, pillarFilter }) {
       cur = addDays(cur, 7);
     }
     return cols;
-  }, [scope, endKey]);
+  }, [scope, anchorKey]);
 
   const monthCols = useMemo(() => {
     if (!weeks) return null;
@@ -5830,13 +5858,27 @@ function HabitTraction({ state, sel, pillarFilter }) {
 
   return (
     <div ref={containerRef}>
-      <div className="seg overflow-x-auto no-scrollbar mb-5">
-        {['week', 'month', 'quarter', 'year'].map(s => (
-          <button key={s} onClick={() => setScope(s)} aria-pressed={scope === s}
-            className="font-mono tracking-wider text-xs whitespace-nowrap">
-            {s.toUpperCase()}
-          </button>
-        ))}
+      {/* Scope tabs + period navigation */}
+      <div className="flex items-center gap-3 mb-5 flex-wrap">
+        <div className="seg overflow-x-auto no-scrollbar shrink-0">
+          {['week', 'month', 'quarter', 'year'].map(s => (
+            <button key={s} onClick={() => setScope(s)} aria-pressed={scope === s}
+              className="font-mono tracking-wider text-xs whitespace-nowrap">
+              {s.toUpperCase()}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1 min-w-0">
+          <button onClick={() => navigate(-1)} aria-label="Previous period"
+            className="btn w-6 h-6 flex items-center justify-center rounded text-bone-300 hover:text-bone-100 hover:bg-ink-700 shrink-0">‹</button>
+          <span className="font-mono text-xs text-bone-200 whitespace-nowrap px-1">{periodLabel}</span>
+          <button onClick={() => navigate(1)} aria-label="Next period"
+            className="btn w-6 h-6 flex items-center justify-center rounded text-bone-300 hover:text-bone-100 hover:bg-ink-700 shrink-0">›</button>
+          {anchorKey !== fmtKey(sel) && (
+            <button onClick={() => setAnchor(sel)} aria-label="Back to today"
+              className="btn text-[10px] font-mono tracking-wider text-bone-400 hover:text-bone-100 ml-1 shrink-0">TODAY</button>
+          )}
+        </div>
       </div>
 
       {habits.length === 0 ? <EmptyHint text="No habits here yet."/> : verticalGrid ? (
@@ -5960,7 +6002,7 @@ function HabitTraction({ state, sel, pillarFilter }) {
                         flexShrink: 0,
                         borderRadius: scope === 'week' ? 8 : 3,
                         background: !scheduled ? 'var(--s2)' : done ? p.color : `${p.color}28`,
-                        outline: k === endKey ? `1px solid ${p.color}70` : 'none',
+                        outline: k === fmtKey(new Date()) ? `1px solid ${p.color}70` : 'none',
                       }}/>
                   );
                 })}
