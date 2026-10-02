@@ -34,6 +34,10 @@
       s.setProperty('--app-bg-scrim', 'rgba(10,10,11,0.78)');
       s.setProperty('--body-bg', 'transparent');
     }
+    /* The Clear ↔ Tinted slider (0–100). Same reason as the theme: set it
+       now so the header doesn't paint at the default and then jump. */
+    const _g = parseInt(localStorage.getItem('madinah_glass'), 10);
+    if (Number.isFinite(_g)) document.documentElement.style.setProperty('--glass-level', Math.min(100, Math.max(0, _g)) / 100);
   } catch {}
 </script>
 
@@ -93,7 +97,13 @@ tailwind.config = {
     --fill-hover:  rgba(255,255,255,.085);
     --fill-active: rgba(255,255,255,.12);
     --hairline:    rgba(255,255,255,.09);
-    --vibrancy:    rgba(22,22,27,.72);
+    /* Liquid Glass: the tint as a bare RGB triple so its alpha can be
+       driven by the slider, the specular lip, the rim, and the selected
+       "lens" in a segmented control. */
+    --glass-rgb:   22 22 27;
+    --glass-spec:  rgba(255,255,255,.26);
+    --glass-edge:  rgba(255,255,255,.10);
+    --lens:        rgba(255,255,255,.14);
     --accent-ring: rgba(245,158,11,.35);
   }
   [data-theme="cyberpunk"] {
@@ -114,7 +124,10 @@ tailwind.config = {
     --fill-hover:  rgba(0,229,255,.12);
     --fill-active: rgba(0,229,255,.18);
     --hairline:    rgba(0,229,255,.16);
-    --vibrancy:    rgba(10,1,24,.78);
+    --glass-rgb:   10 1 24;
+    --glass-spec:  rgba(140,240,255,.30);
+    --glass-edge:  rgba(0,229,255,.20);
+    --lens:        rgba(0,229,255,.20);
     --accent-ring: rgba(0,229,255,.35);
   }
   [data-theme="ghibli"] {
@@ -135,7 +148,10 @@ tailwind.config = {
     --fill-hover:  rgba(240,232,200,.10);
     --fill-active: rgba(240,232,200,.15);
     --hairline:    rgba(240,232,200,.11);
-    --vibrancy:    rgba(11,21,16,.76);
+    --glass-rgb:   11 21 16;
+    --glass-spec:  rgba(255,244,214,.26);
+    --glass-edge:  rgba(240,232,200,.12);
+    --lens:        rgba(240,232,200,.16);
     --accent-ring: rgba(86,212,112,.35);
   }
 
@@ -146,7 +162,7 @@ tailwind.config = {
      why an interface "feels" native rather than merely animated. ── */
   :root {
     --r-xs: 8px;  --r-sm: 10px;  --r-md: 13px;  --r-lg: 17px;
-    --r-xl: 22px; --r-2xl: 28px; --r-pill: 999px;
+    --r-xl: 22px; --r-2xl: 32px; --r-pill: 999px;
     --ease: cubic-bezier(.32,.72,0,1);
     --dur: 200ms;
     --shadow-1: 0 1px 2px rgba(0,0,0,.28);
@@ -268,6 +284,145 @@ tailwind.config = {
   .sheet { animation: sheetIn 260ms var(--ease) both; }
   .divider  { border-top: 1px solid var(--s3); }
 
+  /* ── LIQUID GLASS ─────────────────────────────────────────────────────
+     iOS 26 introduced Liquid Glass; iOS 27 refines it. The refinements
+     that matter on the web are these four, and each is a token below
+     rather than a number buried in a rule:
+
+       1. Less transparent by default. Chrome reads cleanly over busy
+          content instead of fighting it — the main complaint about 26.
+       2. A user-set slider between Clear and Tinted, which is
+          --glass-level (0–1) and is the only thing the Appearance card
+          changes. Everything below is derived from it.
+       3. Brighter specular highlights and a darkened inner edge, so a
+          pane separates from what is behind it by light rather than by
+          a border.
+       4. Busy content behind a bar is diffused (blur + saturation),
+          not just dimmed.
+
+     Glass is for the navigation layer only — the header, the sheet, the
+     capsule controls — never for the content cards under it. Glass on
+     glass is also avoided on purpose: a backdrop-filter inside another
+     one only sees its parent, so the nav capsule and the sheet's scrim
+     use a plain wash instead. ── */
+  :root {
+    color-scheme: dark;
+    --glass-level:   .55;
+    /* Bars and controls can be quite clear; a sheet carries forms and
+       paragraphs, so it never drops below a legible floor. */
+    --glass-a:       calc(.50 + var(--glass-level) * .44);
+    --glass-a-sheet: calc(.66 + var(--glass-level) * .30);
+    --glass-blur:    calc(14px + var(--glass-level) * 14px);
+    --glass-sat:     calc(1.9 - var(--glass-level) * .5);
+    --glass-shade:   rgba(0,0,0,.42);
+    --glass-spec-soft: color-mix(in srgb, var(--glass-spec) 45%, transparent);
+    --ease-spring:   cubic-bezier(.3,1.35,.5,1);
+  }
+  /* Reduce Transparency is the OS-level version of the slider pinned to
+     "Tinted", with the blur dropped too. */
+  @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+    :root { --glass-a: .92; --glass-a-sheet: .97; }
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    :root { --glass-a: 1; --glass-a-sheet: 1; --glass-blur: 0px; --glass-sat: 1; }
+  }
+  @media (prefers-contrast: more) {
+    :root { --glass-a: 1; --glass-a-sheet: 1; --glass-edge: rgba(255,255,255,.4); }
+  }
+
+  .glass, .glass-bar, .glass-sheet {
+    background:
+      linear-gradient(180deg, rgb(255 255 255 / .07), rgb(255 255 255 / 0) 46%),
+      rgb(var(--glass-rgb) / var(--glass-a));
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+            backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  }
+  /* A free-standing pane: lit along the top lip, ringed, and shaded
+     along the bottom so it reads as having thickness. */
+  .glass {
+    box-shadow:
+      inset 0 1px 0 var(--glass-spec),
+      inset 0 0 0 1px var(--glass-edge),
+      inset 0 -14px 22px -16px var(--glass-shade),
+      0 10px 30px -14px rgba(0,0,0,.6);
+  }
+  /* The top bar. Full-bleed, so no top lip and no corners — the edge
+     that matters is the one content slides under. */
+  .glass-bar {
+    box-shadow: inset 0 -1px 0 var(--glass-edge), 0 14px 32px -22px rgba(0,0,0,.75);
+  }
+  .glass-sheet {
+    background:
+      linear-gradient(180deg, rgb(255 255 255 / .07), rgb(255 255 255 / 0) 40%),
+      rgb(var(--glass-rgb) / var(--glass-a-sheet));
+    box-shadow:
+      var(--shadow-3),
+      inset 0 1px 0 var(--glass-spec),
+      inset 0 0 0 1px var(--glass-edge);
+  }
+
+  /* Sheet presentation. Behind the sheet is a plain dim, not a blur:
+     the sheet's own backdrop-filter blurs the page, and one stacked on
+     a blurring parent would only blur nothing. The dim animates its
+     background-color rather than its opacity for the same reason —
+     anything with opacity < 1 stops its descendants seeing the page. */
+  .modal-scrim {
+    background: rgb(0 0 0 / .34);
+    padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px));
+    animation: scrimIn 280ms var(--ease) both;
+  }
+  @keyframes scrimIn { from { background-color: rgb(0 0 0 / 0); } to { background-color: rgb(0 0 0 / .34); } }
+  @media (min-width: 640px) { .modal-scrim { padding: 1rem; } }
+  /* On a phone it rises from the bottom, inset from the edges, with the
+     grabber — the shape every iOS sheet has. */
+  @keyframes sheetUp { from { opacity: 0; transform: translateY(36px) scale(.98); } to { opacity: 1; transform: none; } }
+  @media (max-width: 639px) { .sheet { animation: sheetUp 420ms var(--ease-spring) both; } }
+  .sheet-grabber { width: 36px; height: 5px; border-radius: 999px; background: rgb(255 255 255 / .3); margin: -6px auto 8px; }
+
+  /* The segmented capsule in the header. The lens is one element that
+     slides to whichever tab is current — the glass bead that moves along
+     an iOS tab bar — rather than a background that switches on and off.
+     Transitions only start once it has been placed, so it doesn't fly in
+     from the left on first paint. */
+  .glass-nav { position: relative; background: var(--fill); box-shadow: inset 0 0 0 1px var(--hairline); }
+  .glass-nav > .lens {
+    position: absolute; top: 4px; bottom: 4px; left: 0;
+    width: var(--lens-w, 0px); transform: translateX(var(--lens-x, 0px));
+    border-radius: var(--r-pill); pointer-events: none;
+    background: var(--lens);
+    box-shadow: inset 0 1px 0 var(--glass-spec), inset 0 0 0 1px var(--glass-edge), 0 4px 12px -6px rgba(0,0,0,.55);
+  }
+  .glass-nav[data-ready] > .lens {
+    transition: transform 440ms var(--ease-spring), width 360ms var(--ease);
+  }
+  .glass-nav > button[aria-pressed="true"] svg { color: var(--accent); }
+  .glass-nav > button[aria-pressed="false"]:hover { background: var(--fill-hover); }
+
+  /* Native selects on a phone: a capsule with a chevron, since
+     appearance:none removes the one the browser would have drawn. */
+  .sel-glass {
+    background: var(--fill) url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path d='M1.5 1.5 6 6l4.5-4.5' fill='none' stroke='%239a9788' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/></svg>") no-repeat right 16px center / 12px;
+    padding-right: 38px;
+    box-shadow: inset 0 0 0 1px var(--hairline), inset 0 1px 0 var(--glass-spec-soft);
+  }
+  .sel-glass:hover { background-color: var(--fill-hover); }
+
+  /* The glass slider: a recessed track filled to the thumb, and a wide
+     capsule thumb, which is what iOS 26 draws. --pct is set inline. */
+  .glass-range { -webkit-appearance: none; appearance: none; width: 100%; height: 30px; background: transparent; cursor: pointer; }
+  .glass-range::-webkit-slider-runnable-track { height: 6px; border-radius: 999px; background: linear-gradient(90deg, var(--accent) var(--pct, 50%), var(--fill-active) var(--pct, 50%)); }
+  .glass-range::-moz-range-track { height: 6px; border-radius: 999px; background: var(--fill-active); }
+  .glass-range::-moz-range-progress { height: 6px; border-radius: 999px; background: var(--accent); }
+  .glass-range::-webkit-slider-thumb { -webkit-appearance: none; width: 36px; height: 24px; margin-top: -9px; border-radius: 999px; border: none; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.45), inset 0 0 0 .5px rgba(0,0,0,.12); }
+  .glass-range::-moz-range-thumb { width: 36px; height: 24px; border-radius: 999px; border: none; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,.45), inset 0 0 0 .5px rgba(0,0,0,.12); }
+  .glass-range:focus-visible { box-shadow: none; }
+  .glass-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-ring), 0 2px 10px rgba(0,0,0,.45); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .glass-nav[data-ready] > .lens { transition: none; }
+    .sheet, .modal-scrim { animation: none; }
+  }
+
   .scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
   .scrollbar::-webkit-scrollbar-thumb { background: var(--s4); border-radius: 8px; }
   .scrollbar::-webkit-scrollbar-track { background: transparent; }
@@ -295,10 +450,13 @@ tailwind.config = {
     border: none; border-radius: var(--r-pill);
     padding: 9px 18px; font-size: 13px; font-weight: 600;
     font-family: 'Manrope', sans-serif; cursor: pointer;
-    box-shadow: var(--shadow-1);
+    /* The prominent button in iOS 26+ is tinted glass: the accent with a
+       sheen across the top half and a lit lip, not a flat fill. */
+    background-image: linear-gradient(180deg, rgb(255 255 255 / .24), rgb(255 255 255 / 0) 58%);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / .42), inset 0 -1px 0 rgb(0 0 0 / .14), var(--shadow-1);
     transition: filter var(--dur) var(--ease), box-shadow var(--dur) var(--ease), transform 140ms var(--ease);
   }
-  .btn-primary:hover { filter: brightness(1.08); box-shadow: var(--shadow-2); }
+  .btn-primary:hover { filter: brightness(1.08); box-shadow: inset 0 1px 0 rgb(255 255 255 / .42), inset 0 -1px 0 rgb(0 0 0 / .14), var(--shadow-2); }
   .btn-primary:active { transform: scale(.96); }
   .btn-primary:disabled { opacity: .45; cursor: default; transform: none; filter: none; }
 
@@ -307,6 +465,7 @@ tailwind.config = {
     background: var(--fill); color: var(--f1);
     border: 1px solid transparent; border-radius: var(--r-pill);
     padding: 8px 16px; font-size: 13px; font-weight: 500;
+    box-shadow: inset 0 0 0 1px var(--hairline), inset 0 1px 0 var(--glass-spec-soft);
     font-family: 'Manrope', sans-serif; cursor: pointer;
     transition: background var(--dur) var(--ease), color var(--dur) var(--ease), transform 140ms var(--ease);
   }
@@ -319,6 +478,7 @@ tailwind.config = {
     display: inline-flex; align-items: center; gap: 6px;
     padding: 6px 13px; border-radius: var(--r-pill);
     border: 1px solid transparent; background: var(--fill);
+    box-shadow: inset 0 0 0 1px var(--hairline), inset 0 1px 0 var(--glass-spec-soft);
     color: var(--f2); font-family: 'Manrope', sans-serif;
     font-size: 12.5px; font-weight: 600; cursor: pointer;
     white-space: nowrap; user-select: none;
@@ -326,7 +486,11 @@ tailwind.config = {
   }
   .pill:hover { background: var(--fill-hover); color: var(--f0); }
   .pill:active { transform: scale(.95); }
-  .pill.on { background: var(--accent); color: var(--s0); box-shadow: var(--shadow-1); }
+  .pill.on {
+    background: var(--accent); color: var(--s0);
+    background-image: linear-gradient(180deg, rgb(255 255 255 / .24), rgb(255 255 255 / 0) 58%);
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / .42), inset 0 -1px 0 rgb(0 0 0 / .14), var(--shadow-1);
+  }
   .pill.on:hover { filter: brightness(1.08); }
 
   /* Segmented control: one recessed track, the selection a raised slug
@@ -345,9 +509,11 @@ tailwind.config = {
   }
   .seg > button:hover { color: var(--f0); }
   .seg > button:active { transform: scale(.95); }
+  /* The selected segment is a lens — a lit pane of glass over the track —
+     rather than a solid slug. Same recipe as the header's sliding one. */
   .seg > button[aria-pressed="true"] {
-    background: var(--s2); color: var(--f0);
-    box-shadow: var(--shadow-1), inset 0 1px 0 var(--hairline);
+    background: var(--lens); color: var(--f0);
+    box-shadow: inset 0 1px 0 var(--glass-spec), inset 0 0 0 1px var(--glass-edge), 0 4px 12px -6px rgba(0,0,0,.55);
   }
 
   /* Circular icon button — toolbar affordance, thumb-sized on purpose. */
@@ -355,6 +521,7 @@ tailwind.config = {
     display: inline-flex; align-items: center; justify-content: center;
     width: 34px; height: 34px; border-radius: var(--r-pill);
     border: none; background: var(--fill); color: var(--f2);
+    box-shadow: inset 0 0 0 1px var(--hairline), inset 0 1px 0 var(--glass-spec-soft);
     cursor: pointer; flex-shrink: 0;
     transition: background var(--dur) var(--ease), color var(--dur) var(--ease), transform 140ms var(--ease);
   }
@@ -786,6 +953,16 @@ const HORIZONS = [
 ------------------------------------------------------------------- */
 const THEME_KEY = 'madinah_theme';
 const BG_KEY = 'madinah_bg';
+/* Liquid Glass: 0 = Clear … 100 = Tinted. Stored as an integer; the CSS
+   wants 0–1, which is applied in App and, before first paint, in <head>. */
+const GLASS_KEY = 'madinah_glass';
+const GLASS_DEFAULT = 55;
+function readGlass() {
+  try {
+    const v = parseInt(localStorage.getItem(GLASS_KEY), 10);
+    return Number.isFinite(v) ? Math.min(100, Math.max(0, v)) : GLASS_DEFAULT;
+  } catch { return GLASS_DEFAULT; }
+}
 /* {url, source:'url'|'unsplash', attribution:{name,profileUrl}|null} | null */
 const BackgroundPref = {
   get()    { try { return JSON.parse(localStorage.getItem(BG_KEY)); } catch { return null; } },
@@ -2911,6 +3088,12 @@ function App() {
   useEffect(() => { applyBackground(background); }, [background]);
   const changeBg = pref => { BackgroundPref.set(pref); setBackground(pref); };
 
+  const [glass, setGlass] = useState(readGlass);
+  useEffect(() => {
+    document.documentElement.style.setProperty('--glass-level', glass / 100);
+    try { localStorage.setItem(GLASS_KEY, String(glass)); } catch {}
+  }, [glass]);
+
   /* Respect ?view= param from manifest shortcuts */
   const urlView = new URLSearchParams(location.search).get('view');
   const startView = VALID_VIEWS.includes(urlView) ? normaliseView(urlView) : null;
@@ -3345,6 +3528,7 @@ function App() {
         {state.ui.view === 'matrix' && <MatrixView state={state} setState={setState} />}
         {state.ui.view === 'admin'  && <AdminView state={state} setState={setState} hydrate={hydrate}
             theme={theme} setTheme={setTheme} background={background} changeBg={changeBg}
+            glass={glass} setGlass={setGlass}
             syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}
             onSyncNow={syncNow}/>}
         {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState} pomo={pomo}/>}
@@ -3436,7 +3620,7 @@ function TimerPill({ pomo, onClick, active }) {
   const phase = PHASES[session.phase];
   return (
     <button onClick={onClick} data-testid="timer-pill" title={`${phase.label} — ${fmtClock(secsLeft)} left`}
-      className="btn flex items-center gap-1.5 px-2.5 h-8 rounded-lg border font-mono text-xs tracking-wider shrink-0"
+      className="btn flex items-center gap-1.5 px-3 h-8 rounded-full border font-mono text-xs tracking-wider shrink-0"
       style={{ borderColor: `${phase.color}55`, background: `${phase.color}18`, color: phase.color }}>
       <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: phase.color }}/>
       {fmtClock(secsLeft)}
@@ -3502,6 +3686,29 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
     return () => ro.disconnect();
   }, []);
 
+  /* Slide the nav's lens under the current tab. Measured from the real
+     button rather than computed from an index, since the tabs are
+     content-width and the selected one is semibold, which is wider. The
+     nav is display:none on a phone, so its first real size arrives via
+     the observer, not the layout effect. */
+  const navRef = useRef(null);
+  useLayoutEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+    const place = () => {
+      const on = nav.querySelector('button[aria-pressed="true"]');
+      if (!on || !on.offsetWidth) return;
+      nav.style.setProperty('--lens-x', `${on.offsetLeft}px`);
+      nav.style.setProperty('--lens-w', `${on.offsetWidth}px`);
+      if (!nav.hasAttribute('data-ready')) requestAnimationFrame(() => nav.setAttribute('data-ready', ''));
+    };
+    place();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(place);
+    ro.observe(nav);
+    return () => ro.disconnect();
+  }, [state.ui.view]);
+
   const tabs = [
     { id:'today',  label:'Today',    icon:I.clock },
     { id:'habits', label:'Habits',   icon:I.flame },
@@ -3513,7 +3720,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
   ];
 
   return (
-    <header ref={hdrRef} className="sticky top-0 z-30 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700"
+    <header ref={hdrRef} className="glass-bar sticky top-0 z-30"
       style={{ paddingTop: 'env(safe-area-inset-top, 0px)' }}>
       <div className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between gap-4 py-4">
@@ -3577,19 +3784,21 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
           <div className="flex-1 min-w-0">
             {/* Mobile: dropdown select */}
             <select value={state.ui.view} onChange={e => setView(e.target.value)} aria-label="Section"
-              className="sm:hidden w-full bg-ink-800 border border-ink-700 rounded-full px-4 py-2.5 text-sm text-bone-100 font-mono tracking-wider appearance-none cursor-pointer">
+              className="sel-glass sm:hidden w-full border border-transparent rounded-full px-4 py-2.5 text-sm text-bone-100 font-mono tracking-wider appearance-none cursor-pointer">
               {tabs.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
             </select>
-            {/* sm+: one recessed track with the current section as a raised
-                capsule inside it, rather than seven separate buttons —
-                a segmented control reads as "pick one of these". */}
-            <nav className="hidden sm:inline-flex items-center gap-1 p-1 rounded-full bg-ink-900/60 border border-ink-700">
+            {/* sm+: one recessed track with the current section as a lens of
+                glass sliding along it, rather than seven separate buttons —
+                a segmented control reads as "pick one of these". The lens is
+                a span, not a button: the tabs are found by their text. */}
+            <nav ref={navRef} className="glass-nav hidden sm:inline-flex items-center gap-1 p-1 rounded-full">
+              <span className="lens" aria-hidden="true"/>
               {tabs.map(t => {
                 const Icon = t.icon;
                 const active = state.ui.view === t.id;
                 return (
                   <button key={t.id} onClick={()=>setView(t.id)} aria-pressed={active}
-                    className={`btn px-3.5 py-1.5 rounded-full flex items-center gap-2 text-sm whitespace-nowrap ${active ? 'bg-bone-100 text-ink-950 font-semibold shadow' : 'text-bone-300 hover:bg-ink-800'}`}>
+                    className={`btn relative px-3.5 py-1.5 rounded-full flex items-center gap-2 text-sm whitespace-nowrap ${active ? 'text-bone-100 font-semibold' : 'text-bone-300'}`}>
                     <Icon className="w-4 h-4"/>{t.label}
                   </button>
                 );
@@ -7037,7 +7246,7 @@ const ADMIN_SECTIONS = [
 
 const ADMIN_TAB_KEY = 'madinah_admin_tab_v1';
 
-function AdminView({ state, setState, hydrate, theme, setTheme, background, changeBg, syncStatus, onConfigureSync, onDisconnect, onSyncNow }) {
+function AdminView({ state, setState, hydrate, theme, setTheme, background, changeBg, glass, setGlass, syncStatus, onConfigureSync, onDisconnect, onSyncNow }) {
   /* Device-local, like the view itself: coming back to Admin should
      land where you left it, and which panel you had open is not a
      setting worth syncing to the other devices. */
@@ -7091,6 +7300,7 @@ function AdminView({ state, setState, hydrate, theme, setTheme, background, chan
           <>
             <SectionHeading kicker={section.kicker} title={section.title} sub={section.sub}/>
             <ThemeCard theme={theme} setTheme={setTheme}/>
+            <GlassCard glass={glass} setGlass={setGlass}/>
             <BackgroundCard background={background} changeBg={changeBg} theme={theme}/>
           </>
         )}
@@ -7113,7 +7323,7 @@ function UnsplashCredit({ attribution }) {
   if (!attribution?.name) return null;
   const utm = 'utm_source=commanddeck&utm_medium=referral';
   return (
-    <div style={{ position:'fixed', bottom:'calc(10px + env(safe-area-inset-bottom, 0px))', right:'calc(12px + env(safe-area-inset-right, 0px))', zIndex:40, fontSize:11, color:'rgba(255,255,255,.75)', textShadow:'0 1px 3px rgba(0,0,0,.7)', fontFamily:'Manrope,sans-serif', pointerEvents:'auto' }}>
+    <div className="glass" style={{ position:'fixed', bottom:'calc(10px + env(safe-area-inset-bottom, 0px))', right:'calc(12px + env(safe-area-inset-right, 0px))', zIndex:40, fontSize:11, padding:'5px 12px', borderRadius:999, color:'var(--f1)', fontFamily:'Manrope,sans-serif', pointerEvents:'auto' }}>
       Photo by{' '}
       <a href={`${attribution.profileUrl}?${utm}`} target="_blank" rel="noopener noreferrer" style={{ color:'inherit', fontWeight:700 }}>{attribution.name}</a>
       {' '}on{' '}
@@ -7327,6 +7537,42 @@ function ThemeCard({ theme, setTheme }) {
       </div>
       <p className="text-[10px] font-mono tracking-wider text-bone-400 mt-4">
         Theme is stored on this device only — it won't sync across devices.
+      </p>
+    </div>
+  );
+}
+
+/* iOS 27's Appearance setting, in the same place the theme is. The preview
+   is a pane of the real material over a loud gradient, because glass over
+   this app's near-black ground shows almost nothing — the slider would
+   look like it does nothing until a photo is set. */
+function GlassCard({ glass, setGlass }) {
+  const reduced = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-transparency: reduce)').matches;
+  const label = glass <= 15 ? 'Clear' : glass >= 85 ? 'Tinted' : `${glass}% tinted`;
+  return (
+    <div className="card p-5">
+      <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1">APPEARANCE</div>
+      <div className="font-display text-xl text-bone-100 mb-4">Liquid Glass</div>
+      <div className="relative overflow-hidden rounded-xl h-24 mb-4"
+        style={{ background: 'linear-gradient(120deg,#ff7a18,#a78bfa 55%,#22d3ee)' }}>
+        <div className="absolute inset-0"
+          style={{ background: 'radial-gradient(circle at 22% 30%, rgba(255,255,255,.6), transparent 34%), radial-gradient(circle at 82% 72%, rgba(16,185,129,.75), transparent 42%)' }}/>
+        <div className="glass absolute left-4 right-4 bottom-3 h-9 rounded-full flex items-center justify-between px-4 text-xs font-mono tracking-wider text-bone-100">
+          <span>Today · Habits</span><span className="text-bone-300">{label}</span>
+        </div>
+      </div>
+      <input type="range" min="0" max="100" step="1" value={glass}
+        onChange={e => setGlass(Number(e.target.value))}
+        aria-label="Liquid Glass" aria-valuetext={label}
+        className="glass-range" style={{ '--pct': `${glass}%` }}/>
+      <div className="flex justify-between text-[10px] font-mono tracking-widest text-bone-400 mt-1">
+        <span>CLEAR</span><span>TINTED</span>
+      </div>
+      <p className="text-[10px] font-mono tracking-wider text-bone-400 mt-4">
+        {reduced
+          ? 'Reduce Transparency is on for this device, so glass is drawn fully tinted whatever this is set to.'
+          : 'Clear lets more of what is behind the header and sheets show through. Stored on this device only.'}
       </p>
     </div>
   );
@@ -9719,8 +9965,9 @@ function Modal({ children, onClose, title }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
   return ReactDOM.createPortal(
-    <div className="fixed inset-0 z-50 bg-ink-950/80 backdrop-blur-xl flex items-center justify-center p-4 fadeUp" onClick={onClose}>
-      <div className="card modal-card scrollbar max-w-md w-full p-5 space-y-3 sheet" onClick={e=>e.stopPropagation()}>
+    <div className="modal-scrim fixed inset-0 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="glass-sheet modal-card scrollbar max-w-md w-full p-5 space-y-3 sheet" onClick={e=>e.stopPropagation()}>
+        <div className="sheet-grabber sm:hidden" aria-hidden="true"/>
         <div className="flex items-center justify-between mb-1">
           <div className="font-display text-2xl text-bone-100">{title}</div>
           <button onClick={onClose} aria-label="Close" className="icon-btn sm"><I.x className="w-4 h-4"/></button>
@@ -9758,7 +10005,7 @@ function SyncBadge({ status, onClick }) {
   const pulse = status === 'saving';
   return (
     <button onClick={onClick} title="Configure D1 sync"
-      className="btn flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-ink-700 hover:bg-ink-800">
+      className="btn bg-fill flex items-center gap-1.5 px-3 py-1.5 rounded-full">
       <span className={`w-1.5 h-1.5 rounded-full ${pulse ? 'animate-pulse' : ''}`} style={{ background: m.color, boxShadow: `0 0 8px ${m.color}88` }}/>
       <span className="font-mono text-[10px] tracking-widest" style={{ color: m.color }}>{m.text}</span>
     </button>
