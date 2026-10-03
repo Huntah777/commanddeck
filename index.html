@@ -7217,17 +7217,23 @@ function AdminView({ state, setState, hydrate, theme, setTheme, background, chan
       {/* Sticky so the way out of a long panel is always on screen —
           the old page made you scroll back to the top to go anywhere. */}
       <div style={{ top: 'var(--header-h, 140px)' }}
-        className="sticky z-20 -mx-4 sm:-mx-6 lg:-mx-8 px-4 sm:px-6 lg:px-8 py-2 mb-5 backdrop-blur-xl bg-ink-950/70 border-b border-ink-700">
-        <nav data-testid="admin-nav" className="seg overflow-x-auto no-scrollbar">
-          {ADMIN_SECTIONS.map(s => (
-            <button key={s.id} onClick={() => go(s.id)}
-              aria-current={tab === s.id ? 'page' : undefined}
-              aria-pressed={tab === s.id}
-              className="font-mono tracking-wider text-xs">
-              {s.label}
-            </button>
-          ))}
-        </nav>
+        className="sticky z-20 py-2 mb-5 pointer-events-none">
+        {/* A floating pill only as wide as its tabs, not a bar across the
+            page. The wrapper ignores the pointer so the empty space either
+            side of the pill doesn't swallow taps meant for what is under it. */}
+        <div className="glass rounded-full inline-flex max-w-full pointer-events-auto">
+          <nav data-testid="admin-nav" className="seg overflow-x-auto no-scrollbar min-w-0"
+            style={{ background: 'none', border: 'none' }}>
+            {ADMIN_SECTIONS.map(s => (
+              <button key={s.id} onClick={() => go(s.id)}
+                aria-current={tab === s.id ? 'page' : undefined}
+                aria-pressed={tab === s.id}
+                className="font-mono tracking-wider text-xs">
+                {s.label}
+              </button>
+            ))}
+          </nav>
+        </div>
       </div>
 
       <div className="space-y-6">
