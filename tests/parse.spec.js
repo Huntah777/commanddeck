@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { classify, resolveDue, matchPerson, matchList, markers, fallbackExtract, daysBetween, tokensOf,
+import { classify, resolveDue, matchPerson, matchList, markers, fallbackExtract, daysBetween,
          roomOn, firstDayWithRoom, place, fmtMins } from '../functions/api/parse.js';
 
 /* Unit tests for natural-language task capture. No browser and no model:
@@ -289,9 +289,9 @@ test.describe('the receipt', () => {
   });
 });
 
-test.describe('degrading without the model', () => {
-  /* /api/parse falls through to exactly this path when the AI binding is
-     missing, errors, or times out. Capture must still improve on nothing. */
+test.describe('the rules path', () => {
+  /* /api/parse is exactly this path — there is no model. Capture must
+     still improve on nothing. */
   test('the rules path still resolves dates, people and quadrants', () => {
     const out = file('dave needs the deck by friday');
     expect(out.due).toBe(FRI);
@@ -315,28 +315,6 @@ test.describe('date arithmetic', () => {
     // the ±1h shift from rounding a day boundary the wrong way.
     expect(daysBetween('2026-10-24', '2026-10-26')).toBe(2);
     expect(daysBetween('2026-03-28', '2026-03-30')).toBe(2);
-  });
-});
-
-test.describe('what the call cost', () => {
-  /* Feeds the AI spend figure in Admin. Workers AI reports usage on
-     some models and not others, and has used more than one field name
-     for it, so this is read defensively. */
-  test('the two naming conventions both read', () => {
-    expect(tokensOf({ usage: { prompt_tokens: 400, completion_tokens: 60 } })).toEqual({ i: 400, o: 60 });
-    expect(tokensOf({ usage: { input_tokens: 400, output_tokens: 60 } })).toEqual({ i: 400, o: 60 });
-  });
-
-  test('no usage reported is null, not zero', () => {
-    // A missing figure and a free call are not the same claim, and a
-    // ledger that treats them alike understates the bill.
-    expect(tokensOf({ response: 'x' })).toBe(null);
-    expect(tokensOf({ usage: {} })).toBe(null);
-    expect(tokensOf(null)).toBe(null);
-  });
-
-  test('half a reading is still a reading', () => {
-    expect(tokensOf({ usage: { prompt_tokens: 400 } })).toEqual({ i: 400, o: 0 });
   });
 });
 

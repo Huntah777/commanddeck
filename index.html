@@ -622,10 +622,6 @@ const PARSE_ENDPOINT = '/api/parse';
    locally — a slow parse is abandoned rather than left hanging. */
 const PARSE_TIMEOUT_MS = 8_000;
 const SUGGEST_ENDPOINT = '/api/suggest';
-const COACH_ENDPOINT = '/api/coach';
-/* Opus with adaptive thinking takes its time — this is a deliberate,
-   once-a-week action with a spinner, not a background fetch. */
-const COACH_TIMEOUT_MS = 90_000;
 const UI_LOCAL_KEY = 'madinah_ui_local_v1';
 const DIRTY_KEY = 'madinah_dirty_v1';
 /* Must match sw.js */
@@ -835,28 +831,6 @@ const Sync = {
       if (!r.ok) return null;
       return await r.json();
     } catch { return null; }
-  },
-  /* Ask for a coaching review. Unlike parse this one costs real money,
-     so the server owns the rate limiting — the client never decides
-     whether a call is allowed, it just reports what came back. */
-  async coach({ today, force = false, customPrompt = null }) {
-    const token = this.getToken();
-    if (!token) return { error: 'no_token' };
-    try {
-      const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
-      const timer = ac ? setTimeout(() => ac.abort(), COACH_TIMEOUT_MS) : null;
-      const r = await fetch(COACH_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ today, force, customPrompt: customPrompt || undefined }),
-        signal: ac?.signal,
-      }).finally(() => timer && clearTimeout(timer));
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok) return { error: data?.error || `HTTP_${r.status}`, detail: data?.detail };
-      return data;
-    } catch (e) {
-      return { error: e?.name === 'AbortError' ? 'timeout' : 'network' };
-    }
   },
 };
 
@@ -2304,10 +2278,6 @@ const SEED = () => ({
     fastingRules: {},     /* { [ruleId]: bool } — overrides FASTING_RULES defaults */
     hijriOffset: 0,       /* +/- days, to match the local moonsighting */
   },
-  /* coach: the last weekly review, plus the spend guard's own bookkeeping.
-     Written by /api/coach server-side; the client only ever reads it.
-     { at, review, fingerprint, runs: [ms], notes: [string] } */
-  coach: null,
   deleted: {},            /* { [id]: deletedAt } — tombstones, see mergeState */
   logsOff: {},            /* { 'YYYY-MM-DD': { [habitId]: unTickedAt } } */
 });
@@ -2914,7 +2884,7 @@ function usePomodoro(state, setState) {
               id: `p-${atMs}`,
               date: dKey,
               /* taskId/taskTitle predate pillar and habit targets and are
-                 what every stored log and the coaching digest already
+                 what every stored log already
                  read, so they keep their exact old meaning rather than
                  being folded into something generic. */
               taskId:     t.kind === 'task'  ? t.id : null,
@@ -3122,8 +3092,6 @@ function App() {
       goals: data?.goals || [],
       people: (data?.people || []).map(p => ({ aliases: [], weight: 3, ...p })),
       lists: (data?.lists || SEED().lists).map(l => ({ keywords: [], ...l })),
-      coach: data?.coach || null,
-      coachPrompt: typeof data?.coachPrompt === 'string' ? data.coachPrompt : null,
       habits: (data?.habits || SEED().habits).map(h => ({ reminder: null, icon: null, ...h })),
       /* Tasks filed before the full parser snapshot existed carry only
          aiQuadrant. Lift it into `ai` so corrections read uniformly. */
@@ -3529,8 +3497,7 @@ function App() {
         {state.ui.view === 'admin'  && <AdminView state={state} setState={setState} hydrate={hydrate}
             theme={theme} setTheme={setTheme} background={background} changeBg={changeBg}
             glass={glass} setGlass={setGlass}
-            syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}
-            onSyncNow={syncNow}/>}
+            syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}/>}
         {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState} pomo={pomo}/>}
         {state.ui.view === 'goals'  && <GoalsView state={state} setState={setState}/>}
       </main>
@@ -5270,10 +5237,9 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
    QUICK ADD TASK
 ------------------------------------------------------------------- */
 /* Tasks the parser filed, trimmed to the fields a correction is visible
-   in and capped at the most recent handful. Sent with each capture so
-   /api/parse can derive few-shot examples from what this user actually
-   overruled — the rule for what counts as a correction stays server-side
-   in learn.js rather than being duplicated here. */
+   in and capped at the most recent handful. Sent to /api/suggest — the
+   rule for what counts as a correction stays server-side in learn.js
+   rather than being duplicated here. */
 const FILED_TASKS_SENT = 40;
 function filedTasksFor(state) {
   return (state.tasks || [])
@@ -5309,8 +5275,8 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
 
   /* Ask the server to file a task that already exists locally. The
      insert below never waits on this: capture stays instant, works
-     offline, and works with no AI binding at all — the parse is an
-     enhancement layer that patches the task a moment later. */
+     offline — the parse is rules only (no model), an enhancement layer
+     that patches the task a moment later. */
   const smartFile = async (id, text, before, held) => {
     setParsing(true);
     const now = new Date();
@@ -5318,9 +5284,6 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
       today: todayKey(),
       people: state.people || [],
       lists: state.lists || [],
-      /* Tasks previously filed by the parser, so the server can derive
-         few-shot examples from the ones this user corrected. */
-      filedTasks: filedTasksFor(state),
       /* What the calendar has left, so "can this be done now?" is a
          question with an answer. See capacitySnapshot. */
       days: capacitySnapshot(state, todayKey(), now.getHours() * 60 + now.getMinutes()),
@@ -5339,10 +5302,6 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
     const ai = { raw: text, title: r.title || null, quadrant: r.quadrant || null, personId: r.personId || null, at: Date.now() };
     if (!held?.due)    ai.due    = r.due    || null;
     if (!held?.listId) ai.listId = r.listId || null;
-    /* What this capture cost in tokens, when the model reported it.
-       Two small numbers per task, and they are what makes the spend
-       figure in Admin a measurement rather than a guess. */
-    if (r.usage) ai.tok = r.usage;
 
     setState(s => ({
       ...s,
@@ -6916,7 +6875,7 @@ function rangeBuckets(range, today = new Date()) {
 }
 
 /* The numbers half of Admin. Reads state; changes nothing about it. */
-function AdminOverview({ state, setState, syncStatus, onSyncNow }) {
+function AdminOverview({ state, setState }) {
   const [statsRange, setStatsRange] = useState(30);
 
   /* Pillar performance over selected range */
@@ -7188,10 +7147,6 @@ function AdminOverview({ state, setState, syncStatus, onSyncNow }) {
         </div>
       </div>
 
-      {/* The review sits with the numbers it is drawn from, not down in
-          settings — it is a reading of this page, not a preference. */}
-      <CoachCard state={state} setState={setState} syncStatus={syncStatus} onRefreshed={onSyncNow}/>
-
       {/* Per-habit breakdown */}
       {habitStats.length > 0 && (
         <div className="card p-5">
@@ -7237,16 +7192,16 @@ function AdminOverview({ state, setState, syncStatus, onSyncNow }) {
    =stats link still lands here (see normaliseView).
 ------------------------------------------------------------------- */
 const ADMIN_SECTIONS = [
-  { id: 'overview', label: 'Overview',   kicker: 'Admin · 01', title: 'The numbers don\'t lie',  sub: 'Habits, tasks and the weekly review' },
+  { id: 'overview', label: 'Overview',   kicker: 'Admin · 01', title: 'The numbers don\'t lie',  sub: 'Habits and tasks, by the numbers' },
   { id: 'setup',    label: 'Setup',      kicker: 'Admin · 02', title: 'How things get filed',     sub: 'Pillars, quadrants, people, lists, prayer times' },
   { id: 'alerts',   label: 'Alerts',     kicker: 'Admin · 03', title: 'What interrupts you',      sub: 'Notifications and reminders' },
   { id: 'look',     label: 'Appearance', kicker: 'Admin · 04', title: 'How it looks',             sub: 'Theme and background' },
-  { id: 'system',   label: 'System',     kicker: 'Admin · 05', title: 'Under the bonnet',         sub: 'Sync, AI spend, the app itself, your data' },
+  { id: 'system',   label: 'System',     kicker: 'Admin · 05', title: 'Under the bonnet',         sub: 'Sync, the app itself, your data' },
 ];
 
 const ADMIN_TAB_KEY = 'madinah_admin_tab_v1';
 
-function AdminView({ state, setState, hydrate, theme, setTheme, background, changeBg, glass, setGlass, syncStatus, onConfigureSync, onDisconnect, onSyncNow }) {
+function AdminView({ state, setState, hydrate, theme, setTheme, background, changeBg, glass, setGlass, syncStatus, onConfigureSync, onDisconnect }) {
   /* Device-local, like the view itself: coming back to Admin should
      land where you left it, and which panel you had open is not a
      setting worth syncing to the other devices. */
@@ -7277,7 +7232,7 @@ function AdminView({ state, setState, hydrate, theme, setTheme, background, chan
 
       <div className="space-y-6">
         {tab === 'overview' && (
-          <AdminOverview state={state} setState={setState} syncStatus={syncStatus} onSyncNow={onSyncNow}/>
+          <AdminOverview state={state} setState={setState}/>
         )}
 
         {tab === 'setup' && (
@@ -7309,7 +7264,6 @@ function AdminView({ state, setState, hydrate, theme, setTheme, background, chan
           <>
             <SectionHeading kicker={section.kicker} title={section.title} sub={section.sub}/>
             <SyncCard status={syncStatus} onConfigure={onConfigureSync} onDisconnect={onDisconnect}/>
-            <AiSpendCard state={state}/>
             <AppZone />
             <DangerZone state={state} setState={setState} hydrate={hydrate}/>
           </>
@@ -8149,199 +8103,6 @@ function PersonRow({ p, expanded, onToggle, onUpdate, onDelete, movedCount }) {
 }
 
 /* ------------------------------------------------------------------
-   COACH CARD  — the weekly review. Reads state.coach (written server
-   side by /api/coach) and can ask for a fresh one.
-
-   Every number quoted here was computed in functions/api/digest.js and
-   handed to the model as finished arithmetic — the model prioritised
-   and phrased, it did not calculate. See that file for why.
-------------------------------------------------------------------- */
-const WEEK_MS_UI = 7 * 24 * 60 * 60 * 1000;
-
-/* Why the server refused, in words that say what to do about it. */
-const COACH_REFUSALS = {
-  not_due:      (d) => `Next review ${d}.`,
-  unchanged:    () => 'Nothing has moved since the last review.',
-  too_soon:     () => 'Just reviewed — try again in an hour.',
-  weekly_limit: () => 'Three reviews used this week. Resets as the week rolls on.',
-};
-
-function CoachCard({ state, setState, syncStatus, onRefreshed }) {
-  const [busy, setBusy]         = useState(false);
-  const [msg, setMsg]           = useState(null);
-  const [editPrompt, setEditPrompt] = useState(false);
-  const [promptDraft, setPromptDraft] = useState('');
-  const coach  = state.coach || null;
-  const review = coach?.review || null;
-
-  const configured = syncStatus !== 'local';
-  const dueAt = coach?.at ? coach.at + WEEK_MS_UI : 0;
-  const isDue = !coach?.at || Date.now() >= dueAt;
-  const dueLabel = dueAt
-    ? new Date(dueAt).toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short' })
-    : 'now';
-
-  const openPromptEditor = () => {
-    setPromptDraft(state.coachPrompt || '');
-    setEditPrompt(true);
-  };
-  const savePrompt = () => {
-    const trimmed = promptDraft.trim() || null;
-    setState(s => ({ ...s, coachPrompt: trimmed }));
-    setEditPrompt(false);
-  };
-
-  const run = async (force) => {
-    setBusy(true); setMsg(null);
-    const res = await Sync.coach({ today: todayKey(), force, customPrompt: state.coachPrompt });
-    setBusy(false);
-
-    if (res?.error) {
-      /* Named failure modes get a plain-English fix; anything else still
-         surfaces the server's own error and detail rather than a single
-         catch-all string — a real 500 must not read the same as a dead
-         network, or the actual cause is invisible without opening the
-         browser console. */
-      const known = {
-        not_configured: 'Not configured — add the Workers AI binding in Cloudflare, then redeploy.',
-        timeout:        'The review timed out. Try again.',
-        network:        'Could not reach the review service — check your connection.',
-      };
-      setMsg(known[res.error] || `Review failed: ${res.error}${res.detail ? ` — ${res.detail}` : ''}`);
-      return;
-    }
-    if (res?.cached && res.reason) setMsg(COACH_REFUSALS[res.reason]?.(dueLabel) || null);
-    /* The review is written into synced state server-side, so pull it
-       rather than trusting this device's copy of the response. */
-    if (!res?.cached) onRefreshed?.();
-  };
-
-  return (
-    <div className="card p-5">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div>
-          <div className="text-[10px] font-mono tracking-widest text-bone-400">REVIEW</div>
-          <div className="font-display text-xl text-bone-100 mt-1">What you're failing on</div>
-        </div>
-        {configured && (
-          <button onClick={() => run(!isDue)} disabled={busy}
-            className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-xs flex items-center gap-1.5 disabled:opacity-50">
-            <I.refresh className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`}/>
-            {busy ? 'Thinking…' : review ? 'Refresh' : 'Run review'}
-          </button>
-        )}
-      </div>
-
-      {!configured && (
-        <p className="text-sm text-bone-400 mt-3">Connect sync to enable the weekly review.</p>
-      )}
-
-      {configured && !review && !busy && (
-        <p className="text-sm text-bone-400 mt-3">
-          No review yet. It reads the last 30 days — habits, tasks, focus — and tells you
-          what's slipping and what to do about it. Runs weekly.
-        </p>
-      )}
-
-      {msg && <p data-testid="coach-msg" className="text-xs text-strategy mt-3">{msg}</p>}
-
-      {review && (
-        <div data-testid="coach-review" className="mt-4 space-y-4">
-          <p className="text-sm text-bone-100 leading-relaxed">{review.headline}</p>
-
-          {/* Whether last week's advice actually worked, measured against
-              the metrics snapshotted when it was given. This is the part
-              that makes the review a loop rather than a horoscope. */}
-          {review.verdict && (
-            <div data-testid="coach-verdict" className="pl-3 border-l-2 border-bone-400/30">
-              <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1">SINCE LAST REVIEW</div>
-              <div className="text-xs text-bone-300 leading-relaxed">{review.verdict}</div>
-            </div>
-          )}
-
-          {review.failing?.length > 0 && (
-            <div>
-              <div className="text-[10px] font-mono tracking-widest text-combat mb-2">SLIPPING</div>
-              <div className="space-y-2">
-                {review.failing.map((f, i) => (
-                  <div key={i} className="pl-3 border-l-2 border-combat/40">
-                    <div className="text-sm text-bone-100">{f.area}</div>
-                    <div className="text-xs text-bone-400">{f.evidence} — {f.why}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {review.actions?.length > 0 && (
-            <div>
-              <div className="text-[10px] font-mono tracking-widest text-strategy mb-2">THIS WEEK</div>
-              <div className="space-y-2">
-                {review.actions.map((a, i) => (
-                  <div key={i} className="pl-3 border-l-2 border-strategy/40">
-                    <div className="text-sm text-bone-100">{a.action}</div>
-                    <div className="text-xs text-bone-400">{a.because}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {review.working?.area && (
-            <div>
-              <div className="text-[10px] font-mono tracking-widest text-deen mb-2">HOLDING</div>
-              <div className="pl-3 border-l-2 border-deen/40">
-                <div className="text-sm text-bone-100">{review.working.area}</div>
-                <div className="text-xs text-bone-400">{review.working.evidence}</div>
-              </div>
-            </div>
-          )}
-
-          <div className="text-[10px] font-mono tracking-wider text-bone-500 pt-1">
-            {agoLabel(coach.at)} · {isDue ? 'due now' : `next ${dueLabel}`} · claude opus 5
-          </div>
-        </div>
-      )}
-
-      {/* Prompt context editor */}
-      {configured && (
-        <div className="mt-4 pt-4 border-t border-ink-700">
-          {!editPrompt ? (
-            <button onClick={openPromptEditor}
-              className="text-[10px] font-mono tracking-widest text-bone-500 hover:text-bone-300 flex items-center gap-1.5">
-              <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-              {state.coachPrompt ? 'EDIT REVIEW CONTEXT' : 'ADD REVIEW CONTEXT'}
-            </button>
-          ) : (
-            <div className="space-y-2">
-              <div className="text-[10px] font-mono tracking-widest text-bone-400">REVIEW CONTEXT</div>
-              <textarea value={promptDraft} onChange={e => setPromptDraft(e.target.value)}
-                rows={5}
-                placeholder={"e.g. 'Deen habits are my top priority — weight them above everything else'\n'Don't flag exercise — I'm managing an injury'\n'Keep advice extremely practical and short'"}
-                className="w-full bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 text-xs resize-y leading-relaxed placeholder-bone-600"/>
-              <p className="text-[10px] text-bone-500">These notes are added to the review prompt. They persist across reviews and can focus, redirect or constrain what the AI comments on.</p>
-              <div className="flex gap-2">
-                <button onClick={savePrompt} className="btn-primary text-xs px-3 py-1.5">Save</button>
-                {state.coachPrompt && (
-                  <button onClick={() => { setState(s => ({ ...s, coachPrompt: null })); setEditPrompt(false); }}
-                    className="btn text-xs px-3 py-1.5 border border-ink-700 hover:bg-ink-800 text-bone-400 rounded-lg">
-                    Clear
-                  </button>
-                )}
-                <button onClick={() => setEditPrompt(false)}
-                  className="btn text-xs px-3 py-1.5 text-bone-500 hover:text-bone-300">
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------
    LIST ROW  — name/colour plus the keywords that route a captured task
    here without it naming the list outright. Same chip pattern as a
    person's aliases: type a word, Enter (or comma) commits it.
@@ -8834,203 +8595,6 @@ function AdminCard({ state, setState }) {
             )}
           </div>
         </div>
-      )}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------
-   AI SPEND
-   ------------------------------------------------------------------
-   Two bills that work differently enough that one number would be a
-   lie.
-
-   Capture (/api/parse) runs a Workers AI model, billed in Neurons
-   against an allowance that resets daily and does not roll over.
-   Reviews (/api/coach) run Claude Opus 5 as a partner model, billed
-   through Cloudflare's Unified Billing at Anthropic's own per-token
-   rates — real money from the first token.
-
-   Everything here is computed from calls THIS APP made and the token
-   counts the APIs handed back, not scraped from a billing page. So it
-   is exact wherever usage was reported and openly an estimate where it
-   wasn't, instead of being uniformly approximate. Cloudflare's
-   dashboard stays the authority; this is for knowing before you look.
-
-   Rates: developers.cloudflare.com/workers-ai/platform/pricing/ and
-   the Claude Opus 5 model page. Checked 2026-07; they will move.
-------------------------------------------------------------------- */
-const AI_RATES = {
-  /* Neurons per million tokens. Published for
-     llama-3.1-8b-instruct-fp8-fast; /api/parse runs the -fast variant,
-     which Cloudflare doesn't price separately — hence "estimate". */
-  neuronsPerMIn:  4_119,
-  neuronsPerMOut: 34_868,
-  usdPerKNeuron:  0.011,
-  freeNeuronsPerDay: 10_000,
-  /* Claude Opus 5, per million tokens. Thinking bills as output. */
-  opusUsdPerMIn:  5,
-  opusUsdPerMOut: 25,
-  /* Cloudflare's surcharge on every credit top-up that funds the above. */
-  topUpFee: 0.05,
-  usdToGbp: 0.79,
-};
-
-/* Assumed cost of a review whose token count predates this being
-   recorded — the observed shape of a digest prompt and a ~600-word
-   reply with thinking. Only ever applied to old rows, and the card
-   says how many. */
-const OPUS_ASSUMED = { i: 1_400, o: 1_100 };
-
-function aiSpend(state, days = 30) {
-  const since = Date.now() - days * 86_400_000;
-  const sum = (xs, f) => xs.reduce((a, x) => a + (Number(f(x)) || 0), 0);
-
-  /* ── Capture ── one Workers AI call per task the parser filed, and
-     every one of those tasks still carries the moment it happened. */
-  const filed   = (state.tasks || []).filter(t => Number(t.ai?.at) >= since);
-  const metered = filed.filter(t => t.ai?.tok);
-  const avg = metered.length
-    ? { i: sum(metered, t => t.ai.tok.i) / metered.length, o: sum(metered, t => t.ai.tok.o) / metered.length }
-    : { i: 0, o: 0 };
-  const neuronsFor = (t) => {
-    const tok = t.ai?.tok || avg;
-    return (Number(tok.i) || 0) / 1e6 * AI_RATES.neuronsPerMIn
-         + (Number(tok.o) || 0) / 1e6 * AI_RATES.neuronsPerMOut;
-  };
-
-  /* The allowance is per day and doesn't carry over, so a month's total
-     against thirty allowances would hide a single expensive day.
-     Charged day by day, which is how Cloudflare actually charges it. */
-  const byDay = {};
-  filed.forEach(t => {
-    const k = fmtKey(new Date(t.ai.at));
-    byDay[k] = (byDay[k] || 0) + neuronsFor(t);
-  });
-  const neurons   = sum(Object.values(byDay), n => n);
-  const overage   = sum(Object.values(byDay), n => Math.max(0, n - AI_RATES.freeNeuronsPerDay));
-  const workersUsd = overage / 1000 * AI_RATES.usdPerKNeuron;
-  const todayNeurons = byDay[todayKey()] || 0;
-
-  /* ── Reviews ── */
-  const runs = (state.coach?.history || []).filter(h => Number(h.at) >= since);
-  const opusIn  = sum(runs, h => h.usage?.i ?? OPUS_ASSUMED.i);
-  const opusOut = sum(runs, h => h.usage?.o ?? OPUS_ASSUMED.o);
-  const opusUsd = opusIn / 1e6 * AI_RATES.opusUsdPerMIn + opusOut / 1e6 * AI_RATES.opusUsdPerMOut;
-
-  const totalUsd = (workersUsd + opusUsd) * (1 + AI_RATES.topUpFee);
-  const gbp = (usd) => usd * AI_RATES.usdToGbp;
-
-  return {
-    days,
-    workers: {
-      calls: filed.length,
-      metered: metered.length,
-      neurons, overage, todayNeurons,
-      gbp: gbp(workersUsd),
-      freePerDay: AI_RATES.freeNeuronsPerDay,
-    },
-    unified: {
-      runs: runs.length,
-      assumed: runs.filter(h => !h.usage).length,
-      tokIn: opusIn, tokOut: opusOut,
-      gbp: gbp(opusUsd),
-    },
-    totalGbp: gbp(totalUsd),
-    /* Straight-line from what has actually happened. Reviews are capped
-       weekly and capture tracks how much you capture, so the rate is
-       the honest thing to extrapolate — not a modelled budget. */
-    perYearGbp: gbp(totalUsd) / days * 365,
-  };
-}
-
-const money = (n) => n < 0.005 && n > 0 ? '<£0.01' : `£${n.toFixed(2)}`;
-const compact = (n) => n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : String(Math.round(n));
-
-function AiSpendCard({ state }) {
-  const [days, setDays] = useState(30);
-  const s = useMemo(() => aiSpend(state, days), [state.tasks, state.coach, days]);
-  const nothingYet = s.workers.calls === 0 && s.unified.runs === 0;
-
-  return (
-    <div className="card p-5" data-testid="ai-spend">
-      <div className="flex items-start justify-between gap-3 flex-wrap mb-1">
-        <div>
-          <div className="text-[10px] font-mono tracking-widest text-bone-400">AI SPEND</div>
-          <div className="font-display text-xl text-bone-100 mt-1">What the models cost</div>
-        </div>
-        <div className="flex items-center gap-1.5">
-          {[30, 90, 365].map(d => (
-            <button key={d} onClick={() => setDays(d)}
-              className={`btn px-2.5 py-1 rounded-lg border text-[10px] font-mono tracking-wider ${days === d ? 'bg-bone-100 text-ink-950 font-semibold border-transparent' : 'border-ink-700 text-bone-400 hover:bg-ink-800'}`}>
-              {d === 365 ? '1YR' : `${d}D`}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {nothingYet ? (
-        <p className="text-xs text-bone-400 mt-3">
-          Nothing spent in this window — no captures parsed and no reviews run.
-        </p>
-      ) : (
-        <>
-          <div className="flex items-baseline gap-2.5 mt-3 mb-5">
-            <span data-testid="spend-total" className="font-display text-4xl text-bone-100 leading-none">{money(s.totalGbp)}</span>
-            <span className="text-xs font-mono text-bone-400">
-              last {days === 365 ? 'year' : `${days} days`} · ≈{money(s.perYearGbp)}/yr at this rate
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Workers AI */}
-            <div className="p-3.5 rounded-lg border border-ink-700">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] font-mono tracking-widest text-tech">WORKERS AI</span>
-                <span className="font-mono text-sm text-bone-100">{money(s.workers.gbp)}</span>
-              </div>
-              <div className="text-xs text-bone-300">Task capture · {s.workers.calls} parsed</div>
-              <div className="text-[11px] text-bone-400 mt-1.5">
-                ≈{compact(s.workers.neurons)} neurons.{' '}
-                {s.workers.overage > 0
-                  ? <span className="text-strategy">{compact(s.workers.overage)} over the free {compact(s.workers.freePerDay)}/day.</span>
-                  : <span>Inside the free {compact(s.workers.freePerDay)}/day allowance every day.</span>}
-              </div>
-              <div className="text-[11px] text-bone-400/70 mt-1">
-                {compact(s.workers.todayNeurons)} used today.
-                {s.workers.metered < s.workers.calls && (
-                  <> {s.workers.calls - s.workers.metered} older captures estimated from the average.</>
-                )}
-              </div>
-            </div>
-
-            {/* Unified billing */}
-            <div className="p-3.5 rounded-lg border border-ink-700">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] font-mono tracking-widest text-strategy">UNIFIED BILLING</span>
-                <span className="font-mono text-sm text-bone-100">{money(s.unified.gbp)}</span>
-              </div>
-              <div className="text-xs text-bone-300">Weekly review · {s.unified.runs} run{s.unified.runs === 1 ? '' : 's'} · Claude Opus 5</div>
-              <div className="text-[11px] text-bone-400 mt-1.5">
-                {compact(s.unified.tokIn)} tokens in · {compact(s.unified.tokOut)} out (thinking counts as out).
-              </div>
-              <div className="text-[11px] text-bone-400/70 mt-1">
-                {s.unified.assumed > 0
-                  ? <>{s.unified.assumed} run{s.unified.assumed === 1 ? '' : 's'} predate token logging — estimated.</>
-                  : <>Measured from what the API reported.</>}
-              </div>
-            </div>
-          </div>
-
-          <p className="text-[10px] text-bone-400/70 mt-4 leading-relaxed">
-            Totals include Cloudflare's {Math.round(AI_RATES.topUpFee * 100)}% credit top-up fee, converted at
-            ${' '}1 = £{AI_RATES.usdToGbp}. Call counts and token counts are measured; the neuron
-            figure is converted from them at Cloudflare's rate for the nearest priced variant of
-            the model, and the dashboard's own number can come out materially higher. Your{' '}
-            <a href="https://dash.cloudflare.com/?to=/:account/ai/workers-ai" target="_blank" rel="noopener noreferrer"
-              className="underline hover:text-bone-200">Cloudflare dashboard</a> is the authority.
-          </p>
-        </>
       )}
     </div>
   );

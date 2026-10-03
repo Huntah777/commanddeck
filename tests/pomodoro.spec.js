@@ -313,7 +313,7 @@ test.describe('what the session is aimed at', () => {
   });
 
   test('a task still logs the way it always did', async ({ page }) => {
-    /* Every stored log and the coaching digest read taskId/taskTitle.
+    /* Every stored log reads taskId/taskTitle.
        Pillars and habits are additional, not a replacement. */
     await boot(page);
     await page.getByRole('button', { name: 'TASK', exact: true }).click();

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { corrections, correctionSummary, suggestKeywords, suggestWeights, learningExamples, aiSnapshot } from '../functions/api/learn.js';
+import { corrections, suggestKeywords, suggestWeights, aiSnapshot } from '../functions/api/learn.js';
 
 /* Learning from being overruled. Every assertion here is about a fact —
    "the parser said Inbox, the task is in Life" — never an inference about
@@ -61,27 +61,6 @@ test.describe('what counts as a correction', () => {
     const legacy = { id: 't1', title: 'x', quadrant: 'do', aiQuadrant: 'delegate' };
     expect(aiSnapshot(legacy)).toMatchObject({ quadrant: 'delegate' });
     expect(corrections([legacy])[0]).toMatchObject({ field: 'quadrant', from: 'delegate', to: 'do' });
-  });
-});
-
-test.describe('correction summary for the coach', () => {
-  test('counts how often filing was overruled, and out of which quadrants', () => {
-    const s = correctionSummary([
-      filed({ id: 't1', quadrant: 'plan' }),                       // untouched
-      filed({ id: 't2', quadrant: 'do' }),
-      filed({ id: 't3', quadrant: 'do' }),
-      filed({ id: 't4', listId: 'l-life' }),
-    ]);
-    expect(s.filed).toBe(4);
-    expect(s.corrected).toBe(3);
-    expect(s.byField).toMatchObject({ quadrant: 2, list: 1 });
-    expect(s.movedOutOf).toMatchObject({ plan: 2 });
-  });
-
-  test('a task corrected in two fields counts once as corrected', () => {
-    const s = correctionSummary([filed({ quadrant: 'do', listId: 'l-life' })]);
-    expect(s.corrected).toBe(1);
-    expect(s.byField).toMatchObject({ quadrant: 1, list: 1 });
   });
 });
 
@@ -188,34 +167,5 @@ test.describe('weight suggestions', () => {
       forPerson('t2', 'pp-x', 'eliminate', 'plan'),
     ], maxed);
     expect(out).toHaveLength(0);
-  });
-});
-
-test.describe('few-shot examples for the parser', () => {
-  test('a corrected capture becomes an input → corrected-output pair', () => {
-    const t = filed({ title: 'Ring the dentist', listId: 'l-life', due: '2026-08-01',
-      ai: { raw: 'need to sort the dentist thing', title: 'Sort the dentist thing', listId: 'l-inbox', due: null, quadrant: 'plan' } });
-    const [ex] = learningExamples([t], LISTS);
-    expect(ex.input).toBe('need to sort the dentist thing');
-    expect(ex.corrected).toMatchObject({ title: 'Ring the dentist', list: 'Life', due: '2026-08-01' });
-    expect(ex.changed.sort()).toEqual(['due', 'list', 'title']);
-  });
-
-  test('a capture whose original text was not kept is unusable and skipped', () => {
-    // Without the raw input there is no pair to learn from.
-    const t = filed({ quadrant: 'do', ai: { title: 'x', quadrant: 'plan' } });
-    expect(learningExamples([t], LISTS)).toHaveLength(0);
-  });
-
-  test('the newest corrections win, and the count is capped', () => {
-    const mk = (id, at) => filed({ id, modifiedAt: at, title: `Title ${id}`,
-      ai: { raw: `raw ${id}`, title: 'Other', listId: 'l-inbox', quadrant: 'plan' } });
-    const out = learningExamples([mk('a', 1), mk('b', 2), mk('c', 3), mk('d', 4)], LISTS, 2);
-    expect(out).toHaveLength(2);
-    expect(out.map(e => e.input)).toEqual(['raw d', 'raw c']);
-  });
-
-  test('uncorrected captures are never used as examples', () => {
-    expect(learningExamples([filed()], LISTS)).toHaveLength(0);
   });
 });

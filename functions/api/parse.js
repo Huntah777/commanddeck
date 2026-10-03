@@ -5,35 +5,20 @@
         → { title, due, quadrant, listId, personId, why[], source }
 
    Turns a line of natural language ("dave needs the deck by friday")
-   into a filed task. Same auth as /api/state — an unauthenticated
-   endpoint here would be a free LLM billed to this account.
+   into a filed task. Same auth as /api/state.
 
    Bindings (Cloudflare Pages → Settings):
      env.SYNC_TOKEN   secret (same token as /api/state)
-     env.AI           Workers AI binding (binding name: AI)
 
-   ── The split that matters ────────────────────────────────────
-   The model does LANGUAGE. This file does POLICY.
+   No model is involved: this is rules only, so a capture costs nothing
+   and the endpoint does not need an AI binding.
 
-   The model is asked what the note SAYS — never what should be done
-   about it. That covers the obvious fields (the task, whose name
-   appears, the date phrase, the list) and three readings of the
-   sentence that no regex can get at:
-
-     consequence  what the note says is at stake, 1–5
-     minutes      how much work it sounds like
-     timeCritical whether the wording itself means it cannot wait
-
-   Those are still descriptions of the text. "The boiler is leaking
-   through the kitchen ceiling" names nobody and contains no urgency
-   keyword, and reading it as high-stakes is a language job. Deciding
-   that high stakes outrank your manager's weight of 2, and that a
-   40-minute job doesn't fit the 15 minutes left before Maghrib, is
-   policy — and stays down here in arithmetic you can read.
-
-   So: the model never sees a quadrant, never sees a person's weight,
-   and cannot file anything anywhere. It hands over adjectives; the
-   code below does the deciding.
+   ── What the rules read ──────────────────────────────────────
+   The date, the person (and their weight), the list (by the keywords
+   you configured) and urgency wording are all read by code you can
+   audit — see resolveDue, matchPerson, matchList and markers below.
+   `classify` then turns those into a quadrant, and `place` decides
+   whether the work fits the day.
 
    ── Reading the calendar ──────────────────────────────────────
    `days` arrives from the client: for today and the fortnight after
@@ -48,18 +33,11 @@
    work fit in what is left of today, and if not, which is the first
    day it does fit? A date you stated yourself is never moved.
 
-   Everything here degrades: no AI binding, a model error, or a
-   timeout all fall through to `fallbackExtract` (regex only), which
-   still resolves dates, people and — via keyword matching against your
-   configured lists — which list a task belongs in. A client too old to
-   send `days` simply gets no scheduling. Capture never fails.
+   A client too old to send `days` simply gets no scheduling.
+   Capture never fails.
    ============================================================ */
 
-import { learningExamples } from './learn.js';
-
 const MAX_TEXT       = 500;
-const MODEL          = '@cf/meta/llama-3.1-8b-instruct-fast';
-const AI_TIMEOUT_MS  = 6_000;
 
 /* Importance is a 1–5 scale. 3 is "no one in particular" — your own
    tasks count as important by default, and it takes an explicitly
@@ -454,19 +432,11 @@ export function classify(extract, ctx = {}) {
 }
 
 /* ── Extraction ───────────────────────────────────────────────────
-   Everything below produces the same `{ raw, title, person, due,
-   listId }` shape, whether it came from the model or from regexes,
-   so `classify` cannot tell the difference and neither path is a
-   privileged one. ── */
+   Produces the `{ raw, title, person, due, listId }` shape that
+   `classify` reads. ── */
 
-const listIdFor = (name, lists) => {
-  const n = norm(name);
-  if (!n) return null;
-  return (lists || []).find(l => norm(l.name) === n)?.id ?? null;
-};
-
-/* No model, or the model failed. Strip the parts we resolved
-   ourselves out of the title and hand back the rest. */
+/* Strip the parts we resolve ourselves out of the title and hand back
+   the rest. */
 export function fallbackExtract(text, ctx = {}) {
   const raw = String(text).trim();
   return { raw, title: tidyTitle(raw), person: '', due: null, listId: null };
@@ -479,115 +449,6 @@ function tidyTitle(raw) {
   t = t.replace(/[\s,]*\b(?:on|by|due|before)?\s*(?:today|tonight|tomorrow|next week|(?:next |this )?(?:mon|tues|wednes|thurs|fri|satur|sun)day)\s*$/i, '');
   t = t.replace(/[\s,]*\bin \d{1,3} (?:day|days|week|weeks)\s*$/i, '');
   return (t.trim() || raw).replace(/^./, c => c.toUpperCase());
-}
-
-const SCHEMA = {
-  type: 'object',
-  properties: {
-    title:  { type: 'string', description: 'the task itself, imperative, without the date' },
-    person: { type: 'string', description: 'who asked for it or who it concerns; empty if nobody' },
-    due:    { type: 'string', description: 'YYYY-MM-DD if the note implies a date; empty otherwise' },
-    list:   { type: 'string', description: 'best matching list name; empty if unclear' },
-    consequence:  { type: 'number',  description: '1-5, what the note says is at stake if it never happens' },
-    minutes:      { type: 'number',  description: 'rough working minutes the task needs' },
-    timeCritical: { type: 'boolean', description: 'true only if the wording itself means it cannot wait a few days' },
-  },
-  required: ['title', 'person', 'due', 'list', 'consequence', 'minutes', 'timeCritical'],
-};
-
-/* Captures this user has previously corrected, as input → what they
-   actually wanted. Code already learns routing and priority from the
-   same corrections (see learn.js); these carry the part code cannot
-   express — how this person words a title. */
-const examplesBlock = (examples) => !examples?.length ? '' : `
-Corrections this user has made to your previous output. Match their
-style; do not copy their content:
-${examples.map(e => `  in:  ${e.input}\n  out: ${JSON.stringify(e.corrected)}`).join('\n')}
-`;
-
-const prompt = (text, today, people, lists, examples) => [
-  { role: 'system', content:
-`You extract fields from a short task note. Reply with JSON only.
-Today is ${today} (${WEEKDAYS[weekdayOf(today)]}).
-Known people: ${people.map(p => p.name).filter(Boolean).join(', ') || 'none'}
-Lists: ${lists.map(l => l.name).filter(Boolean).join(', ') || 'none'}
-
-title  - the task, imperative, in the writer's own words, with the date phrase removed.
-person - the known person the note names or refers to, exactly as spelled above. "" if none.
-due    - YYYY-MM-DD only if the note states or implies a date. "" otherwise. Never invent one.
-list   - one of the list names above, or "".
-
-consequence - 1-5, read ONLY from what this note says is at stake if it never
-  happens. Judge the situation described, not who mentioned it.
-    5  something is broken, unsafe, or an outside deadline is about to pass
-    4  someone is blocked waiting, or money or a promise is at risk
-    3  ordinary work that matters — use this when the note gives you nothing
-    2  useful, but nothing turns on it
-    1  idle or optional
-minutes - roughly how long the work takes. 5 for a text message, 30 if the
-  note gives you nothing to go on, 480 for a full day.
-timeCritical - true ONLY when the wording itself means it cannot wait a few
-  days: a shop about to close, a bin collection, a flight, someone waiting on
-  it right now. A note that is merely important is not timeCritical.
-${examplesBlock(examples)}
-Describe the note. Do not decide what to do about it: no priorities, no
-quadrants, no scheduling. Those are decided elsewhere from your answers.` },
-  { role: 'user', content: text },
-];
-
-/* JSON mode returns the object on some models and a JSON string on
-   others; accept either and treat anything else as a failure. */
-const asObject = (r) => {
-  const v = r?.response ?? r;
-  if (v && typeof v === 'object') return v;
-  try { return JSON.parse(String(v)); } catch { return null; }
-};
-
-async function aiExtract(text, ctx, env) {
-  const run = env.AI.run(MODEL, { messages: prompt(text, ctx.today, ctx.people, ctx.lists, ctx.examples), response_format: { type: 'json_schema', json_schema: SCHEMA } });
-  /* fetch/AI calls have no timeout of their own, and capture is a
-     foreground interaction — a stalled model must not hold it open. */
-  const out = await Promise.race([
-    run,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('AI_TIMEOUT')), AI_TIMEOUT_MS)),
-  ]);
-
-  const got = asObject(out);
-  if (!got) throw new Error('AI_BAD_JSON');
-
-  /* A rewritten title should be a tightening of what was typed. Longer
-     than the input means the model elaborated, so keep the original. */
-  const title = String(got.title || '').trim();
-  return {
-    raw: text,
-    title: title && title.length <= text.length + 4 ? title : tidyTitle(text),
-    person: String(got.person || '').trim(),
-    due: isDateKey(got.due) ? got.due : null,
-    listId: listIdFor(got.list, ctx.lists),
-    /* Clamped on the way in rather than trusted. A model that answers 9,
-       or 0 minutes, or a string, gets the neutral default — it cannot
-       shout its way past a person's weight or make everything fit. */
-    consequence:  clampWeight(got.consequence),
-    minutes:      clampMins(got.minutes),
-    timeCritical: got.timeCritical === true,
-    /* What the call actually cost, in the only unit the API reports.
-       Handed back so the client can keep its own ledger — the running
-       total is arithmetic over calls this app made, not a number
-       scraped out of a billing dashboard. */
-    usage: tokensOf(out),
-  };
-}
-
-/* Workers AI reports usage on some models and not others, and has used
-   more than one field name for it. Anything unrecognised is null rather
-   than zero: a missing figure and a free call are not the same claim. */
-export function tokensOf(out) {
-  const u = out?.usage;
-  if (!u || typeof u !== 'object') return null;
-  const i = Number(u.prompt_tokens ?? u.input_tokens);
-  const o = Number(u.completion_tokens ?? u.output_tokens);
-  if (!Number.isFinite(i) && !Number.isFinite(o)) return null;
-  return { i: Number.isFinite(i) ? i : 0, o: Number.isFinite(o) ? o : 0 };
 }
 
 export async function onRequest({ request, env }) {
@@ -612,28 +473,7 @@ export async function onRequest({ request, env }) {
       .filter(d => isDateKey(d?.d))
       .slice(0, 31),
   };
-  /* The client sends the tasks the parser previously filed; the rule for
-     what counts as a correction lives here, in learn.js, rather than
-     being reimplemented in the browser. Capped so the prompt stays small
-     enough for this endpoint to remain inside the free tier. */
-  ctx.examples = learningExamples(
-    Array.isArray(body?.filedTasks) ? body.filedTasks.slice(0, 40) : [],
-    ctx.lists,
-    3,
-  );
+  const extract = fallbackExtract(text, ctx);
 
-  let extract, source = 'ai';
-  try {
-    if (!env.AI) throw new Error('NO_AI_BINDING');
-    extract = await aiExtract(text, ctx, env);
-  } catch (err) {
-    /* Not an error path worth failing on — the regex extractor still
-       resolves dates and people, so a capture is always better filed
-       than it would have been with no parsing at all. */
-    console.warn('parse: falling back to rules —', err?.message || err);
-    extract = fallbackExtract(text, ctx);
-    source = 'rules';
-  }
-
-  return json({ ...classify(extract, ctx), source, usage: extract.usage || null });
+  return json({ ...classify(extract, ctx), source: 'rules' });
 }

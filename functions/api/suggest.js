@@ -55,7 +55,7 @@ export async function onRequest({ request, env }) {
 
   /* Client-supplied data of arbitrary age and shape feeds straight into
      learn.js — an uncaught throw here would return a bare error page
-     instead of JSON, same failure mode fixed in coach.js. */
+     instead of JSON. */
   try {
     const tasks  = Array.isArray(body?.filedTasks) ? body.filedTasks.slice(0, 500) : [];
     const lists  = Array.isArray(body?.lists)  ? body.lists.slice(0, 50)   : [];

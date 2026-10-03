@@ -4,7 +4,7 @@ import { onRequest } from '../functions/api/suggest.js';
 /* /api/suggest is pure computation over client-supplied data (see
    learn.spec.js for the rules themselves) — but "pure" doesn't mean
    "can't throw": arbitrary-shaped tasks from a client of unknown age
-   feed straight into it. Same class of bug as coach.js: an uncaught
+   feed straight into it, and an uncaught
    throw returns a bare error page instead of JSON, and the caller
    can't tell a real failure from a dead network. */
 

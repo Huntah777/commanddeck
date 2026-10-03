@@ -8,20 +8,15 @@
 
    Nothing here guesses at intent. A correction is a fact: the
    parser said Inbox, the task is in Life. This module turns those
-   facts into three things:
+   facts into two things:
 
      1. suggestKeywords  — words that keep appearing in titles you
                            move to a list, offered as routing rules
      2. suggestWeights   — people whose tasks you keep re-filing,
                            offered as a weight change
-     3. learningExamples — corrected captures as few-shot pairs, the
-                           only route for teaching the model things
-                           code can't express (how you word a title)
 
-   (1) and (2) are the valuable half: they become deterministic
-   policy you can see and edit, applied by code forever after. (3)
-   is a nudge to a model that may change under us. Preferring the
-   first two is the same call made everywhere else in this codebase.
+   Both become deterministic policy you can see and edit, applied
+   by code forever after.
    ============================================================ */
 
 /* Ignore the scaffolding of a sentence — only content words can
@@ -65,17 +60,6 @@ export function corrections(tasks = []) {
     if (ai.title && String(t.title || '').trim() !== String(ai.title).trim()) add('title', ai.title, t.title || null);
   }
   return out;
-}
-
-/* Compact counts for the coaching digest — how often the filing is
-   being overruled, and in which direction. */
-export function correctionSummary(tasks = []) {
-  const all = corrections(tasks);
-  const filed = tasks.filter(t => aiSnapshot(t)).length;
-  const byField = all.reduce((a, c) => { a[c.field] = (a[c.field] || 0) + 1; return a; }, {});
-  const movedOutOf = all.filter(c => c.field === 'quadrant')
-    .reduce((a, c) => { a[c.from] = (a[c.from] || 0) + 1; return a; }, {});
-  return { filed, corrected: new Set(all.map(c => c.taskId)).size, byField, movedOutOf };
 }
 
 const MIN_EVIDENCE = 2; // one move is a one-off; twice is a pattern
@@ -153,34 +137,4 @@ export function suggestWeights(tasks = [], people = []) {
     out.push({ personId, name: person.name, from, to, moves: Math.abs(net), direction: net > 0 ? 'up' : 'down' });
   }
   return out.sort((a, b) => b.moves - a.moves).slice(0, 5);
-}
-
-/* Corrected captures, newest first, as input → corrected-output pairs.
-   Only tasks that kept their original text are usable: without the raw
-   capture there is nothing to learn from. */
-export function learningExamples(tasks = [], lists = [], limit = 3) {
-  const records = tasks.filter(isRecord);
-  const byTask = new Map();
-  for (const c of corrections(tasks)) {
-    if (!c.raw) continue;
-    if (!byTask.has(c.taskId)) byTask.set(c.taskId, { taskId: c.taskId, raw: c.raw, at: c.at, fields: [] });
-    byTask.get(c.taskId).fields.push(c.field);
-  }
-
-  const nameOf = (id) => lists.filter(isRecord).find(l => l.id === id)?.name || '';
-  return [...byTask.values()]
-    .sort((a, b) => b.at - a.at)
-    .slice(0, limit)
-    .map(({ taskId, raw, fields }) => {
-      const t = records.find(x => x.id === taskId);
-      return {
-        input: raw,
-        corrected: {
-          title: t.title || '',
-          list: nameOf(t.listId),
-          due: t.due || '',
-        },
-        changed: [...new Set(fields)],
-      };
-    });
 }
