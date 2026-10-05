@@ -1956,6 +1956,22 @@ const toggleTaskDone = (s, id) => ({
     : x),
 });
 
+/* Subtasks live on the task itself, not in a collection of their own —
+   a task syncs as one record by modifiedAt, so a checklist carried inside
+   it merges with it and can never outlive it. */
+const editSubtasks = (s, taskId, fn) => ({
+  ...s,
+  tasks: s.tasks.map(x => x.id === taskId
+    ? { ...x, subtasks: fn(x.subtasks || []), modifiedAt: Date.now() }
+    : x),
+});
+const addSubtask = (s, taskId, title) =>
+  editSubtasks(s, taskId, subs => [...subs, { id: `st-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, title, done: false }]);
+const toggleSubtask = (s, taskId, subId) =>
+  editSubtasks(s, taskId, subs => subs.map(x => x.id === subId ? { ...x, done: !x.done } : x));
+const removeSubtask = (s, taskId, subId) =>
+  editSubtasks(s, taskId, subs => subs.filter(x => x.id !== subId));
+
 /* Complete a task, at a given instant rather than always "now" — same
    relationship to toggleTaskDone as tickHabit has to the checklist's
    toggle above. Used by usePomodoro.finish() for a session aimed at a
@@ -5418,8 +5434,13 @@ function QuickAddTask({ state, setState, defaultDate, defaultQuadrant='plan', de
 /* ------------------------------------------------------------------
    TASK ROW
 ------------------------------------------------------------------- */
-function TaskRow({ t, state, setState, compact, draggable, onDragStart, dayKey }) {
+/* `subtasks` turns on the checklist dropdown. Only Tasks and the Matrix
+   ask for it — Today's rows stay a single line. */
+function TaskRow({ t, state, setState, compact, draggable, onDragStart, dayKey, subtasks: withSubtasks }) {
   const [editing, setEditing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const subs = t.subtasks || [];
+  const subsDone = subs.filter(x => x.done).length;
   /* Whether this row's time picker is open. Rows sit in narrow columns —
      one open at a time, as with the habit checklist. */
   const [scheduling, setScheduling] = useState(false);
@@ -5463,6 +5484,15 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart, dayKey }
             </div>
           )}
         </div>
+        {withSubtasks && (
+          <button onClick={()=>setExpanded(v => !v)} data-testid="subtask-toggle"
+            aria-expanded={expanded} aria-label={`Subtasks of ${t.title}`}
+            title={expanded ? 'Hide subtasks' : 'Show subtasks'}
+            className={`btn shrink-0 h-6 px-1.5 rounded flex items-center gap-1 mt-0.5 font-mono text-[10px] text-bone-400 ${subs.length || expanded ? '' : 'opacity-45 hover:opacity-100'}`}>
+            {subs.length > 0 && <span className={subsDone === subs.length ? 'text-deen' : ''}>{subsDone}/{subs.length}</span>}
+            <I.chev className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`}/>
+          </button>
+        )}
         {/* Booking a to-do into the day, from wherever you are reading it. */}
         <button onClick={()=>setScheduling(v => !v)}
           aria-label={slot ? `Reschedule ${t.title}` : `Add ${t.title} to the calendar`}
@@ -5476,6 +5506,9 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart, dayKey }
           <I.x className="w-4 h-4"/>
         </button>
       </div>
+      {withSubtasks && expanded && (
+        <SubtaskList t={t} subs={subs} setState={setState}/>
+      )}
       {scheduling && (
         <TaskSlotPicker task={t} slot={slot} defaultDate={dayKey}
           onClose={()=>setScheduling(false)}
@@ -5483,6 +5516,41 @@ function TaskRow({ t, state, setState, compact, draggable, onDragStart, dayKey }
       )}
       {editing && <TaskEditModal t={t} state={state} setState={setState} onClose={()=>setEditing(false)}/>}
     </>
+  );
+}
+
+/* The dropdown under a task row: tick, delete, and add on Enter. */
+function SubtaskList({ t, subs, setState }) {
+  const [draft, setDraft] = useState('');
+  const add = () => {
+    const title = draft.trim();
+    if (!title) return;
+    setState(s => addSubtask(s, t.id, title));
+    setDraft('');
+  };
+  return (
+    <div data-testid="subtask-list" className="ml-9 mr-2 mb-1.5 pl-2 border-l border-ink-700 space-y-0.5">
+      {subs.map(st => (
+        <div key={st.id} data-testid="subtask-row" className="flex items-center gap-2 py-0.5">
+          <button onClick={()=>setState(s => toggleSubtask(s, t.id, st.id))}
+            className={`tick ${st.done ? 'on' : ''}`} aria-label={`Toggle ${st.title}`}>
+            {st.done && <I.check className="w-3 h-3"/>}
+          </button>
+          <span className={`flex-1 min-w-0 text-xs leading-snug ${st.done ? 'line-through text-bone-400' : 'text-bone-200'}`}>{st.title}</span>
+          <button onClick={()=>setState(s => removeSubtask(s, t.id, st.id))} aria-label={`Delete ${st.title}`}
+            className="opacity-50 hover:opacity-100 text-bone-400 hover:text-combat transition-opacity shrink-0">
+            <I.x className="w-3.5 h-3.5"/>
+          </button>
+        </div>
+      ))}
+      <div className="flex items-center gap-2 py-0.5">
+        <I.plus className="w-3.5 h-3.5 text-bone-400 shrink-0"/>
+        <input value={draft} onChange={e=>setDraft(e.target.value)}
+          onKeyDown={e=>{ if (e.key === 'Enter') add(); }}
+          placeholder="Add subtask…" aria-label={`Add subtask to ${t.title}`}
+          className="flex-1 min-w-0 bg-transparent text-xs text-bone-100 placeholder:text-bone-400/70 outline-none py-1"/>
+      </div>
+    </div>
   );
 }
 
@@ -6758,7 +6826,7 @@ function TasksView({ state, setState }) {
         <div className="card p-2">
           {filtered.length === 0
             ? <EmptyHint text="Nothing here."/>
-            : filtered.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState}/>) }
+            : filtered.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState} subtasks/>) }
         </div>
       </section>
     </div>
@@ -6819,7 +6887,7 @@ function MatrixView({ state, setState }) {
               <div>
                 {items.length === 0
                   ? <div className="text-xs text-bone-400/60 italic px-2 py-3 text-center">— empty —</div>
-                  : items.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState} draggable onDragStart={onDragStart}/>) }
+                  : items.map(t => <TaskRow key={t.id} t={t} state={state} setState={setState} draggable onDragStart={onDragStart} subtasks/>) }
               </div>
             </div>
           );
