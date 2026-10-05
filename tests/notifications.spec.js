@@ -120,6 +120,24 @@ test.describe('notification plan — prayer time offsets', () => {
     expect(find(schedule, 'salah-Fajr').fireAt).toBe(Date.UTC(2026, 6, 15, 2, 12, 0));   // untouched
   }));
 
+  test('impermissible prayer windows are in the server plan', async () => {
+    // The worker rewrites every device's plan each tick, so anything the
+    // client plans that is missing here never arrives with the app closed.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ data: { timings: { Sunrise: '04:58 (BST)', Dhuhr: '13:05 (BST)', Asr: '17:20 (BST)' } } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+    try {
+      const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Dhuhr: 5 } } };
+      const { schedule } = await build(state);
+      expect(find(schedule, 'forbidden-sunrise').fireAt).toBe(Date.UTC(2026, 6, 15, 3, 58, 0));
+      expect(find(schedule, 'forbidden-zawal').fireAt).toBe(Date.UTC(2026, 6, 15, 12, 5, 0)); // 5 min before offset Dhuhr
+      expect(find(schedule, 'forbidden-asr').fireAt).toBe(Date.UTC(2026, 6, 15, 16, 20, 0));
+      expect(staleAfter('forbidden-asr')).toBe(10 * 60_000);
+    } finally { globalThis.fetch = realFetch; }
+  });
+
   test('a negative offset works too', withTimings(async () => {
     const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Fajr: -7 } } };
     const { schedule } = await build(state);

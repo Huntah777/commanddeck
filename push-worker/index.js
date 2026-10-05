@@ -86,7 +86,7 @@ export const blockOnDay = (b, dayKey, dow) =>
   b?.date ? b.date === dayKey : (b?.every || []).includes(dow);
 
 /* Ids are stable and prefixed by kind — see buildTodaysSchedule. */
-const isUrgent  = (id) => id.startsWith('salah-') || id.startsWith('b-');
+const isUrgent  = (id) => id.startsWith('salah-') || id.startsWith('forbidden-') || id.startsWith('b-');
 
 /* Advance prayer reminders (salah-Fajr-10, salah-Fajr-3) fire N minutes
    BEFORE the prayer. With a flat URGENT_LATE_MS window, a cron tick that
@@ -471,14 +471,30 @@ export async function buildTodaysSchedule(state, tz, parts) {
       if (r.ok) {
         const timings = (await r.json())?.data?.timings || {};
         const offsets = salahOffsets(state.ui);
+        const atMin = (m) => zonedHmToUtcMs(y, mo, d, Math.floor(m / 60), m % 60, tz);
         for (const [key, names] of Object.entries(SALAH_NAMES)) {
           const mins = salahMinutes(timings[key], offsets[key]);
           if (mins == null) continue;
-          const atMin = (m) => zonedHmToUtcMs(y, mo, d, Math.floor(m / 60), m % 60, tz);
           push(`salah-${key}-10`, `${names.en} in 10 min`, `${names.ar} · Prayer time approaching`, atMin(mins - 10));
           push(`salah-${key}-3`,  `${names.en} in 3 min`,  `${names.ar} · Prepare for prayer`,      atMin(mins - 3));
           push(`salah-${key}`,     names.en,               `${names.ar} · Time to pray`,             atMin(mins));
         }
+
+        /* Impermissible prayer times — MIRRORED from index.html's buildPlan.
+           Without these here, the plan rewritten every tick dropped them, so
+           they only ever fired from the page's own timers while it was open. */
+        const sunriseMins = salahMinutes(timings.Sunrise, 0);
+        if (sunriseMins != null)
+          push('forbidden-sunrise', 'Impermissible to Pray',
+            'Prayer is forbidden while the sun is rising — wait ~20 min after sunrise', atMin(sunriseMins));
+        const dhuhrMins = salahMinutes(timings.Dhuhr, offsets.Dhuhr);
+        if (dhuhrMins != null)
+          push('forbidden-zawal', 'Impermissible to Pray',
+            'Sun at its zenith (zawal) — brief forbidden window before Dhuhr begins', atMin(dhuhrMins - 5));
+        const asrMins = salahMinutes(timings.Asr, offsets.Asr);
+        if (asrMins != null)
+          push('forbidden-asr', 'Impermissible to Pray',
+            'No voluntary prayers from Asr until Maghrib — pray Asr now if not yet done', atMin(asrMins));
       } else {
         salahOk = false;
         console.error('salah fetch failed: HTTP', r.status);
