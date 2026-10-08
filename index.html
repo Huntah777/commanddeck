@@ -3809,6 +3809,20 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
               className="icon-btn">›</button>
           </div>
         </div>
+
+        {/* Mobile stats strip — hidden on sm+ where the header row already shows these */}
+        <div className="sm:hidden flex items-center gap-4 pb-3">
+          <div className="flex items-center gap-1.5">
+            <I.flame className="w-4 h-4 text-strategy"/>
+            <span className="font-display text-xl text-strategy leading-none">{streak}</span>
+            <span className="font-mono text-[10px] tracking-widest text-bone-400 uppercase">streak</span>
+          </div>
+          <div className="w-px h-5 bg-ink-700"/>
+          <div className="flex items-center gap-1.5">
+            <span className="font-display text-xl text-bone-100 leading-none">{pct}<span className="text-sm text-bone-400">%</span></span>
+            <span className="font-mono text-[10px] tracking-widest text-bone-400 uppercase">{dayName} done</span>
+          </div>
+        </div>
       </div>
       <InstallBanner />
     </header>
