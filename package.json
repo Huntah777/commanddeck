@@ -9,6 +9,6 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
-    "wrangler": "^4.0.0"
+    "wrangler": "^4.149.0"
   }
 }
