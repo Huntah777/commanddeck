@@ -1,7 +1,13 @@
-/* Bump on every deploy: the static assets below (vendor libs, icons) are
+/* Bump when the static assets below (vendor libs, icons) change: they are
    served cache-first, so a stale cache name keeps serving the previous
-   versions indefinitely. The shell itself (index.html) is network-first —
-   see the fetch handler — so it doesn't depend on this bump to stay fresh. */
+   versions indefinitely. Editing this file at all is what makes the browser
+   install a new worker, and the page reloads when one takes over.
+
+   The shell (index.html) does not depend on this bump. It is network-first —
+   see the fetch handler — and the page itself compares what the server
+   serves with what it is running whenever the app comes to the foreground
+   (the update script at the bottom of index.html), so a deploy that only
+   touches index.html still reaches an app that was left open. */
 const CACHE = 'commanddeck-v9';
 
 /* Written by the page, read by this worker. The SW cannot see localStorage,

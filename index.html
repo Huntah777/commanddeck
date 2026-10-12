@@ -3648,6 +3648,7 @@ function App() {
       </footer>
       {setupOpen && <TokenSetupModal current={Sync.getToken()} onClose={()=>setSetupOpen(false)} onSubmit={connectWithToken}/>}
       {background?.source === 'unsplash' && background?.attribution && <UnsplashCredit attribution={background.attribution}/>}
+      <UpdatePill/>
     </div>
   );
 }
@@ -7551,6 +7552,31 @@ function UnsplashCredit({ attribution }) {
   );
 }
 
+/* Re-render when the update script (bottom of this file) reports a change. */
+function useUpdates() {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const on = () => bump(n => n + 1);
+    window.addEventListener('cd-update', on);
+    return () => window.removeEventListener('cd-update', on);
+  }, []);
+  return window.CDUpdates || null;
+}
+
+/* A newer version is waiting but reloading now would cost something — text
+   half typed, a sheet open, a tap a moment ago. It reloads by itself once
+   that passes; this is for not waiting. */
+function UpdatePill() {
+  const u = useUpdates();
+  if (!u?.ready) return null;
+  return (
+    <button onClick={() => u.reload()} data-testid="update-pill"
+      className="glass btn" style={{ position:'fixed', left:'50%', transform:'translateX(-50%)', bottom:'calc(14px + env(safe-area-inset-bottom, 0px))', zIndex:45, fontSize:13, fontWeight:600, padding:'8px 16px', borderRadius:999, color:'var(--f1)', fontFamily:'Manrope,sans-serif', whiteSpace:'nowrap' }}>
+      Update ready — tap to reload
+    </button>
+  );
+}
+
 function BackgroundCard({ background, changeBg, theme }) {
   const [urlInput, setUrlInput]   = useState(background?.source === 'url' ? background.url : '');
   const [query, setQuery]         = useState('');
@@ -8274,6 +8300,18 @@ function SyncCard({ status, onConfigure, onDisconnect }) {
 }
 
 function AppZone() {
+  const u = useUpdates();
+  const [msg, setMsg] = useState(null);
+  const checkNow = async () => {
+    setMsg(null);
+    if (!u) { setMsg('Updates are not available in this browser.'); return; }
+    if (await u.check()) {
+      setMsg('A new version was found — reloading…');
+      setTimeout(() => u.reload(), 600);
+    } else {
+      setMsg('You have the latest version.');
+    }
+  };
   const clearCache = async () => {
     if (!confirm('Clear the app cache and reload? The app will re-download on next load.')) return;
     try {
@@ -8288,8 +8326,18 @@ function AppZone() {
     <div className="card p-5">
       <div className="text-[10px] font-mono tracking-widest text-bone-400">APP</div>
       <div className="font-display text-xl text-bone-100 mt-1 mb-1">Cache &amp; updates</div>
-      <div className="text-sm text-bone-400 mb-3">If the app feels stale after an update, clear the cache and reload.</div>
-      <button onClick={clearCache} className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm">Clear cache &amp; reload</button>
+      <div className="text-sm text-bone-400 mb-3">
+        New versions install themselves when you open the app, or a few seconds after you stop using it.
+        If something still looks out of date, check now — clearing the cache is the last resort.
+      </div>
+      {msg && <div data-testid="update-msg" className="text-xs text-bone-300 mb-3 px-2.5 py-2 rounded-lg border border-ink-700">{msg}</div>}
+      <div className="flex flex-wrap gap-2">
+        <button onClick={checkNow} disabled={u?.checking} data-testid="check-updates"
+          className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm disabled:opacity-50">
+          {u?.checking ? 'Checking…' : 'Check for updates'}
+        </button>
+        <button onClick={clearCache} className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm">Clear cache &amp; reload</button>
+      </div>
     </div>
   );
 }
@@ -9828,7 +9876,9 @@ function Modal({ children, onClose, title }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
   return ReactDOM.createPortal(
-    <div className="modal-scrim fixed inset-0 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+    /* data-modal: an open sheet is work in progress — the update check in the
+       registration script below won't reload the app out from under it. */
+    <div data-modal className="modal-scrim fixed inset-0 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
       <div className="glass-sheet modal-card scrollbar max-w-md w-full p-5 space-y-3 sheet" onClick={e=>e.stopPropagation()}>
         <div className="sheet-grabber sm:hidden" aria-hidden="true"/>
         <div className="flex items-center justify-between mb-1">
@@ -9908,13 +9958,150 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 
 <script>
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', function() {
-      navigator.serviceWorker.register('/sw.js').catch(function(err) {
-        console.warn('SW registration failed:', err);
-      });
+  /* Service worker registration, and picking up a new deploy without anyone
+     clearing the PWA.
+
+     Why it went stale: a Home Screen app is RESUMED, not reloaded, so the
+     browser's own service-worker update check — which runs on navigation —
+     almost never happens. And when a new worker did take over, the page that
+     was already open kept running the old JS.
+
+     There is no build step to stamp a version id into, so the version IS the
+     page: a fingerprint of the HTML the server hands out. Nothing to bump, so
+     nothing to forget. Whenever the app comes back to the foreground (and
+     every 30 minutes while it stays open) it asks the browser to re-check
+     sw.js and compares the served HTML with the HTML it is running. A newer
+     one reloads the app — but only when that costs nothing: not mid-typing,
+     not with a sheet open, not seconds after a tap. Otherwise an "Update
+     ready" pill waits. A new worker taking over (sw.js changed) means the
+     same thing and goes the same way.
+
+     Plain script on purpose: registration must still happen if the app
+     itself fails to start. The app talks to this through window.CDUpdates
+     and the 'cd-update' event. */
+  if ('serviceWorker' in navigator) (function () {
+    const CHECK_EVERY_MS = 30 * 60_000;   // while the app stays open
+    const THROTTLE_MS    = 60_000;        // between foreground checks
+    const IDLE_MS        = 8_000;         // quiet time before an automatic reload
+    const GUARD_KEY      = 'cd_update_reloads';
+    const U = window.CDUpdates = {
+      ready: false, checking: false, lastChecked: null, check, reload: () => reloadNow(),
+      get build() { return baseline; },   // fingerprint of the page that is running; null until known
+    };
+    const emit = () => window.dispatchEvent(new Event('cd-update'));
+
+    /* A cheap stand-in for a hash: HTML is large and this only has to tell
+       "same file" from "different file". */
+    function fingerprint(text) {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+      return text.length.toString(36) + '-' + (h >>> 0).toString(36);
+    }
+
+    /* What the server serves now. 'no-cache' revalidates, so an unchanged
+       page is a 304 and costs next to nothing. Only an answer that is really
+       the app counts: a login page from an auth gateway, an error page or a
+       redirect would otherwise read as "a new version". */
+    async function servedBuild() {
+      const r = await fetch('/', { cache: 'no-cache' });
+      if (!r.ok || r.redirected || !/text\/html/i.test(r.headers.get('content-type') || '')) throw new Error('not the app');
+      const text = await r.text();
+      if (text.indexOf('id="root"') === -1) throw new Error('not the app');
+      return fingerprint(text);
+    }
+
+    /* What THIS page is running. The worker caches every shell response it
+       serves, so the cached copy is the document that loaded — even when it
+       was served stale because the network failed at launch, which asking
+       the network would get wrong. First visit has no worker yet: ask the
+       network. */
+    async function runningBuild() {
+      try {
+        const hit = await caches.match(location.origin + location.pathname + location.search);
+        if (hit) return fingerprint(await hit.text());
+      } catch (e) {}
+      return null;
+    }
+
+    let baseline = null;
+    async function check() {
+      if (U.checking) return U.ready;
+      U.checking = true; emit();
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) await reg.update().catch(() => {});
+        const served = await servedBuild();
+        if (baseline === null) baseline = served;
+        /* Asked twice: a page whose bytes change on every request (something
+           injecting a nonce, a timestamp) would otherwise reload forever. */
+        else if (served !== baseline && served === await servedBuild()) markReady();
+      } catch (e) { /* offline, or not the app — try again at the next opportunity */ }
+      finally { U.checking = false; U.lastChecked = Date.now(); emit(); }
+      return U.ready;
+    }
+
+    /* Reload, or wait for a moment that costs nothing. */
+    let lastInput = 0, poll = null;
+    ['pointerdown', 'keydown', 'touchstart'].forEach(t =>
+      window.addEventListener(t, () => { lastInput = Date.now(); }, { capture: true, passive: true }));
+
+    function safeNow() {
+      const a = document.activeElement;
+      if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return false;   // typing
+      if (document.querySelector('[data-modal]')) return false;                                      // a sheet is open
+      return Date.now() - lastInput >= IDLE_MS;
+    }
+
+    /* Automatic reloads are rationed: if something is genuinely wrong, a
+       loop is worse than a stale screen. Tapping the pill is never rationed. */
+    function mayAutoReload() {
+      try {
+        const now = Date.now();
+        const recent = JSON.parse(sessionStorage.getItem(GUARD_KEY) || '[]').filter(t => now - t < 10 * 60_000);
+        return recent.length < 3 && !(recent.length && now - recent[recent.length - 1] < 15_000);
+      } catch (e) { return false; }   // can't ration → don't automate
+    }
+
+    function reloadNow(auto) {
+      if (auto && !mayAutoReload()) return;
+      try {
+        const now = Date.now();
+        const recent = JSON.parse(sessionStorage.getItem(GUARD_KEY) || '[]').filter(t => now - t < 10 * 60_000);
+        sessionStorage.setItem(GUARD_KEY, JSON.stringify([...recent, now]));
+      } catch (e) {}
+      location.reload();
+    }
+
+    function tryApply() { if (U.ready && safeNow()) reloadNow(true); }
+    function markReady() {
+      if (!U.ready) { U.ready = true; emit(); }
+      tryApply();
+      if (!poll) poll = setInterval(tryApply, 3_000);
+    }
+
+    /* A new worker took control. The first install claiming the page isn't an update. */
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) markReady(); });
+
+    window.addEventListener('load', async () => {
+      /* updateViaCache 'none': never serve sw.js (or what it imports) from the HTTP cache. */
+      try { await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }); }
+      catch (err) { console.warn('SW registration failed:', err); }
+      try { baseline = (await runningBuild()) ?? (await servedBuild()); } catch (e) {}
     });
-  }
+
+    let last = Date.now();
+    const maybeCheck = () => {
+      if (document.visibilityState !== 'visible' || Date.now() - last < THROTTLE_MS) return;
+      last = Date.now();
+      check();
+    };
+    document.addEventListener('visibilitychange', maybeCheck);
+    window.addEventListener('focus', maybeCheck);
+    window.addEventListener('pageshow', maybeCheck);
+    window.addEventListener('online', maybeCheck);
+    setInterval(() => { last = 0; maybeCheck(); }, CHECK_EVERY_MS);
+  })();
 </script>
 </body>
 </html>

@@ -6,3 +6,15 @@
 
 /sw.js
   Cache-Control: no-cache, no-store, must-revalidate
+
+# The shell must always revalidate: the app compares the served page with the
+# one it is running (see the update script at the bottom of index.html), and
+# that only works if a deploy is visible on the very next request.
+/
+  Cache-Control: no-cache
+
+/index.html
+  Cache-Control: no-cache
+
+/manifest.json
+  Cache-Control: no-cache
