@@ -13,9 +13,8 @@ const WINTER = { y: 2026, mo: 1,  d: 14, dow: 3, key: '2026-01-14' };
 
 const EVERY_DAY = [0, 1, 2, 3, 4, 5, 6];
 const habit = (over = {}) => ({ id: 'h1', name: 'Read Quran', days: EVERY_DAY, reminder: '07:00', ...over });
-/* The two automatic alert families are opt-in (see SEED().ui in index.html),
-   so a test about one has to switch it on. */
-const BLOCK_ALERTS = { blockAlerts: true };
+/* Both alert families are opt-in (see SEED().ui in index.html). Prayer times
+   are one switch; a calendar item carries its own `alerts: true`. */
 const SALAH_ALERTS = { salahAlerts: true };
 const build = (state, parts = SUMMER) => buildTodaysSchedule(state, TZ, parts);
 const find  = (schedule, id) => schedule.find(n => n.id === id);
@@ -33,7 +32,7 @@ test.describe('notification plan — timing', () => {
   });
 
   test('a block crossing midnight anchors its end to the next day', async () => {
-    const state = { ui: BLOCK_ALERTS, blocks: [{ id: 'b1', title: 'Night shift', every: EVERY_DAY, start: 22 * 60, end: 6 * 60 }] };
+    const state = { blocks: [{ id: 'b1', title: 'Night shift', every: EVERY_DAY, start: 22 * 60, end: 6 * 60, alerts: true }] };
     const { schedule } = await build(state);
 
     // Starts 22:00 BST = 21:00 UTC; the 06:00 end belongs to the 16th.
@@ -104,10 +103,12 @@ test.describe('notification plan — suppression', () => {
   });
 });
 
-test.describe('notification plan — automatic alerts are opt-in', () => {
-  /* Prayer times and the countdown before every calendar block fire whether
-     or not anyone asked for them, so they are off until chosen. Reminders
-     the user set themselves are a different thing and are never gated. */
+test.describe('notification plan — optional alerts', () => {
+  /* Two things fire whether or not anyone asked: prayer times, and the
+     countdown before a calendar item. Both are off until chosen — prayer
+     times with one switch, calendar items one by one (`alerts: true` on the
+     block). Reminders the user set themselves are a different thing and are
+     never gated. */
   const LOC = { lat: 51.5, lon: -0.12 };
   const TIMINGS = { Fajr: '03:12 (BST)', Sunrise: '04:58 (BST)', Dhuhr: '13:05 (BST)', Asr: '17:20 (BST)', Maghrib: '21:10 (BST)', Isha: '23:00 (BST)' };
   const autoIds = (schedule) => schedule.map(n => n.id).filter(id => /^(salah-|forbidden-|b-)/.test(id));
@@ -123,10 +124,10 @@ test.describe('notification plan — automatic alerts are opt-in', () => {
     try { await fn(calls); } finally { globalThis.fetch = realFetch; }
   };
 
-  const BLOCKS = [{ id: 'b1', title: 'Deep work', every: EVERY_DAY, start: 9 * 60, end: 10 * 60 }];
+  const block = (over = {}) => ({ id: 'b1', title: 'Deep work', every: EVERY_DAY, start: 9 * 60, end: 10 * 60, ...over });
 
-  test('a plan with neither switched on has no prayer or block alerts', withTimings(async (calls) => {
-    const state = { habits: [habit()], blocks: BLOCKS, ui: { salahLoc: LOC } };
+  test('nothing is on by default: no prayer alerts, no block alerts, no prayer-time request', withTimings(async (calls) => {
+    const state = { habits: [habit()], blocks: [block()], ui: { salahLoc: LOC } };
     const { schedule, ok } = await build(state);
     expect(autoIds(schedule)).toEqual([]);
     expect(ok).toBe(true);
@@ -136,13 +137,13 @@ test.describe('notification plan — automatic alerts are opt-in', () => {
     expect(find(schedule, 'h-h1')).toBeDefined();
   }));
 
-  test('only a literal true switches them on', withTimings(async () => {
-    const state = { blocks: BLOCKS, ui: { salahLoc: LOC, salahAlerts: 'yes', blockAlerts: 1 } };
+  test('only a literal true switches anything on', withTimings(async () => {
+    const state = { blocks: [block({ alerts: 'yes' }), block({ id: 'b2', alerts: 1 })], ui: { salahLoc: LOC, salahAlerts: 'yes' } };
     expect(autoIds((await build(state)).schedule)).toEqual([]);
   }));
 
   test('prayer alerts alone: every prayer, its 10 and 3 minute warnings, and the forbidden windows', withTimings(async () => {
-    const state = { blocks: BLOCKS, ui: { ...SALAH_ALERTS, salahLoc: LOC } };
+    const state = { blocks: [block()], ui: { ...SALAH_ALERTS, salahLoc: LOC } };
     const ids = autoIds((await build(state)).schedule);
     for (const p of ['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha']) {
       expect(ids).toContain(`salah-${p}`);
@@ -150,28 +151,69 @@ test.describe('notification plan — automatic alerts are opt-in', () => {
       expect(ids).toContain(`salah-${p}-3`);
     }
     expect(ids).toEqual(expect.arrayContaining(['forbidden-sunrise', 'forbidden-zawal', 'forbidden-asr']));
+    // The block did not ask, so it does not alert just because prayers do.
     expect(ids.filter(id => id.startsWith('b-'))).toEqual([]);
   }));
 
-  test('block alerts alone: no prayer alerts, and no prayer-time request', withTimings(async (calls) => {
-    const state = { blocks: BLOCKS, ui: { ...BLOCK_ALERTS, salahLoc: LOC } };
+  test('a block that asks gets its three alerts — and prayers stay silent without their own switch', withTimings(async (calls) => {
+    const state = { blocks: [block({ alerts: true })], ui: { salahLoc: LOC } };
     const ids = autoIds((await build(state)).schedule);
     expect(ids).toEqual(['b-b1-15', 'b-b1-5', 'b-b1-end']);
     expect(calls.n).toBe(0);
   }));
 
-  test('with block alerts off, a habit that has a slot keeps its own reminder', async () => {
+  test('each item decides for itself', async () => {
+    const { schedule } = await build({
+      blocks: [
+        block({ id: 'loud',   title: 'Meeting',   alerts: true }),
+        block({ id: 'quiet',  title: 'Deep work', alerts: false }),
+        block({ id: 'silent', title: 'Admin' }),                       // never set at all
+      ],
+    });
+    const ids = autoIds(schedule);
+    expect(ids).toEqual(['b-loud-15', 'b-loud-5', 'b-loud-end']);
+    expect(find(schedule, 'b-loud-15').body).toBe('Meeting');
+  });
+
+  test('the same goes for a habit\'s slot and a task\'s slot', async () => {
+    const { schedule } = await build({
+      habits: [habit({ reminder: null }), habit({ id: 'h2', name: 'Read', reminder: null })],
+      tasks:  [{ id: 't1', title: 'Report', done: false }, { id: 't2', title: 'Taxes', done: false }],
+      blocks: [
+        { id: 'b-h1', habitId: 'h1', start: 6 * 60, end: 6 * 60 + 20, alerts: true },
+        { id: 'b-h2', habitId: 'h2', start: 7 * 60, end: 7 * 60 + 20, alerts: false },
+        { id: 'b-t1', taskId: 't1', date: '2026-07-15', start: 14 * 60, end: 15 * 60, alerts: true },
+        { id: 'b-t2', taskId: 't2', date: '2026-07-15', start: 16 * 60, end: 17 * 60 },
+      ],
+    });
+    const ids = autoIds(schedule);
+    expect(ids.filter(id => id.startsWith('b-b-h1'))).toHaveLength(3);
+    expect(ids.filter(id => id.startsWith('b-b-t1'))).toHaveLength(3);
+    expect(ids.filter(id => id.startsWith('b-b-h2'))).toEqual([]);
+    expect(ids.filter(id => id.startsWith('b-b-t2'))).toEqual([]);
+  });
+
+  test('a habit whose slot does not alert keeps its own reminder', async () => {
     /* The reminder normally stands aside because the slot's alerts cover it.
-       With those off nothing covers it, and it would be silent entirely. */
+       If the slot is silent nothing covers it, and it would never fire. */
     const { schedule } = await build({
       habits: [habit({ reminder: '07:00' })],
-      blocks: [{ id: 'b-h1', habitId: 'h1', start: 6 * 60, end: 6 * 60 + 20 }],
+      blocks: [{ id: 'b-h1', habitId: 'h1', start: 6 * 60, end: 6 * 60 + 20, alerts: false }],
     });
     expect(find(schedule, 'h-h1')).toBeDefined();
     expect(autoIds(schedule)).toEqual([]);
   });
 
-  test('with block alerts off, a task booked for today keeps its own reminder', async () => {
+  test('a habit whose slot DOES alert hands its reminder over', async () => {
+    const { schedule } = await build({
+      habits: [habit({ reminder: '07:00' })],
+      blocks: [{ id: 'b-h1', habitId: 'h1', start: 6 * 60, end: 6 * 60 + 20, alerts: true }],
+    });
+    expect(find(schedule, 'h-h1')).toBeUndefined();
+    expect(find(schedule, 'b-b-h1-15')).toBeDefined();
+  });
+
+  test('a task booked today whose slot does not alert keeps its own reminder', async () => {
     const { schedule } = await build({
       tasks: [{ id: 't1', title: 'Finish the report', done: false, reminder: '2026-07-15T09:00' }],
       blocks: [{ id: 'b-t1', taskId: 't1', date: '2026-07-15', start: 14 * 60, end: 15 * 60 }],
@@ -180,7 +222,7 @@ test.describe('notification plan — automatic alerts are opt-in', () => {
     expect(autoIds(schedule)).toEqual([]);
   });
 
-  test('goal and fasting reminders are not part of either switch', async () => {
+  test('goal and fasting reminders are not part of either', async () => {
     const state = {
       goals: [{ id: 'g1', title: 'Ship it', horizon: '1year', status: 'active' }],
       ui: { goalsReminder: { on: true, time: '07:00' } },
@@ -297,7 +339,7 @@ test.describe('notification plan — delivery safety', () => {
   test('the plan is a pure function of its inputs — rebuilding is safe', async () => {
     // Every tick rebuilds from scratch and compares; drift here would rewrite
     // D1 every minute and could resurrect delivered entries.
-    const state = { habits: [habit()], ui: BLOCK_ALERTS, blocks: [{ id: 'b1', title: 'Gym', every: EVERY_DAY, start: 540, end: 600 }] };
+    const state = { habits: [habit()], blocks: [{ id: 'b1', title: 'Gym', every: EVERY_DAY, start: 540, end: 600, alerts: true }] };
     const a = (await build(state)).schedule;
     const b = (await build(state)).schedule;
     expect(b).toEqual(a);
@@ -335,8 +377,7 @@ test.describe('habits on the calendar', () => {
 
   const slotted = (over = {}) => ({
     habits: [habit({ reminder: null })],
-    blocks: [{ id: 'b-h1', habitId: 'h1', start: 6 * 60, end: 6 * 60 + 20 }],
-    ui: BLOCK_ALERTS,
+    blocks: [{ id: 'b-h1', habitId: 'h1', start: 6 * 60, end: 6 * 60 + 20, alerts: true }],
     ...over,
   });
 
@@ -381,8 +422,7 @@ test.describe('habits on the calendar', () => {
   test('an ordinary block is unaffected by any of this', async () => {
     const { schedule } = await build({
       habits: [],
-      ui: BLOCK_ALERTS,
-      blocks: [{ id: 'b-work', title: 'Deep work', pillar: 'tech', start: 540, end: 660, every: [0,1,2,3,4,5,6] }],
+      blocks: [{ id: 'b-work', title: 'Deep work', pillar: 'tech', start: 540, end: 660, every: [0,1,2,3,4,5,6], alerts: true }],
       logs: { '2026-07-15': { 'b-work': 1 } },  // not a habit id; must not silence it
     });
     expect(find(schedule, 'b-b-work-15').body).toBe('Deep work');
@@ -420,8 +460,7 @@ test.describe('tasks on the calendar', () => {
   const task = (over = {}) => ({ id: 't1', title: 'Finish the report', listId: 'l-work', done: false, ...over });
   const booked = (over = {}) => ({
     tasks: [task()],
-    blocks: [{ id: 'b-t1', taskId: 't1', date: '2026-07-15', start: 14 * 60, end: 15 * 60 }],
-    ui: BLOCK_ALERTS,
+    blocks: [{ id: 'b-t1', taskId: 't1', date: '2026-07-15', start: 14 * 60, end: 15 * 60, alerts: true }],
     ...over,
   });
 

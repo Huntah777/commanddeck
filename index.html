@@ -1610,8 +1610,9 @@ function useSalahWeek(dayKeys, method, school, loc, offsets) {
    Being a real block is the point: the timeline, the overlap layout and
    — the reason for the whole feature — the 15-minutes-before,
    5-minutes-before and 5-minutes-from-the-end alerts all already work
-   on blocks. A scheduled habit inherits all of it, and its own optional
-   reminder time stops being necessary.
+   on blocks. A scheduled habit can inherit all of it, and when its slot
+   alerts (`alerts: true`, chosen per item) its own optional reminder time
+   stops being necessary.
 
    MIRRORED in push-worker/index.js, which rebuilds the same plan
    server-side and must reach identical conclusions. Change both.
@@ -2330,12 +2331,14 @@ const SEED = () => ({
      judged by the model. See functions/api/parse.js.
      { id, name, aliases: [], weight: 1..5, modifiedAt } */
   people: [],
-  /* salahAlerts / blockAlerts: the two AUTOMATIC alert families — every
-     prayer time, and every calendar block's 15/5-minute countdown. Off
-     until chosen: they fire whether or not you asked for anything, which is
-     what made them noise. Reminders you set yourself (habit, task, goal,
-     fasting) are not gated by these. */
-  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahAlerts: false, blockAlerts: false, salahMethod: 3, salahSchool: 0, salahLoc: null, salahOffsets: { Fajr: 0, Dhuhr: 0, Asr: 0, Maghrib: 0, Isha: 0 }, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' }, fastReminder: { ...FAST_REMINDER_DEFAULTS } },
+  /* salahAlerts: the one AUTOMATIC alert family that is a single switch —
+     every prayer time, its warnings and the forbidden windows. Off until
+     chosen: it fires whether or not you asked for anything, which is what
+     made it noise. Calendar items are the other family and are not here at
+     all: each block, habit slot and task slot carries its own `alerts` flag
+     (see buildPlan). Reminders you set yourself (habit, task, goal, fasting)
+     are not gated by either. */
+  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahAlerts: false, salahMethod: 3, salahSchool: 0, salahLoc: null, salahOffsets: { Fajr: 0, Dhuhr: 0, Asr: 0, Maghrib: 0, Isha: 0 }, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' }, fastReminder: { ...FAST_REMINDER_DEFAULTS } },
   admin: {
     pillars: {},          /* { [id]: { name?, color? } } */
     quads: {},            /* { [id]: { title?, sub?, hint? } } */
@@ -2738,7 +2741,6 @@ function buildPlan(state) {
   };
 
   const salahAlerts = state.ui?.salahAlerts === true;
-  const blockAlerts = state.ui?.blockAlerts === true;
 
   /* Salah (prayer) times — today's cached timetable, with the user's
      per-prayer offsets applied (the cache stores the API's raw times).
@@ -2775,15 +2777,18 @@ function buildPlan(state) {
     }
   } catch(e) {}
 
-  /* Calendar blocks — 3 notifications each, when block alerts are on. A
-     block standing in for a habit or a task is skipped once that habit or
-     task is ticked: the alerts exist to get it done, and buzzing about
-     something already done is how people learn to ignore the buzzing. */
+  /* Calendar blocks — 3 notifications each, for the ones that ask for them
+     (`alerts: true`, set per item in whichever editor made the block; see
+     BlockAlertToggle). A block standing in for a habit or a task is skipped
+     once that habit or task is ticked: the alerts exist to get it done, and
+     buzzing about something already done is how people learn to ignore the
+     buzzing. */
   const doneToday = state.logs?.[todayKey()] || {};
   /* The day in the user's timezone, matching `dow` — a task block names
      the date it falls on, and the device's own clock may be elsewhere. */
   const zonedKey = `${y}-${String(mo).padStart(2,'0')}-${String(dayOfMonth).padStart(2,'0')}`;
-  if (blockAlerts) resolveBlocks(state).forEach(b => {
+  resolveBlocks(state).forEach(b => {
+    if (b.alerts !== true) return;
     if (!blockOnDay(b, zonedKey, dow)) return;
     if (blockDone(b, doneToday)) return;
     const s = atMins(b.start);
@@ -2795,13 +2800,12 @@ function buildPlan(state) {
   });
 
   /* Habit reminders — the fallback for a habit with no slot in the day.
-     With block alerts on, one that has been put on the calendar is already
-     covered by the three alerts above, and firing both would mean four
-     notifications for one habit. With them off nothing covers it, so its
-     own reminder has to stand — otherwise it would get no alert at all. */
-  const scheduled = blockAlerts
-    ? new Set(resolveBlocks(state).filter(b => b.habitId && b.every.includes(dow)).map(b => b.habitId))
-    : new Set();
+     A habit whose slot alerts is already covered by the three alerts above,
+     and firing both would mean four notifications for one habit. A slot that
+     doesn't alert covers nothing, so the habit's own reminder has to stand —
+     otherwise it would get no alert at all. */
+  const scheduled = new Set(resolveBlocks(state)
+    .filter(b => b.alerts === true && b.habitId && b.every.includes(dow)).map(b => b.habitId));
   (state.habits || []).forEach(h => {
     if (!h.reminder || !h.days.includes(dow) || doneToday[h.id]) return;
     if (scheduled.has(h.id)) return;
@@ -2809,14 +2813,13 @@ function buildPlan(state) {
     push(`h-${h.id}`, 'Habit reminder', h.name, atHm(hr, mn));
   });
 
-  /* Task reminders. With block alerts on, suppressed only when the task's
-     calendar slot is on the same day the reminder would fire — that day
-     already carries the three block alerts, and four notifications for one
-     task is how you teach someone to swipe them away. A reminder set for a
-     different day is a different intention and stands. */
-  const taskSlotDate = new Map(blockAlerts
-    ? resolveBlocks(state).filter(b => b.taskId && b.date).map(b => [b.taskId, b.date])
-    : []);
+  /* Task reminders. Suppressed only when the task's calendar slot alerts AND
+     is on the same day the reminder would fire — that day already carries
+     the three block alerts, and four notifications for one task is how you
+     teach someone to swipe them away. A reminder set for a different day is
+     a different intention and stands, and so is one whose slot is silent. */
+  const taskSlotDate = new Map(resolveBlocks(state)
+    .filter(b => b.alerts === true && b.taskId && b.date).map(b => [b.taskId, b.date]));
   (state.tasks || []).forEach(t => {
     if (!t.reminder || t.done) return;
     if (taskSlotDate.get(t.id) === String(t.reminder).slice(0, 10)) return;
@@ -5222,6 +5225,43 @@ function MonthCalendar({ state, sel, onOpenDay }) {
 /* ------------------------------------------------------------------
    BLOCK MODAL
 ------------------------------------------------------------------- */
+/* One calendar item's own alert switch. Calendar alerts used to be a single
+   global setting, which meant either the whole day buzzed or none of it did;
+   what you actually want is "tell me before THIS one". The flag lives on the
+   block record (`alerts`) so it follows the item wherever it is edited from
+   and syncs with it. `compact` is the inline version for the pickers, which
+   have no room for the sentence under it. */
+function BlockAlertToggle({ on, onChange, notifOn = true, compact = false }) {
+  if (compact) {
+    return (
+      <button type="button" onClick={() => onChange(!on)} aria-pressed={on} data-testid="block-alerts"
+        title="Alert 15 and 5 minutes before, and 5 before the end"
+        className={`btn px-2 py-1 rounded text-[10px] font-mono tracking-wider border ${on ? 'border-strategy/60 bg-strategy/10 text-strategy' : 'border-ink-700 text-bone-400'}`}>
+        ALERT {on ? 'ON' : 'OFF'}
+      </button>
+    );
+  }
+  return (
+    <div>
+      <button type="button" onClick={() => onChange(!on)} aria-pressed={on} data-testid="block-alerts"
+        className="btn flex items-center gap-2.5 text-left">
+        <span className="tick" style={on ? { background: '#f59e0b', borderColor: '#f59e0b' } : {}}>
+          {on && <I.check className="w-3 h-3" style={{ color: '#0a0a0b' }}/>}
+        </span>
+        <span className="text-sm text-bone-100">Alert me</span>
+      </button>
+      <div className="text-[10px] text-bone-400/80 mt-1.5 leading-snug">
+        15 min before · 5 min before · 5 min before the end — and nothing once you've ticked it off.
+      </div>
+      {on && !notifOn && (
+        <div className="text-[10px] text-strategy mt-1 leading-snug">
+          Notifications are off — turn them on in Admin → Alerts for this to reach you.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDow }) {
   const isNew = !block;
   const [title, setTitle] = useState(block?.title || '');
@@ -5230,6 +5270,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
   const [end,   setEnd]   = useState(toHM(block?.end   ?? adding?.end   ?? 600));
   const [days,  setDays]  = useState(block?.every || [currentDow]);
   const [date,  setDate]  = useState(block?.date || '');
+  const [alerts, setAlerts] = useState(block?.alerts === true);
   const [error, setError] = useState('');
 
   const toggleDay = (d) => setDays(ds => ds.includes(d) ? ds.filter(x=>x!==d) : [...ds, d].sort());
@@ -5247,7 +5288,10 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
     const startM = fromHM(start), endM = fromHM(end);
     if (endM === startM) { setError("Start and end can't be the same time."); return; }
     if (habit) {
-      onSave({ ...block, start: startM, end: endM, modifiedAt: Date.now() });
+      /* From the parts the block actually owns, like the task branch below —
+         spreading the resolved block writes the habit's name, pillar and days
+         onto it, which is the stale twin this arrangement exists to prevent. */
+      onSave({ id: block.id, habitId: block.habitId, start: startM, end: endM, alerts, modifiedAt: Date.now() });
       return;
     }
     if (task) {
@@ -5255,7 +5299,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
       /* Written from the parts the block actually owns, not by spreading
          the resolved one — the title and list on `block` were read off
          the task and writing them back is how a stale twin is born. */
-      onSave({ id: block.id, taskId: block.taskId, date, start: startM, end: endM, modifiedAt: Date.now() });
+      onSave({ id: block.id, taskId: block.taskId, date, start: startM, end: endM, alerts, modifiedAt: Date.now() });
       return;
     }
     if (!title.trim()) { setError('Give this block a title.'); return; }
@@ -5264,6 +5308,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
       title: title.trim(), pillar,
       start: startM, end: endM,
       every: days.length ? days : [0,1,2,3,4,5,6],
+      alerts,
       modifiedAt: Date.now(),
     });
   };
@@ -5296,10 +5341,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
           </Field>
         </div>
         <Field label="Notifications">
-          <div className="text-sm text-bone-400 flex items-start gap-2">
-            <span className="text-strategy">✓</span>
-            <span>15 min before · 5 min before · 5 min before the end — and nothing at all once you've ticked it off.</span>
-          </div>
+          <BlockAlertToggle on={alerts} onChange={setAlerts} notifOn={!!state.ui?.notif}/>
         </Field>
         {error && <div className="text-xs text-combat">{error}</div>}
         <div className="flex justify-between gap-2 pt-2">
@@ -5347,10 +5389,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
           </Field>
         </div>
         <Field label="Notifications">
-          <div className="text-sm text-bone-400 flex items-start gap-2">
-            <span className="text-strategy">✓</span>
-            <span>15 min before · 5 min before · 5 min before the end — and nothing at all once you've ticked it off.</span>
-          </div>
+          <BlockAlertToggle on={alerts} onChange={setAlerts} notifOn={!!state.ui?.notif}/>
         </Field>
         {error && <div className="text-xs text-combat">{error}</div>}
         <div className="flex justify-between gap-2 pt-2">
@@ -5405,10 +5444,7 @@ function BlockModal({ block, adding, state, onClose, onSave, onDelete, currentDo
         </div>
       </Field>
       <Field label="Notifications">
-        <div className="text-sm text-bone-400 flex items-center gap-2">
-          <span className="text-strategy">✓</span>
-          15 min before start · 5 min before start · 5 min before end
-        </div>
+        <BlockAlertToggle on={alerts} onChange={setAlerts} notifOn={!!state.ui?.notif}/>
       </Field>
       {error && <div className="text-xs text-combat">{error}</div>}
       <div className="flex justify-between gap-2 pt-2">
@@ -5736,6 +5772,7 @@ function TaskSlotPicker({ task, slot, defaultDate, onClose, onSave }) {
   const [on,  setOn]  = useState(slot?.date || task.due || defaultDate || todayKey());
   const [at,  setAt]  = useState(slot ? toHM(slot.start) : '09:00');
   const [len, setLen] = useState(slot ? Math.max(5, slot.end - slot.start) : 30);
+  const [alerts, setAlerts] = useState(slot?.alerts === true);
 
   return (
     <div data-testid="task-slot-picker" className="mt-1 mb-1.5 mx-1.5 p-2 rounded-lg border border-ink-700 bg-ink-800/50 fadeUp">
@@ -5752,10 +5789,11 @@ function TaskSlotPicker({ task, slot, defaultDate, onClose, onSave }) {
           {!TASK_SLOT_MINS.includes(len) && <option value={len}>{len}m</option>}
         </select>
         <button disabled={!on}
-          onClick={()=>onSave({ date: on, start: fromHM(at), end: (fromHM(at) + len) % 1440 })}
+          onClick={()=>onSave({ date: on, start: fromHM(at), end: (fromHM(at) + len) % 1440, alerts })}
           className={`btn px-2 py-1 rounded text-[10px] font-mono tracking-wider bg-strategy text-ink-950 font-semibold ${on ? '' : 'opacity-40'}`}>
           {slot ? 'MOVE' : 'ADD'}
         </button>
+        <BlockAlertToggle compact on={alerts} onChange={setAlerts}/>
         {slot && (
           <button onClick={()=>onSave(null)}
             className="btn px-2 py-1 rounded text-[10px] font-mono tracking-wider border border-ink-700 text-bone-400 hover:text-combat">
@@ -5767,7 +5805,7 @@ function TaskSlotPicker({ task, slot, defaultDate, onClose, onSave }) {
         </button>
       </div>
       <div className="text-[9px] text-bone-400/70 mt-1.5 leading-snug">
-        Sits on that day's timeline. Countdown alerts are optional — Admin → Alerts.
+        Sits on that day's timeline. Alert: 15 and 5 minutes before, and 5 before the end.
       </div>
     </div>
   );
@@ -5791,6 +5829,7 @@ function TaskEditModal({ t, state, setState, onClose }) {
   const [slotOn,  setSlotOn]  = useState(existingSlot?.date || t.due || todayKey());
   const [slotAt,  setSlotAt]  = useState(existingSlot ? toHM(existingSlot.start) : '');
   const [slotFor, setSlotFor] = useState(existingSlot ? Math.max(5, existingSlot.end - existingSlot.start) : 30);
+  const [slotAlerts, setSlotAlerts] = useState(existingSlot?.alerts === true);
 
   const save = () => {
     setState(s => {
@@ -5805,7 +5844,7 @@ function TaskEditModal({ t, state, setState, onClose }) {
       /* The slot travels with the save so the task and its block can never
          be written apart. null means "not on the calendar". */
       return saveTaskWithSlot(s, next,
-        start === null ? null : { date: day, start, end: (start + slotFor) % 1440 });
+        start === null ? null : { date: day, start, end: (start + slotFor) % 1440, alerts: slotAlerts });
     });
     onClose();
   };
@@ -5837,9 +5876,9 @@ function TaskEditModal({ t, state, setState, onClose }) {
           </select>
         </Field>
       </div>
-      {/* A task with a slot in the day is a block on the timeline, and
-          picks up the block alerts — 15 and 5 minutes before, 5 before
-          the end — without a reminder of its own. */}
+      {/* A task with a slot in the day is a block on the timeline, and can
+          carry the block alerts — 15 and 5 minutes before, 5 before the end
+          — in place of a reminder of its own. Per item: see BlockAlertToggle. */}
       <Field label="On the calendar (optional)">
         <div className="flex items-center gap-2 flex-wrap">
           <input type="date" value={slotOn} aria-label="Calendar day"
@@ -5861,9 +5900,14 @@ function TaskEditModal({ t, state, setState, onClose }) {
         </div>
         <div className="text-[10px] text-bone-400/80 mt-1.5">
           {slotAt
-            ? 'Sits on that day alongside blocks, habits and prayer times, and alerts 15 and 5 minutes before.'
+            ? 'Sits on that day alongside blocks, habits and prayer times.'
             : 'When are you actually going to do it? Give it a time and it shows up on your day.'}
         </div>
+        {slotAt && (
+          <div className="mt-2.5">
+            <BlockAlertToggle on={slotAlerts} onChange={setSlotAlerts} notifOn={!!state.ui?.notif}/>
+          </div>
+        )}
       </Field>
       <Field label="Remind me (optional)">
         <div className="flex items-center gap-2">
@@ -5889,6 +5933,7 @@ function TaskEditModal({ t, state, setState, onClose }) {
 function HabitSlotPicker({ habit, slot, onClose, onSave }) {
   const [at,  setAt]  = useState(slot ? toHM(slot.start) : '07:00');
   const [len, setLen] = useState(slot ? Math.max(5, slot.end - slot.start) : 30);
+  const [alerts, setAlerts] = useState(slot?.alerts === true);
 
   return (
     <div data-testid="habit-slot-picker" className="mt-1 mb-1.5 mx-1.5 p-2 rounded-lg border border-ink-700 bg-ink-800/50 fadeUp">
@@ -5901,10 +5946,11 @@ function HabitSlotPicker({ habit, slot, onClose, onSave }) {
           {HABIT_SLOT_MINS.map(m => <option key={m} value={m}>{m}m</option>)}
           {!HABIT_SLOT_MINS.includes(len) && <option value={len}>{len}m</option>}
         </select>
-        <button onClick={()=>onSave({ start: fromHM(at), end: (fromHM(at) + len) % 1440 })}
+        <button onClick={()=>onSave({ start: fromHM(at), end: (fromHM(at) + len) % 1440, alerts })}
           className="btn px-2 py-1 rounded text-[10px] font-mono tracking-wider bg-strategy text-ink-950 font-semibold">
           {slot ? 'MOVE' : 'ADD'}
         </button>
+        <BlockAlertToggle compact on={alerts} onChange={setAlerts}/>
         {slot && (
           <button onClick={()=>onSave(null)}
             className="btn px-2 py-1 rounded text-[10px] font-mono tracking-wider border border-ink-700 text-bone-400 hover:text-combat">
@@ -5916,7 +5962,7 @@ function HabitSlotPicker({ habit, slot, onClose, onSave }) {
         </button>
       </div>
       <div className="text-[9px] text-bone-400/70 mt-1.5 leading-snug">
-        Runs on every day this habit is scheduled. Countdown alerts are optional — Admin → Alerts.
+        Runs on every day this habit is scheduled. Alert: 15 and 5 minutes before, and 5 before the end.
       </div>
     </div>
   );
@@ -6773,6 +6819,7 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
   const existingSlot = habit ? slotForHabit(state, habit.id) : null;
   const [slotAt,  setSlotAt]  = useState(existingSlot ? toHM(existingSlot.start) : '');
   const [slotFor, setSlotFor] = useState(existingSlot ? Math.max(5, existingSlot.end - existingSlot.start) : 30);
+  const [slotAlerts, setSlotAlerts] = useState(existingSlot?.alerts === true);
 
   /* Prayer anchor — when set, the calendar slot is computed live from prayer
      times instead of a fixed clock time. Mutually exclusive with slotAt. */
@@ -6793,7 +6840,7 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
         ...(habit?.fard ? { fard: true } : {}) },
       /* When using a prayer anchor the slot is computed dynamically — no
          static block needed. Otherwise pass the manual time as before. */
-      anchor ? null : (start === null ? null : { start, end: (start + slotFor) % 1440 }),
+      anchor ? null : (start === null ? null : { start, end: (start + slotFor) % 1440, alerts: slotAlerts }),
     );
   };
 
@@ -6854,9 +6901,10 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
           <button onClick={()=>setDays([1,4])} className="text-[10px] font-mono tracking-wider text-deen hover:text-bone-100">MON/THU</button>
         </div>
       </Field>
-      {/* A habit with a slot in the day is a block on the timeline, and
-          picks up the block alerts — 15 and 5 minutes before, 5 before
-          the end — without a reminder time of its own. */}
+      {/* A habit with a slot in the day is a block on the timeline, and can
+          carry the block alerts — 15 and 5 minutes before, 5 before the end
+          — in place of a reminder time of its own. Per item: see
+          BlockAlertToggle. */}
       <Field label="On the calendar (optional)">
         {/* Mode toggle */}
         <div className="flex gap-2 mb-2">
@@ -6925,21 +6973,26 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
             </div>
             <div className="text-[10px] text-bone-400/80 mt-1.5">
               {slotAt
-                ? 'Appears on the timeline every day this habit runs, and alerts 15 and 5 minutes before — no reminder time needed.'
+                ? 'Appears on the timeline every day this habit runs.'
                 : 'Give it a time and it shows up on your day, alongside blocks and prayer times.'}
             </div>
+            {slotAt && (
+              <div className="mt-2.5">
+                <BlockAlertToggle on={slotAlerts} onChange={setSlotAlerts} notifOn={!!state.ui?.notif}/>
+              </div>
+            )}
           </div>
         )}
       </Field>
-      <Field label={slotAt ? 'Daily reminder (covered by the calendar slot)' : 'Daily reminder (optional)'}>
+      <Field label={slotAt && slotAlerts ? 'Daily reminder (covered by the calendar slot)' : 'Daily reminder (optional)'}>
         <div className="flex items-center gap-2 flex-wrap">
           <input type="time" value={reminder} aria-label="Daily reminder"
             onChange={e=>setReminder(e.target.value)}
-            disabled={!!slotAt}
-            className={'bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono min-w-0 ' + (slotAt ? 'opacity-40' : '')}/>
-          {reminder && !slotAt && <button onClick={()=>setReminder('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat shrink-0">CLEAR</button>}
-          {!reminder && !slotAt && <span className="text-[10px] font-mono text-bone-400">Off</span>}
-          {slotAt && <span className="text-[10px] font-mono text-bone-400">The block's alerts cover this</span>}
+            disabled={!!slotAt && slotAlerts}
+            className={'bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 font-mono min-w-0 ' + (slotAt && slotAlerts ? 'opacity-40' : '')}/>
+          {reminder && !(slotAt && slotAlerts) && <button onClick={()=>setReminder('')} className="text-[10px] font-mono tracking-wider text-bone-400 hover:text-combat shrink-0">CLEAR</button>}
+          {!reminder && !(slotAt && slotAlerts) && <span className="text-[10px] font-mono text-bone-400">Off</span>}
+          {slotAt && slotAlerts && <span className="text-[10px] font-mono text-bone-400">The block's alerts cover this</span>}
         </div>
       </Field>
       {error && <div className="text-xs text-combat">{error}</div>}
@@ -8040,16 +8093,17 @@ function NotificationsCard({ state, setState }) {
     : perm === 'denied'
     ? "Blocked — enable in your browser's site settings, then tap Recheck."
     : enabled
-    ? 'Active · the reminders you set, plus any automatic alerts you switch on below — even when the app is closed.'
-    : 'Enable to get the reminders you set, even when the app is closed. Automatic alerts are off until you choose them.';
+    ? 'Active · the reminders you set, prayer-time alerts if you switch them on, and any calendar item you set to alert — even when the app is closed.'
+    : 'Enable to get the reminders you set, even when the app is closed. Prayer-time and calendar alerts are off until you choose them.';
 
   const setAuto = (patch) => setState(s => ({ ...s, ui: { ...s.ui, ...patch } }));
   const autoAlerts = [
     { key: 'salahAlerts', testid: 'auto-alert-salah', label: 'Prayer times',
       hint: 'At each prayer, 10 and 3 minutes before, and when prayer becomes impermissible.' },
-    { key: 'blockAlerts', testid: 'auto-alert-blocks', label: 'Calendar blocks',
-      hint: '15 and 5 minutes before a block starts, and 5 before it ends.' },
   ];
+  /* Calendar items are not a switch here — each carries its own. Counted off
+     the same resolved list the plan is built from, so it can't disagree. */
+  const alertingItems = resolveBlocks(state).filter(b => b.alerts === true).length;
 
   const btnLabel = perm === 'denied' ? 'Recheck permission' : enabled ? 'Disable notifications' : 'Enable notifications';
 
@@ -8147,7 +8201,7 @@ function NotificationsCard({ state, setState }) {
       )}
 
       <div className="mt-3 pt-3 border-t border-ink-700" data-testid="auto-alerts">
-        <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1.5">AUTOMATIC ALERTS</div>
+        <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1.5">OPTIONAL ALERTS</div>
         <div className="rounded-lg border border-ink-700 divide-y divide-ink-700">
           {autoAlerts.map(a => {
             const on = state.ui?.[a.key] === true;
@@ -8165,6 +8219,16 @@ function NotificationsCard({ state, setState }) {
               </div>
             );
           })}
+          <div className="px-2.5 py-2" data-testid="calendar-alerts-note">
+            <div className="text-xs text-bone-100">Calendar items</div>
+            <div className="text-[10px] text-bone-400 leading-snug">
+              Set on each one — switch on <span className="text-bone-300">Alert me</span> when you add or edit a block,
+              a habit's time or a task's time, and it alerts 15 and 5 minutes before and 5 before the end.{' '}
+              <span data-testid="calendar-alerts-count" className="text-bone-300">
+                {alertingItems === 0 ? 'None are set to alert.' : `${alertingItems} set to alert.`}
+              </span>
+            </div>
+          </div>
         </div>
         <p className="text-[10px] text-bone-400/70 mt-1.5 leading-relaxed">
           Off by default. Habit, task, goal and fasting reminders you've set yourself are not affected.

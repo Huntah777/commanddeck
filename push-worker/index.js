@@ -458,7 +458,6 @@ export async function buildTodaysSchedule(state, tz, parts) {
   /* Opt-in, mirroring index.html's SEED().ui.salahAlerts. Off means no fetch
      at all, not a fetch whose result is thrown away. */
   const salahAlerts = state.ui?.salahAlerts === true;
-  const blockAlerts = state.ui?.blockAlerts === true;
   const loc = state.ui?.salahLoc;
   let salahOk = true;
   if (salahAlerts && loc?.lat != null && loc?.lon != null) {
@@ -506,8 +505,9 @@ export async function buildTodaysSchedule(state, tz, parts) {
     } catch (e) { salahOk = false; console.error('salah fetch failed:', e.message); }
   }
 
-  /* Calendar blocks — 3 notifications each, when block alerts are on. End
-     anchored to next day if the block crosses midnight (end <= start).
+  /* Calendar blocks — 3 notifications each, for the ones that ask for them
+     (`alerts: true`, set per item; mirrors index.html). End anchored to next
+     day if the block crosses midnight (end <= start).
 
      A block carrying a habitId is a habit that has been given a slot in the
      day; its title, pillar and days come off the habit rather than being
@@ -516,7 +516,8 @@ export async function buildTodaysSchedule(state, tz, parts) {
      alerts are skipped — they exist to get it done, and buzzing about
      something already done is how people learn to ignore the buzzing. */
   const doneToday = state.logs?.[todayKey] || {};
-  for (const b of blockAlerts ? resolveBlocks(state) : []) {
+  for (const b of resolveBlocks(state)) {
+    if (b.alerts !== true) continue;
     if (!blockOnDay(b, todayKey, dow)) continue;
     if (b.habitId && doneToday[b.habitId]) continue;
     if (b.taskId && b.done) continue;
@@ -528,13 +529,12 @@ export async function buildTodaysSchedule(state, tz, parts) {
     push(`b-${b.id}-end`, 'Ending in 5 min',    b.title, e -  5 * 60000);
   }
 
-  /* Habit reminders — the fallback for a habit with no slot in the day. With
-     block alerts on, one that is on the calendar is already covered by the
-     three alerts above, and firing both would mean four notifications for one
-     habit. With them off nothing covers it, so its own reminder must stand. */
-  const scheduled = new Set(blockAlerts
-    ? resolveBlocks(state).filter(b => b.habitId && b.every?.includes(dow)).map(b => b.habitId)
-    : []);
+  /* Habit reminders — the fallback for a habit with no slot in the day. One
+     whose slot alerts is already covered by the three alerts above, and
+     firing both would mean four notifications for one habit. A slot that
+     doesn't alert covers nothing, so the habit's own reminder must stand. */
+  const scheduled = new Set(resolveBlocks(state)
+    .filter(b => b.alerts === true && b.habitId && b.every?.includes(dow)).map(b => b.habitId));
   for (const h of state.habits || []) {
     if (!h.reminder || !h.days?.includes(dow) || doneToday[h.id]) continue;
     if (scheduled.has(h.id)) continue;
@@ -542,13 +542,13 @@ export async function buildTodaysSchedule(state, tz, parts) {
     push(`h-${h.id}`, 'Habit reminder', h.name, zonedHmToUtcMs(y, mo, d, hh, mm, tz));
   }
 
-  /* Task reminders — already an absolute timestamp. With block alerts on,
-     suppressed only when the task's calendar slot falls on the same day the
-     reminder would fire: that day already carries the three block alerts. A
-     reminder set for another day is a different intention and stands. */
-  const taskSlotDate = new Map(blockAlerts
-    ? resolveBlocks(state).filter(b => b.taskId && b.date).map(b => [b.taskId, b.date])
-    : []);
+  /* Task reminders — already an absolute timestamp. Suppressed only when the
+     task's calendar slot alerts AND falls on the same day the reminder would
+     fire: that day already carries the three block alerts. A reminder set for
+     another day is a different intention and stands, and so is one whose slot
+     is silent. */
+  const taskSlotDate = new Map(resolveBlocks(state)
+    .filter(b => b.alerts === true && b.taskId && b.date).map(b => [b.taskId, b.date]));
   for (const t of state.tasks || []) {
     if (!t.reminder || t.done) continue;
     if (taskSlotDate.get(t.id) === String(t.reminder).slice(0, 10)) continue;

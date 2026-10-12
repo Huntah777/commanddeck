@@ -93,13 +93,21 @@ test.describe('giving a habit a slot', () => {
     await expect(habitBlock(page).first()).toContainText('Fajr at the masjid');
   });
 
-  test('the reminder time steps aside once there is a slot', async ({ page }) => {
+  test('the reminder time steps aside once the slot alerts', async ({ page }) => {
     // Its three block alerts replace the reminder — offering both invites
     // four notifications for one habit.
-    await boot(page, STATE({ blocks: [{ id: 'b-h-fajr', habitId: 'h-fajr', start: 360, end: 390 }] }));
+    await boot(page, STATE({ blocks: [{ id: 'b-h-fajr', habitId: 'h-fajr', start: 360, end: 390, alerts: true }] }));
     await openEditor(page, 'Fajr in jama');
     await expect(page.getByLabel('Daily reminder')).toBeDisabled();
     await expect(page.getByText("The block's alerts cover this")).toBeVisible();
+  });
+
+  test('but a slot that does not alert leaves the reminder to do its job', async ({ page }) => {
+    // Nothing else would tell you, so the reminder time stays available.
+    await boot(page, STATE({ blocks: [{ id: 'b-h-fajr', habitId: 'h-fajr', start: 360, end: 390 }] }));
+    await openEditor(page, 'Fajr in jama');
+    await expect(page.getByLabel('Daily reminder')).toBeEnabled();
+    await expect(page.getByText("The block's alerts cover this")).toHaveCount(0);
   });
 
   test('taking it off the calendar tombstones the block rather than dropping it', async ({ page }) => {
