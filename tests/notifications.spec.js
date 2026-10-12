@@ -13,6 +13,10 @@ const WINTER = { y: 2026, mo: 1,  d: 14, dow: 3, key: '2026-01-14' };
 
 const EVERY_DAY = [0, 1, 2, 3, 4, 5, 6];
 const habit = (over = {}) => ({ id: 'h1', name: 'Read Quran', days: EVERY_DAY, reminder: '07:00', ...over });
+/* The two automatic alert families are opt-in (see SEED().ui in index.html),
+   so a test about one has to switch it on. */
+const BLOCK_ALERTS = { blockAlerts: true };
+const SALAH_ALERTS = { salahAlerts: true };
 const build = (state, parts = SUMMER) => buildTodaysSchedule(state, TZ, parts);
 const find  = (schedule, id) => schedule.find(n => n.id === id);
 
@@ -29,7 +33,7 @@ test.describe('notification plan — timing', () => {
   });
 
   test('a block crossing midnight anchors its end to the next day', async () => {
-    const state = { blocks: [{ id: 'b1', title: 'Night shift', every: EVERY_DAY, start: 22 * 60, end: 6 * 60 }] };
+    const state = { ui: BLOCK_ALERTS, blocks: [{ id: 'b1', title: 'Night shift', every: EVERY_DAY, start: 22 * 60, end: 6 * 60 }] };
     const { schedule } = await build(state);
 
     // Starts 22:00 BST = 21:00 UTC; the 06:00 end belongs to the 16th.
@@ -100,6 +104,91 @@ test.describe('notification plan — suppression', () => {
   });
 });
 
+test.describe('notification plan — automatic alerts are opt-in', () => {
+  /* Prayer times and the countdown before every calendar block fire whether
+     or not anyone asked for them, so they are off until chosen. Reminders
+     the user set themselves are a different thing and are never gated. */
+  const LOC = { lat: 51.5, lon: -0.12 };
+  const TIMINGS = { Fajr: '03:12 (BST)', Sunrise: '04:58 (BST)', Dhuhr: '13:05 (BST)', Asr: '17:20 (BST)', Maghrib: '21:10 (BST)', Isha: '23:00 (BST)' };
+  const autoIds = (schedule) => schedule.map(n => n.id).filter(id => /^(salah-|forbidden-|b-)/.test(id));
+
+  /* Counts calls so "off" can be shown to mean no request, not a discarded one. */
+  const withTimings = (fn) => async () => {
+    const realFetch = globalThis.fetch;
+    const calls = { n: 0 };
+    globalThis.fetch = async () => {
+      calls.n++;
+      return new Response(JSON.stringify({ data: { timings: TIMINGS } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+    try { await fn(calls); } finally { globalThis.fetch = realFetch; }
+  };
+
+  const BLOCKS = [{ id: 'b1', title: 'Deep work', every: EVERY_DAY, start: 9 * 60, end: 10 * 60 }];
+
+  test('a plan with neither switched on has no prayer or block alerts', withTimings(async (calls) => {
+    const state = { habits: [habit()], blocks: BLOCKS, ui: { salahLoc: LOC } };
+    const { schedule, ok } = await build(state);
+    expect(autoIds(schedule)).toEqual([]);
+    expect(ok).toBe(true);
+    // Off means no request to the prayer-time API at all.
+    expect(calls.n).toBe(0);
+    // The user's own habit reminder is untouched.
+    expect(find(schedule, 'h-h1')).toBeDefined();
+  }));
+
+  test('only a literal true switches them on', withTimings(async () => {
+    const state = { blocks: BLOCKS, ui: { salahLoc: LOC, salahAlerts: 'yes', blockAlerts: 1 } };
+    expect(autoIds((await build(state)).schedule)).toEqual([]);
+  }));
+
+  test('prayer alerts alone: every prayer, its 10 and 3 minute warnings, and the forbidden windows', withTimings(async () => {
+    const state = { blocks: BLOCKS, ui: { ...SALAH_ALERTS, salahLoc: LOC } };
+    const ids = autoIds((await build(state)).schedule);
+    for (const p of ['Fajr', 'Dhuhr', 'Asr', 'Maghrib', 'Isha']) {
+      expect(ids).toContain(`salah-${p}`);
+      expect(ids).toContain(`salah-${p}-10`);
+      expect(ids).toContain(`salah-${p}-3`);
+    }
+    expect(ids).toEqual(expect.arrayContaining(['forbidden-sunrise', 'forbidden-zawal', 'forbidden-asr']));
+    expect(ids.filter(id => id.startsWith('b-'))).toEqual([]);
+  }));
+
+  test('block alerts alone: no prayer alerts, and no prayer-time request', withTimings(async (calls) => {
+    const state = { blocks: BLOCKS, ui: { ...BLOCK_ALERTS, salahLoc: LOC } };
+    const ids = autoIds((await build(state)).schedule);
+    expect(ids).toEqual(['b-b1-15', 'b-b1-5', 'b-b1-end']);
+    expect(calls.n).toBe(0);
+  }));
+
+  test('with block alerts off, a habit that has a slot keeps its own reminder', async () => {
+    /* The reminder normally stands aside because the slot's alerts cover it.
+       With those off nothing covers it, and it would be silent entirely. */
+    const { schedule } = await build({
+      habits: [habit({ reminder: '07:00' })],
+      blocks: [{ id: 'b-h1', habitId: 'h1', start: 6 * 60, end: 6 * 60 + 20 }],
+    });
+    expect(find(schedule, 'h-h1')).toBeDefined();
+    expect(autoIds(schedule)).toEqual([]);
+  });
+
+  test('with block alerts off, a task booked for today keeps its own reminder', async () => {
+    const { schedule } = await build({
+      tasks: [{ id: 't1', title: 'Finish the report', done: false, reminder: '2026-07-15T09:00' }],
+      blocks: [{ id: 'b-t1', taskId: 't1', date: '2026-07-15', start: 14 * 60, end: 15 * 60 }],
+    });
+    expect(find(schedule, 't-t1')).toBeDefined();
+    expect(autoIds(schedule)).toEqual([]);
+  });
+
+  test('goal and fasting reminders are not part of either switch', async () => {
+    const state = {
+      goals: [{ id: 'g1', title: 'Ship it', horizon: '1year', status: 'active' }],
+      ui: { goalsReminder: { on: true, time: '07:00' } },
+    };
+    expect(find((await build(state)).schedule, 'goals-am-year')).toBeDefined();
+  });
+});
+
 test.describe('notification plan — prayer time offsets', () => {
   const withTimings = (fn) => async () => {
     const realFetch = globalThis.fetch;
@@ -113,7 +202,7 @@ test.describe('notification plan — prayer time offsets', () => {
   test('an offset moves the notification, not just the displayed time', withTimings(async () => {
     // The reminder has to land on the minute the app shows, so the worker
     // applies the same offsets the client does.
-    const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Dhuhr: 5 } } };
+    const state = { ui: { ...SALAH_ALERTS, salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Dhuhr: 5 } } };
     const { schedule } = await build(state);
 
     expect(find(schedule, 'salah-Dhuhr').fireAt).toBe(Date.UTC(2026, 6, 15, 12, 10, 0)); // 13:10 BST
@@ -129,7 +218,7 @@ test.describe('notification plan — prayer time offsets', () => {
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
     try {
-      const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Dhuhr: 5 } } };
+      const state = { ui: { ...SALAH_ALERTS, salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Dhuhr: 5 } } };
       const { schedule } = await build(state);
       expect(find(schedule, 'forbidden-sunrise').fireAt).toBe(Date.UTC(2026, 6, 15, 3, 58, 0));
       expect(find(schedule, 'forbidden-zawal').fireAt).toBe(Date.UTC(2026, 6, 15, 12, 5, 0)); // 5 min before offset Dhuhr
@@ -139,14 +228,14 @@ test.describe('notification plan — prayer time offsets', () => {
   });
 
   test('a negative offset works too', withTimings(async () => {
-    const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Fajr: -7 } } };
+    const state = { ui: { ...SALAH_ALERTS, salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Fajr: -7 } } };
     const { schedule } = await build(state);
     expect(find(schedule, 'salah-Fajr').fireAt).toBe(Date.UTC(2026, 6, 15, 2, 5, 0)); // 03:05 BST
   }));
 
   test('an offset cannot push a prayer onto the next day', withTimings(async () => {
     // Isha at 23:50 with a large positive offset must stay on today.
-    const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Isha: 60 } } };
+    const state = { ui: { ...SALAH_ALERTS, salahLoc: { lat: 51.5, lon: -0.12 }, salahOffsets: { Isha: 60 } } };
     const { schedule } = await build(state);
     const isha = find(schedule, 'salah-Isha').fireAt;
     expect(isha).toBeLessThan(Date.UTC(2026, 6, 15, 23, 0, 0)); // still the 15th in UTC terms
@@ -183,7 +272,7 @@ test.describe('notification plan — delivery safety', () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = async () => { throw new Error('network down'); };
     try {
-      const state = { habits: [habit()], ui: { salahLoc: { lat: 51.5, lon: -0.12 } } };
+      const state = { habits: [habit()], ui: { ...SALAH_ALERTS, salahLoc: { lat: 51.5, lon: -0.12 } } };
       const { ok } = await build(state);
       expect(ok).toBe(false);
     } finally { globalThis.fetch = realFetch; }
@@ -196,7 +285,7 @@ test.describe('notification plan — delivery safety', () => {
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
     try {
-      const state = { ui: { salahLoc: { lat: 51.5, lon: -0.12 } } };
+      const state = { ui: { ...SALAH_ALERTS, salahLoc: { lat: 51.5, lon: -0.12 } } };
       const { schedule, ok } = await build(state);
       expect(ok).toBe(true);
       // Aladhan returns local wall-clock time; 03:12 BST is 02:12 UTC.
@@ -208,7 +297,7 @@ test.describe('notification plan — delivery safety', () => {
   test('the plan is a pure function of its inputs — rebuilding is safe', async () => {
     // Every tick rebuilds from scratch and compares; drift here would rewrite
     // D1 every minute and could resurrect delivered entries.
-    const state = { habits: [habit()], blocks: [{ id: 'b1', title: 'Gym', every: EVERY_DAY, start: 540, end: 600 }] };
+    const state = { habits: [habit()], ui: BLOCK_ALERTS, blocks: [{ id: 'b1', title: 'Gym', every: EVERY_DAY, start: 540, end: 600 }] };
     const a = (await build(state)).schedule;
     const b = (await build(state)).schedule;
     expect(b).toEqual(a);
@@ -247,6 +336,7 @@ test.describe('habits on the calendar', () => {
   const slotted = (over = {}) => ({
     habits: [habit({ reminder: null })],
     blocks: [{ id: 'b-h1', habitId: 'h1', start: 6 * 60, end: 6 * 60 + 20 }],
+    ui: BLOCK_ALERTS,
     ...over,
   });
 
@@ -291,6 +381,7 @@ test.describe('habits on the calendar', () => {
   test('an ordinary block is unaffected by any of this', async () => {
     const { schedule } = await build({
       habits: [],
+      ui: BLOCK_ALERTS,
       blocks: [{ id: 'b-work', title: 'Deep work', pillar: 'tech', start: 540, end: 660, every: [0,1,2,3,4,5,6] }],
       logs: { '2026-07-15': { 'b-work': 1 } },  // not a habit id; must not silence it
     });
@@ -330,6 +421,7 @@ test.describe('tasks on the calendar', () => {
   const booked = (over = {}) => ({
     tasks: [task()],
     blocks: [{ id: 'b-t1', taskId: 't1', date: '2026-07-15', start: 14 * 60, end: 15 * 60 }],
+    ui: BLOCK_ALERTS,
     ...over,
   });
 

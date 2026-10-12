@@ -23,7 +23,9 @@ const NOW = '2026-07-29T09:00:00';
 const STATE = (over = {}) => ({
   habits: [], tasks: [], blocks: [], logs: {}, people: [], pomodoroLogs: [], goals: [],
   lists: [{ id: 'l-inbox', name: 'Inbox', color: '#9a9788' }],
-  ui: { view: 'admin', notif: true, timezone: 'Europe/London' },
+  /* Block alerts are opt-in; most of what is checked here is the block
+     alerts, so the default fixture has them on. */
+  ui: { view: 'admin', notif: true, blockAlerts: true, timezone: 'Europe/London' },
   ...over,
 });
 
@@ -136,6 +138,51 @@ test.describe('what is left to fire today', () => {
     // Its own three block alerts still fire (09:15, 09:25, 09:55 — all
     // after the pinned 09:00 "now").
     expect(shown).toEqual(['b-b-h-1-15', 'b-b-h-1-5', 'b-b-h-1-end']);
+  });
+
+  test('with block alerts off, a block adds nothing and its habit keeps its own reminder', async ({ page }) => {
+    const state = STATE({
+      habits: [{ id: 'h-1', name: 'Fajr', pillar: 'deen', days: [0,1,2,3,4,5,6], reminder: '09:30', created: 1 }],
+      blocks: [
+        { id: 'b-h-1', habitId: 'h-1', start: 570, end: 600 },
+        { id: 'b-1', title: 'Deep work', pillar: 'tech', start: 600, end: 660, every: [3] },
+      ],
+      ui: { view: 'admin', notif: true, blockAlerts: false, timezone: 'Europe/London' },
+    });
+    await boot(page, state);
+    expect(await ids(page)).toEqual(['h-h-1']);
+  });
+
+  test('automatic alerts start off, and each switch turns on only its own family', async ({ page }) => {
+    const state = STATE({
+      blocks: [{ id: 'b-1', title: 'Deep work', pillar: 'tech', start: 600, end: 660, every: [3] }],
+      ui: { view: 'admin', notif: true, timezone: 'Europe/London' },    // neither switch set
+    });
+    await boot(page, state);
+    const salah  = page.getByTestId('auto-alert-salah');
+    const blocks = page.getByTestId('auto-alert-blocks');
+
+    await expect(salah).toHaveAttribute('aria-pressed', 'false');
+    await expect(blocks).toHaveAttribute('aria-pressed', 'false');
+    await expect(page.getByTestId('upcoming-empty')).toBeVisible();
+
+    await blocks.click();
+    await expect(blocks).toHaveAttribute('aria-pressed', 'true');
+    await expect(rows(page)).toHaveCount(3);
+    expect(await ids(page)).toEqual(['b-b-1-15', 'b-b-1-5', 'b-b-1-end']);
+    await expect(salah).toHaveAttribute('aria-pressed', 'false');
+    await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('madinah_v1')).ui.blockAlerts),
+      { timeout: 10_000 }).toBe(true);
+
+    await blocks.click();
+    await expect(page.getByTestId('upcoming-empty')).toBeVisible();
+  });
+
+  test('the switches are greyed out until notifications are enabled', async ({ page }) => {
+    await boot(page, STATE({ ui: { view: 'admin', notif: false, timezone: 'Europe/London' } }));
+    await expect(page.getByTestId('auto-alerts')).toBeVisible();
+    await expect(page.getByTestId('auto-alert-salah')).toBeDisabled();
+    await expect(page.getByTestId('auto-alert-blocks')).toBeDisabled();
   });
 
   test('only appears once notifications are actually enabled', async ({ page }) => {

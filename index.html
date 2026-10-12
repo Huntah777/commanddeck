@@ -1776,6 +1776,29 @@ function deleteHabit(s, id) {
   }, ...gone);
 }
 
+/* ── Fard Prayers ─────────────────────────────────────────────────
+   The five obligatory prayers are ONE habit, not five. The prayers are
+   still recorded one by one — as `salah-Fajr` … `salah-Isha` in the day's
+   log, the very ids the calendar's prayer rows tick — and the habit is
+   derived from them: it is ticked exactly when all five are, and cannot
+   be ticked any other way. Missing one means the habit stays open.
+
+   Stored as an ordinary tick in logs rather than computed at read time,
+   so streaks, the 30-day strip, sync and the MCP all keep reading
+   `log[habit.id]` and never need to know this habit is special. ── */
+const FARD_HABIT_ID = 'h-fard-prayers';
+const FARD_PRAYERS  = Object.keys(SALAH_NAMES);
+const fardSalahId   = (p) => `salah-${p}`;
+const isFardHabit   = (h) => h?.fard === true;
+const fardMissing   = (log) => FARD_PRAYERS.filter(p => !log?.[fardSalahId(p)]);
+/* When a tick happened. A bare `true` is a legacy tick that predates
+   timestamps — it reads as done but ranks lowest (see state.js). */
+const tickStamp     = (v) => v === true ? 1 : Number(v) > 0 ? Number(v) : 0;
+/* The moment the fifth prayer went in — what completes the habit. Taken
+   from the data, not the clock, so reconciling the same day twice on two
+   devices writes the same tick. */
+const fardStamp     = (log) => Math.max(1, ...FARD_PRAYERS.map(p => tickStamp(log?.[fardSalahId(p)])));
+
 /* Mark a habit done for a given day — the same write TodayView's and
    Timeline's toggleHabit use for a tick (store when it happened, and
    clear any un-tick in logsOff so a later merge can't quietly resurrect
@@ -1790,6 +1813,9 @@ function deleteHabit(s, id) {
    pomodoroLogs entry does, not the moment the app happened to notice. */
 function tickHabit(s, dKey, id, at = Date.now()) {
   if ((s.logs?.[dKey] || {})[id]) return s;
+  /* Fard Prayers refuses every tick — a toggle, a Focus session aimed at
+     it — until all five prayers are in. syncFardHabits is what ticks it. */
+  if (isFardHabit((s.habits || []).find(h => h.id === id)) && fardMissing(s.logs?.[dKey]).length) return s;
   const logs    = { ...(s.logs?.[dKey]    || {}), [id]: at };
   const logsOff = { ...(s.logsOff?.[dKey] || {}) };
   delete logsOff[id];
@@ -1800,31 +1826,50 @@ function tickHabit(s, dKey, id, at = Date.now()) {
   };
 }
 
+/* The other half of tickHabit. Recorded in logsOff rather than merely
+   absent, for the reason tickHabit clears it: bare absence loses the sync
+   merge, the stored tick unions straight back over it, and the box
+   re-ticks itself a second after you cleared it. */
+function untickHabit(s, dKey, id) {
+  if (!(s.logs?.[dKey] || {})[id]) return s;
+  const logs    = { ...(s.logs?.[dKey]    || {}) };
+  const logsOff = { ...(s.logsOff?.[dKey] || {}) };
+  delete logs[id];
+  logsOff[id] = Date.now();
+  return {
+    ...s,
+    logs:    { ...s.logs,            [dKey]: logs },
+    logsOff: { ...(s.logsOff || {}), [dKey]: logsOff },
+  };
+}
+
+/* Bring Fard Prayers on `dKey` into line with the five prayers: ticked if
+   and only if all of them are. Returns `s` itself when nothing needed
+   changing, so a no-op costs no re-render. */
+function syncFardHabits(s, dKey) {
+  const log = s.logs?.[dKey] || {};
+  const complete = fardMissing(log).length === 0;
+  let next = s;
+  for (const h of s.habits || []) {
+    if (!isFardHabit(h)) continue;
+    const on = !!log[h.id];
+    if (complete && !on)      next = tickHabit(next, dKey, h.id, fardStamp(log));
+    else if (!complete && on) next = untickHabit(next, dKey, h.id);
+  }
+  return next;
+}
+
 /* Tick or un-tick, from wherever you happen to be looking at the day:
    the checklist, the agenda's chips, a habit's own block on the
    timeline, a row in the Habits tab. Four call sites, one write, so
    they cannot drift apart the way three hand-copied versions of this
-   were already starting to.
-
-   The un-tick is RECORDED in logsOff rather than merely absent, for the
-   reason tickHabit clears it: bare absence loses the sync merge, the
-   stored tick unions straight back over it, and the box re-ticks itself
-   a second after you cleared it. */
+   were already starting to. */
 function toggleHabitLog(s, dKey, id) {
-  let next;
-  if (!(s.logs?.[dKey] || {})[id]) {
-    next = tickHabit(s, dKey, id);
-  } else {
-    const logs    = { ...(s.logs?.[dKey]    || {}) };
-    const logsOff = { ...(s.logsOff?.[dKey] || {}) };
-    delete logs[id];
-    logsOff[id] = Date.now();
-    next = {
-      ...s,
-      logs:    { ...s.logs,            [dKey]: logs },
-      logsOff: { ...(s.logsOff || {}), [dKey]: logsOff },
-    };
-  }
+  /* Fard Prayers is derived, never toggled: a tap on it can only confirm
+     what the five prayers already say. */
+  if (isFardHabit((s.habits || []).find(h => h.id === id))) return syncFardHabits(s, dKey);
+
+  let next = !(s.logs?.[dKey] || {})[id] ? tickHabit(s, dKey, id) : untickHabit(s, dKey, id);
 
   /* If this habit is named after a prayer, keep the calendar's salah block
      in sync — the same bidirectionality toggleBlockDone has the other way.
@@ -1839,6 +1884,10 @@ function toggleHabitLog(s, dKey, id) {
       if (habitOn !== salahOn) next = toggleHabitLog(next, dKey, salahId);
     }
   }
+
+  /* One of the five prayers just moved: Fard Prayers follows it, up when
+     that was the last one missing and back down when it was un-ticked. */
+  if (FARD_PRAYERS.some(p => fardSalahId(p) === id)) next = syncFardHabits(next, dKey);
 
   return next;
 }
@@ -2281,7 +2330,12 @@ const SEED = () => ({
      judged by the model. See functions/api/parse.js.
      { id, name, aliases: [], weight: 1..5, modifiedAt } */
   people: [],
-  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahMethod: 3, salahSchool: 0, salahLoc: null, salahOffsets: { Fajr: 0, Dhuhr: 0, Asr: 0, Maghrib: 0, Isha: 0 }, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' }, fastReminder: { ...FAST_REMINDER_DEFAULTS } },
+  /* salahAlerts / blockAlerts: the two AUTOMATIC alert families — every
+     prayer time, and every calendar block's 15/5-minute countdown. Off
+     until chosen: they fire whether or not you asked for anything, which is
+     what made them noise. Reminders you set yourself (habit, task, goal,
+     fasting) are not gated by these. */
+  ui: { view: 'today', selectedDate: todayKey(), notif: false, salahAlerts: false, blockAlerts: false, salahMethod: 3, salahSchool: 0, salahLoc: null, salahOffsets: { Fajr: 0, Dhuhr: 0, Asr: 0, Maghrib: 0, Isha: 0 }, timezone: 'Europe/London', goalsReminder: { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' }, fastReminder: { ...FAST_REMINDER_DEFAULTS } },
   admin: {
     pillars: {},          /* { [id]: { name?, color? } } */
     quads: {},            /* { [id]: { title?, sub?, hint? } } */
@@ -2339,6 +2393,65 @@ const tombMissing = (prev, next) => {
   }
   return gone.length ? tomb(next, ...gone) : next;
 };
+
+/* ── Five prayer habits → Fard Prayers ────────────────────────────────
+   Fajr, Dhuhr, Asr, Maghrib and Isha used to be habits of their own,
+   kept in step with the calendar's prayer rows by name. They are one
+   derived habit now (see FARD_HABIT_ID), so a state that still holds all
+   five is converted once:
+     - the five are deleted — tombstoned, with their calendar slots;
+     - their history comes with them. A day's old habit tick is copied onto
+       that prayer's own `salah-*` entry when the day has none, and every
+       day on which all five were done gets the new habit's tick, so a
+       streak survives the change;
+     - the id is fixed, so two devices converting at the same moment write
+       the same habit and the sync merge sees one.
+   Needs all five. Someone tracking only Fajr as a habit meant exactly that,
+   and "all five prayed" is not what they asked for. Run once, gated on
+   admin.fardMerged, so a prayer habit made by hand afterwards is left
+   alone. */
+function mergePrayerHabitsIntoFard(s) {
+  const prayerOf = (h) => FARD_PRAYERS.find(p => normalizePrayerName(h.name) === p.toLowerCase());
+  const olds = (s.habits || []).filter(h => !isFardHabit(h) && prayerOf(h));
+  if (FARD_PRAYERS.some(p => !olds.some(h => prayerOf(h) === p))) return s;
+
+  const logs = {};
+  for (const [date, day] of Object.entries(s.logs || {})) {
+    const next = { ...day };
+    for (const p of FARD_PRAYERS) {
+      if (next[fardSalahId(p)]) continue;
+      const stamp = Math.max(0, ...olds.filter(h => prayerOf(h) === p).map(h => tickStamp(day[h.id])));
+      if (stamp) next[fardSalahId(p)] = stamp;
+    }
+    if (!fardMissing(next).length && !next[FARD_HABIT_ID]) next[FARD_HABIT_ID] = fardStamp(next);
+    logs[date] = next;
+  }
+
+  const existing = (s.habits || []).find(isFardHabit);
+  const orders   = olds.map(h => h.sortOrder).filter(Number.isFinite);
+  const fard = existing || {
+    id: FARD_HABIT_ID, name: 'Fard Prayers', pillar: olds[0].pillar || 'deen',
+    days: [0, 1, 2, 3, 4, 5, 6], reminder: null, icon: '🕌', fard: true,
+    created: Math.min(Date.now(), ...olds.map(h => h.created).filter(Number.isFinite)),
+    ...(orders.length ? { sortOrder: Math.min(...orders) } : {}),
+    modifiedAt: Date.now(),
+  };
+
+  let next = { ...s, logs, habits: existing ? s.habits : [...s.habits, fard] };
+  for (const h of olds) next = deleteHabit(next, h.id);
+  return next;
+}
+
+/* Bring every day's Fard Prayers tick into line with that day's five
+   prayers. A device that heard about the fourth prayer from one device and
+   the fifth from another has all five and no habit tick — each side's own
+   sync only ever saw its half — so this runs wherever state is adopted. */
+function reconcileFardLogs(s) {
+  if (!(s.habits || []).some(isFardHabit)) return s;
+  let next = s;
+  for (const dKey of Object.keys(s.logs || {})) next = syncFardHabits(next, dKey);
+  return next;
+}
 
 /* ------------------------------------------------------------------
    NOTIFICATION SCHEDULER  +  WEB PUSH (background)
@@ -2624,10 +2737,14 @@ function buildPlan(state) {
     if (fireAt > now) notifications.push({ id, title, body, fireAt });
   };
 
+  const salahAlerts = state.ui?.salahAlerts === true;
+  const blockAlerts = state.ui?.blockAlerts === true;
+
   /* Salah (prayer) times — today's cached timetable, with the user's
-     per-prayer offsets applied (the cache stores the API's raw times). */
+     per-prayer offsets applied (the cache stores the API's raw times).
+     Opt-in: see SEED().ui.salahAlerts. */
   try {
-    const todaySalah = JSON.parse(localStorage.getItem('madinah_today_salah') || 'null');
+    const todaySalah = salahAlerts ? JSON.parse(localStorage.getItem('madinah_today_salah') || 'null') : null;
     if (todaySalah) {
       const offsets = salahOffsets(state.ui);
       Object.entries(SALAH_NAMES).forEach(([key, names]) => {
@@ -2658,15 +2775,15 @@ function buildPlan(state) {
     }
   } catch(e) {}
 
-  /* Calendar blocks — 3 notifications each. A block standing in for a
-     habit or a task is skipped once that habit or task is ticked: the
-     alerts exist to get it done, and buzzing about something already
-     done is how people learn to ignore the buzzing. */
+  /* Calendar blocks — 3 notifications each, when block alerts are on. A
+     block standing in for a habit or a task is skipped once that habit or
+     task is ticked: the alerts exist to get it done, and buzzing about
+     something already done is how people learn to ignore the buzzing. */
   const doneToday = state.logs?.[todayKey()] || {};
   /* The day in the user's timezone, matching `dow` — a task block names
      the date it falls on, and the device's own clock may be elsewhere. */
   const zonedKey = `${y}-${String(mo).padStart(2,'0')}-${String(dayOfMonth).padStart(2,'0')}`;
-  resolveBlocks(state).forEach(b => {
+  if (blockAlerts) resolveBlocks(state).forEach(b => {
     if (!blockOnDay(b, zonedKey, dow)) return;
     if (blockDone(b, doneToday)) return;
     const s = atMins(b.start);
@@ -2678,10 +2795,13 @@ function buildPlan(state) {
   });
 
   /* Habit reminders — the fallback for a habit with no slot in the day.
-     One that has been put on the calendar is already covered by the
-     three alerts above, and firing both would mean four notifications
-     for one habit. */
-  const scheduled = new Set(resolveBlocks(state).filter(b => b.habitId && b.every.includes(dow)).map(b => b.habitId));
+     With block alerts on, one that has been put on the calendar is already
+     covered by the three alerts above, and firing both would mean four
+     notifications for one habit. With them off nothing covers it, so its
+     own reminder has to stand — otherwise it would get no alert at all. */
+  const scheduled = blockAlerts
+    ? new Set(resolveBlocks(state).filter(b => b.habitId && b.every.includes(dow)).map(b => b.habitId))
+    : new Set();
   (state.habits || []).forEach(h => {
     if (!h.reminder || !h.days.includes(dow) || doneToday[h.id]) return;
     if (scheduled.has(h.id)) return;
@@ -2689,13 +2809,14 @@ function buildPlan(state) {
     push(`h-${h.id}`, 'Habit reminder', h.name, atHm(hr, mn));
   });
 
-  /* Task reminders. Suppressed only when the task's calendar slot is on
-     the same day the reminder would fire — that day already carries the
-     three block alerts, and four notifications for one task is how you
-     teach someone to swipe them away. A reminder set for a different day
-     is a different intention and stands. */
-  const taskSlotDate = new Map(
-    resolveBlocks(state).filter(b => b.taskId && b.date).map(b => [b.taskId, b.date]));
+  /* Task reminders. With block alerts on, suppressed only when the task's
+     calendar slot is on the same day the reminder would fire — that day
+     already carries the three block alerts, and four notifications for one
+     task is how you teach someone to swipe them away. A reminder set for a
+     different day is a different intention and stands. */
+  const taskSlotDate = new Map(blockAlerts
+    ? resolveBlocks(state).filter(b => b.taskId && b.date).map(b => [b.taskId, b.date])
+    : []);
   (state.tasks || []).forEach(t => {
     if (!t.reminder || t.done) return;
     if (taskSlotDate.get(t.id) === String(t.reminder).slice(0, 10)) return;
@@ -3086,7 +3207,7 @@ function App() {
 
   /* Merge helper so we never lose new SEED keys when DB shape evolves */
   const hydrate = (data) => {
-    const merged = {
+    let merged = {
       ...SEED(), ...data,
       ui:          { ...SEED().ui,       ...(data?.ui       || {}),
                      /* deep-merge so a new goalsReminder sub-field (e.g. the
@@ -3123,6 +3244,11 @@ function App() {
       ),
       logsOff: data?.logsOff || {},
     };
+    if (!merged.admin.fardMerged) {
+      merged = mergePrayerHabitsIntoFard(merged);
+      merged.admin = { ...merged.admin, fardMerged: true };
+    }
+    merged = reconcileFardLogs(merged);
     /* Re-apply this device's own view/selectedDate — never trust whatever
        (if anything) came from SEED defaults or a remote/merged payload. */
     const localUi = UiLocal.read();
@@ -4219,6 +4345,32 @@ function WeekStrip({ state, sel, setDate }) {
    Deliberately the same write (`toggle`) as the checklist and the
    timeline block, so a habit ticked here is ticked everywhere.
 ------------------------------------------------------------------- */
+/* The five prayers behind Fard Prayers, each tickable on its own. Ticking
+   one writes the same `salah-*` entry as the calendar's prayer row, so the
+   two always agree; the habit above completes itself on the fifth. Lives
+   beside the habit's button, never inside it — a button in a button is not
+   valid, and the habit's own tap is deliberately inert until these are done. */
+function FardPrayerChips({ log, color, onToggle }) {
+  return (
+    <div className="flex flex-wrap gap-1" data-testid="fard-prayers">
+      {FARD_PRAYERS.map(p => {
+        const on = !!log[fardSalahId(p)];
+        return (
+          <button key={p} onClick={() => onToggle(p)}
+            data-testid="fard-prayer" data-prayer={p} data-done={on ? '1' : '0'} aria-pressed={on}
+            aria-label={`${on ? 'Untick' : 'Tick'} ${p}`}
+            className="btn font-mono text-[10px] leading-none px-2 py-1.5 rounded-md border transition-colors"
+            style={on
+              ? { background: color, borderColor: color, color: '#0a0a0b' }
+              : { background: 'transparent', borderColor: `${color}55`, color: '#9a9788' }}>
+            {p}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function HabitChips({ habits, log, toggle, state }) {
   if (!habits.length) return null;
   const sorted = [...habits].sort((a, b) => (log[a.id] ? 1 : 0) - (log[b.id] ? 1 : 0));
@@ -4227,9 +4379,14 @@ function HabitChips({ habits, log, toggle, state }) {
       {sorted.map(h => {
         const p  = pillarByIdFromState(h.pillar, state);
         const on = !!log[h.id];
+        /* Fard Prayers can't be ticked from here — it shows how far along
+           it is instead, and the prayers are ticked where they are listed. */
+        const fardLeft = isFardHabit(h) && !on ? fardMissing(log).length : 0;
         return (
           <button key={h.id} onClick={() => toggle(h.id)}
             data-testid="habit-chip" aria-pressed={on}
+            aria-disabled={fardLeft > 0 || undefined}
+            title={fardLeft > 0 ? `${FARD_PRAYERS.length - fardLeft}/${FARD_PRAYERS.length} prayers — ticks itself when all five are done` : undefined}
             aria-label={`${on ? 'Untick' : 'Tick'} ${h.name}`}
             className="btn shrink-0 flex flex-col items-center gap-1.5" style={{ width: 72 }}>
             <span className="w-12 h-12 rounded-full flex items-center justify-center border-2 transition-all"
@@ -4246,7 +4403,7 @@ function HabitChips({ habits, log, toggle, state }) {
                 become "Sunnah…" for want of one more line. */}
             <span className={`text-[10px] leading-tight text-center ${on ? 'text-bone-100' : 'text-bone-400'}`}
               style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-              {h.name}
+              {h.name}{fardLeft > 0 && <span className="font-mono"> {FARD_PRAYERS.length - fardLeft}/{FARD_PRAYERS.length}</span>}
             </span>
           </button>
         );
@@ -5595,7 +5752,7 @@ function TaskSlotPicker({ task, slot, defaultDate, onClose, onSave }) {
         </button>
       </div>
       <div className="text-[9px] text-bone-400/70 mt-1.5 leading-snug">
-        Sits on that day's timeline. Alerts 15 and 5 minutes before.
+        Sits on that day's timeline. Countdown alerts are optional — Admin → Alerts.
       </div>
     </div>
   );
@@ -5744,7 +5901,7 @@ function HabitSlotPicker({ habit, slot, onClose, onSave }) {
         </button>
       </div>
       <div className="text-[9px] text-bone-400/70 mt-1.5 leading-snug">
-        Runs on every day this habit is scheduled. Alerts 15 and 5 minutes before.
+        Runs on every day this habit is scheduled. Countdown alerts are optional — Admin → Alerts.
       </div>
     </div>
   );
@@ -5761,6 +5918,7 @@ function HabitChecklist({ habits, log, toggle, state, setState }) {
      can't be on a run of four in one place and a run of three in
      another. */
   const sel = parseKey(state.ui.selectedDate);
+  const dKey = state.ui.selectedDate;
 
   return (
     <div className="space-y-3">
@@ -5806,6 +5964,12 @@ function HabitChecklist({ habits, log, toggle, state, setState }) {
                       </button>
                     )}
                   </div>
+                  {isFardHabit(h) && setState && (
+                    <div className="pl-7 pb-1.5">
+                      <FardPrayerChips log={log} color={g.pillar.color}
+                        onToggle={p => setState(st => toggleHabitLog(st, dKey, fardSalahId(p)))}/>
+                    </div>
+                  )}
                   {scheduling === h.id && setState && (
                     <HabitSlotPicker habit={h} slot={slot} onClose={()=>setScheduling(null)}
                       onSave={(next)=>{ setState(st => saveHabitWithSlot(st, h, next)); setScheduling(null); }}/>
@@ -6414,7 +6578,8 @@ function HabitsView({ state, setState }) {
                       : 'No habits here yet — add your first.'}/>
                   : due.map(h => (
                       <HabitRow key={h.id} h={h} state={state} sel={sel} on={!!log[h.id]}
-                        onToggle={()=>toggle(h.id)} onEdit={()=>setEditing(h)}/>
+                        onToggle={()=>toggle(h.id)} onEdit={()=>setEditing(h)}
+                        onTogglePrayer={p => toggle(fardSalahId(p))}/>
                     ))}
               </div>
 
@@ -6460,11 +6625,16 @@ function HabitsView({ state, setState }) {
    stays findable and editable, but loses the tick: every completion
    figure in the app counts scheduled days only, so a tick there would
    be a control that changes nothing you can see. */
-function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit,
+function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit, onTogglePrayer,
                     reordering, isDragging, isDragOver, onDragStart, onDragOver, onDrop }) {
   const p    = pillarByIdFromState(h.pillar, state);
   const slot = slotForHabit(state, h.id);
   const selKey = fmtKey(sel);
+  /* Fard Prayers counts prayers, not days: its badge reads n/5 and the five
+     are listed under the name, each tickable. */
+  const fard    = isFardHabit(h);
+  const dayLog  = state.logs?.[selKey] || {};
+  const fardNow = FARD_PRAYERS.length - fardMissing(dayLog).length;
 
   const days   = useMemo(() => habitWindow(state, h, sel, HABIT_WINDOW_DAYS), [state.logs, h.id, h.days, selKey]);
   const streak = useMemo(() => habitStreak(state, h, sel), [state.logs, h.id, h.days, selKey]);
@@ -6499,19 +6669,24 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit,
         {h.icon || <I.flame className="w-5 h-5"/>}
       </div>
 
-      <button onClick={onEdit} aria-label={`Edit ${h.name}`} className="btn flex-1 min-w-0 text-left">
-        <div className="font-medium text-bone-100 leading-tight truncate">{h.name}</div>
-        <div className="flex items-center gap-2 mt-1 flex-wrap">
-          <span className="font-mono text-[10px] px-1.5 py-px rounded border"
-            style={on ? { color: p.color, borderColor: `${p.color}66` } : { color: '#9a9788', borderColor: 'var(--s3)' }}>
-            {offDay ? '—' : on ? '1/1' : '0/1'}
-          </span>
-          <span className="font-mono text-[10px] tracking-wider text-bone-400">{dayLabel}</span>
-          {h.salahAnchor
-            ? <span className="font-mono text-[10px] text-deen">⚓ {h.salahAnchor.startPrayer}</span>
-            : slot && <span className="font-mono text-[10px] text-bone-400">{toHM(slot.start)}</span>}
-        </div>
-      </button>
+      <div className="flex-1 min-w-0">
+        <button onClick={onEdit} aria-label={`Edit ${h.name}`} className="btn w-full text-left">
+          <div className="font-medium text-bone-100 leading-tight truncate">{h.name}</div>
+          <div className="flex items-center gap-2 mt-1 flex-wrap">
+            <span className="font-mono text-[10px] px-1.5 py-px rounded border"
+              style={on ? { color: p.color, borderColor: `${p.color}66` } : { color: '#9a9788', borderColor: 'var(--s3)' }}>
+              {offDay ? '—' : fard ? `${fardNow}/${FARD_PRAYERS.length}` : on ? '1/1' : '0/1'}
+            </span>
+            <span className="font-mono text-[10px] tracking-wider text-bone-400">{dayLabel}</span>
+            {h.salahAnchor
+              ? <span className="font-mono text-[10px] text-deen">⚓ {h.salahAnchor.startPrayer}</span>
+              : slot && <span className="font-mono text-[10px] text-bone-400">{toHM(slot.start)}</span>}
+          </div>
+        </button>
+        {fard && onTogglePrayer && !reordering && !offDay && (
+          <div className="mt-2"><FardPrayerChips log={dayLog} color={p.color} onToggle={onTogglePrayer}/></div>
+        )}
+      </div>
 
       {/* The thirty days behind this one, in the width the row has
           spare. Hidden on a phone, where that width belongs to the name
@@ -6598,7 +6773,9 @@ function HabitModal({ habit, state, onClose, onSave, onDelete }) {
     const id = habit?.id || `h-${Date.now()}`;
     const start = (!anchor && slotAt) ? fromHM(slotAt) : null;
     onSave(
-      { id, name: name.trim(), pillar, days, created: habit?.created || Date.now(), reminder: reminder || null, icon: icon || null, salahAnchor: anchor || null, modifiedAt: Date.now() },
+      { id, name: name.trim(), pillar, days, created: habit?.created || Date.now(), reminder: reminder || null, icon: icon || null, salahAnchor: anchor || null, modifiedAt: Date.now(),
+        /* Renaming Fard Prayers must not turn it back into an ordinary habit. */
+        ...(habit?.fard ? { fard: true } : {}) },
       /* When using a prayer anchor the slot is computed dynamically — no
          static block needed. Otherwise pass the manual time as before. */
       anchor ? null : (start === null ? null : { start, end: (start + slotFor) % 1440 }),
@@ -7823,8 +8000,16 @@ function NotificationsCard({ state, setState }) {
     : perm === 'denied'
     ? "Blocked — enable in your browser's site settings, then tap Recheck."
     : enabled
-    ? 'Active · prayer times, calendar, habits & tasks — even when the app is closed.'
-    : 'Enable to get prayer time alerts and reminders, even when the app is closed.';
+    ? 'Active · the reminders you set, plus any automatic alerts you switch on below — even when the app is closed.'
+    : 'Enable to get the reminders you set, even when the app is closed. Automatic alerts are off until you choose them.';
+
+  const setAuto = (patch) => setState(s => ({ ...s, ui: { ...s.ui, ...patch } }));
+  const autoAlerts = [
+    { key: 'salahAlerts', testid: 'auto-alert-salah', label: 'Prayer times',
+      hint: 'At each prayer, 10 and 3 minutes before, and when prayer becomes impermissible.' },
+    { key: 'blockAlerts', testid: 'auto-alert-blocks', label: 'Calendar blocks',
+      hint: '15 and 5 minutes before a block starts, and 5 before it ends.' },
+  ];
 
   const btnLabel = perm === 'denied' ? 'Recheck permission' : enabled ? 'Disable notifications' : 'Enable notifications';
 
@@ -7920,6 +8105,32 @@ function NotificationsCard({ state, setState }) {
           the app closed. It is safe to press at any time and costs nothing.
         </p>
       )}
+
+      <div className="mt-3 pt-3 border-t border-ink-700" data-testid="auto-alerts">
+        <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1.5">AUTOMATIC ALERTS</div>
+        <div className="rounded-lg border border-ink-700 divide-y divide-ink-700">
+          {autoAlerts.map(a => {
+            const on = state.ui?.[a.key] === true;
+            return (
+              <div key={a.key} className="flex items-center gap-3 px-2.5 py-2">
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-bone-100">{a.label}</div>
+                  <div className="text-[10px] text-bone-400 leading-snug">{a.hint}</div>
+                </div>
+                <button onClick={() => setAuto({ [a.key]: !on })} disabled={!enabled}
+                  data-testid={a.testid} aria-pressed={on} aria-label={`${a.label} alerts`}
+                  className={`btn shrink-0 px-3 py-1.5 rounded-lg text-xs disabled:opacity-50 ${on ? 'border border-combat/40 text-combat hover:bg-combat/10' : 'border border-ink-700 hover:bg-ink-800 text-bone-300'}`}>
+                  {on ? 'Turn off' : 'Turn on'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <p className="text-[10px] text-bone-400/70 mt-1.5 leading-relaxed">
+          Off by default. Habit, task, goal and fasting reminders you've set yourself are not affected.
+          Applies on every device.
+        </p>
+      </div>
 
       {enabled && (
         <div className="mt-3 pt-3 border-t border-ink-700" data-testid="upcoming-notifications">
