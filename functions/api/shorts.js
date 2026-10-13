@@ -5,8 +5,7 @@
 
    Same approach as For The Ummah's short lectures (fortheummah/shared/
    lectures.ts): YouTube's public per-channel feeds, no API key, videos
-   embedded rather than re-hosted, so the speakers' own channels keep the
-   views. The difference is the length. This reads each channel's
+   embedded rather than re-hosted, so the channels keep the views. The difference is the length. This reads each channel's
    SHORTS-ONLY uploads playlist (the channel id with UC → UUSH), so every
    entry is a YouTube Short — three minutes at most — and the page skips
    anything the player reports as longer than MAX_SECONDS anyway.
@@ -15,17 +14,28 @@
    30 minutes so YouTube's feeds are fetched rarely.
    ============================================================ */
 
-/* Channel ids, not handles: a handle can point at a look-alike channel.
-   These are the ones For The Ummah checked against YouTube's verified
-   badge. `titleMatch` is for a shared channel (a masjid's): keep only that
-   speaker's videos. Add or remove channels here. */
+/* Motivational channels. Channel ids, not handles: a handle can point at a
+   look-alike channel, and impersonation channels are everywhere in this
+   genre. Each id was resolved from the channel's own page and checked to
+   have Shorts. Add or remove channels here.
+
+   `titleMatch` keeps only matching videos from a shared channel; `exclude`
+   drops matching ones — for a church channel's service notices, which are
+   not motivation.
+
+   No David Goggins: he has no YouTube channel of his own, and the ones
+   using his name are reposts with a few thousand subscribers. His speeches
+   turn up on the compilation channels below (Motiversity in particular). */
 export const CHANNELS = [
-  { id: 'UCNB_OaI4524fASt8h0IL8dw', name: 'Mufti Menk' },
-  { id: 'UCtm8rtofLSnaIBi3noB0INg', name: 'Omar Suleiman' },
-  { id: 'UC34dxKHa9n9ggxz4m7bztfA', name: 'Belal Assaad' },
-  { id: 'UC3vHW2h22WE-pNi5WJtRIjg', name: 'Yaqeen Institute' },
-  { id: 'UCWsdcrre0WbCWML_PnuzoAg', name: 'Assim al-Hakeem' },
-  { id: 'UCa9qP2KdOiWsBzWe6YD2ILw', name: 'Mohamad Baajour', titleMatch: /baajour/i },
+  { id: 'UCAPByrKU5-R1emswVlyH_-g', name: 'Motiversity' },
+  { id: 'UCIrn3pSjhCLp8xA7JXxi6Bw', name: 'Mulligan Brothers' },
+  { id: 'UCgkKA7xEOoBQNpC5TJxPLiw', name: 'Ben Lionel Scott' },
+  { id: 'UCbV60AGIHKz2xIGvbk0LLvg', name: 'Jay Shetty' },
+  { id: 'UCk2U-Oqn7RXf-ydPqfSxG5g', name: 'Mel Robbins' },
+  { id: 'UCHCi9A9-ibkH3-fOw4GhZUg', name: 'Les Brown' },
+  /* T.D. Jakes' church. His own talk-show channel posts no Shorts. */
+  { id: 'UCjQbTcszB-gRhDByY9WhySw', name: 'T.D. Jakes · The Potter’s House',
+    exclude: /\b(join us|bible study|symposium|livestream|live stream|service times?|register|tickets?|conference)\b/i },
 ];
 
 /* Five minutes. Shorts are capped well under this; it is the promise the
@@ -56,6 +66,7 @@ export function parseFeed(xml, ch) {
     if (!id || !/^[\w-]{11}$/.test(id) || !title) continue;
     if (!link.includes('/shorts/')) continue;
     if (ch.titleMatch && !ch.titleMatch.test(decode(title))) continue;
+    if (ch.exclude && ch.exclude.test(decode(title))) continue;
     out.push({ id, title: decode(title), channel: ch.name, published });
   }
   return out;

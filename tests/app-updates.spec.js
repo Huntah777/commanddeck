@@ -32,15 +32,27 @@ const STATE = (over = {}) => ({
 async function serveSite(page) {
   const site = {
     mark: 'A', requests: 0, offline: false,
+    /* Cloudflare's bot detection on a proxied domain: a script carrying the
+       request's own ray id, so the page's bytes differ on every request. */
+    cloudflare: false,
+    /* An expired Cloudflare Access session: every request is a redirect to
+       its login page, on another origin. */
+    signedOut: false,
     respond: null,   // (n) => ({ status, contentType, body }) — overrides the normal page
   };
   await page.route(u => new URL(u).pathname === '/', route => {
     site.requests++;
     if (site.offline) return route.abort('internetdisconnected');
+    if (site.signedOut) return route.fulfill({
+      status: 302, headers: { Location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login/app?redirect_url=%2F' }, body: '',
+    });
     if (site.respond) return route.fulfill(site.respond(site.requests));
+    const injected = site.cloudflare
+      ? `<script>(function(){window.__CF$cv$params={r:'ray${site.requests}',t:'${Date.now()}${site.requests}'};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.head.appendChild(a);})();</script>`
+      : '';
     return route.fulfill({
       status: 200, contentType: 'text/html; charset=utf-8',
-      body: HTML.replace('</body>', `<script>window.__deploy = ${JSON.stringify(site.mark)};</script></body>`),
+      body: HTML.replace('</body>', `<script>window.__deploy = ${JSON.stringify(site.mark)};</script>${injected}</body>`),
     });
   });
   return site;
@@ -237,6 +249,64 @@ test.describe('not mistaking something else for a new version', () => {
   });
 });
 
+test.describe('behind Cloudflare', () => {
+  /* The live app sits behind Cloudflare Access on a proxied domain. Both of
+     these stopped the check working there while it worked everywhere else. */
+
+  test('a script Cloudflare injects per request is not mistaken for a new version', async ({ page }) => {
+    const site = await boot(page);
+    site.cloudflare = true;
+    expect(await check(page)).toBe(false);
+    expect(await page.evaluate(() => window.CDUpdates.lastResult)).toBe('same');
+    expect(await alive(page)).toBe(true);
+  });
+
+  test('…and does not hide a real one either', async ({ page }) => {
+    const site = await boot(page);
+    site.cloudflare = true;
+    site.mark = 'B';
+    await check(page);
+    await reloadedInto(page, 'B');
+  });
+
+  test('an expired sign-in is recognised, not reported as "up to date"', async ({ page }) => {
+    const site = await boot(page);
+    await page.evaluate(() => {
+      const i = document.createElement('input'); document.body.appendChild(i); i.focus();   // in use: hold the reload
+    });
+    site.signedOut = true;
+    expect(await check(page)).toBe(true);
+    expect(await page.evaluate(() => [window.CDUpdates.lastResult, window.CDUpdates.reason])).toEqual(['signin', 'signin']);
+    await expect(pill(page)).toHaveText('Sign-in expired — tap to reload');
+    expect(await alive(page)).toBe(true);
+  });
+
+  test('a newer version and an expired sign-in: the pill says update — one reload fixes both', async ({ page }) => {
+    const site = await boot(page);
+    await page.evaluate(() => { const i = document.createElement('input'); document.body.appendChild(i); i.focus(); });
+    site.signedOut = true;
+    await check(page);
+    site.signedOut = false; site.mark = 'B';
+    await check(page);
+    await expect(pill(page)).toHaveText('Update ready — tap to reload');
+  });
+});
+
+test.describe('only reloading when it costs nothing — continued', () => {
+  test('not while something is playing', async ({ page }) => {
+    const site = await boot(page);
+    await page.evaluate(() => { const d = document.createElement('div'); d.id = 'vid'; d.dataset.busy = 'video'; document.body.appendChild(d); });
+    site.mark = 'B';
+    expect(await check(page)).toBe(true);
+    await page.clock.fastForward(20_000);
+    expect(await alive(page)).toBe(true);
+
+    await page.evaluate(() => document.getElementById('vid').remove());
+    await page.clock.fastForward(4_000);
+    await reloadedInto(page, 'B');
+  });
+});
+
 test.describe('the Admin → System card', () => {
   const openCard = async (page) => {
     await page.getByTestId('admin-nav').getByRole('button', { name: 'System' }).click();
@@ -249,6 +319,17 @@ test.describe('the Admin → System card', () => {
     await page.getByTestId('check-updates').click();
     await expect(page.getByTestId('update-msg')).toContainText('latest version');
     expect(await alive(page)).toBe(true);
+  });
+
+  test('signed out of Cloudflare Access, it says so and offers the reload — not "latest version"', async ({ page }) => {
+    const site = await boot(page, STATE({ ui: { view: 'admin', selectedDate: '2026-08-20' } }));
+    await openCard(page);
+    site.signedOut = true;
+    await page.getByTestId('check-updates').click();
+    await expect(page.getByTestId('update-msg')).toContainText('sign-in has expired');
+    await expect(page.getByTestId('update-msg')).not.toContainText('latest version');
+    await expect(page.getByTestId('update-reload')).toBeVisible();
+    await expect(page.getByTestId('running-build')).toContainText('last check: signin');
   });
 
   test('reloads straight away when there is a newer one — you asked', async ({ page }) => {

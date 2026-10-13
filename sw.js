@@ -8,7 +8,7 @@
    serves with what it is running whenever the app comes to the foreground
    (the update script at the bottom of index.html), so a deploy that only
    touches index.html still reaches an app that was left open. */
-const CACHE = 'commanddeck-v9';
+const CACHE = 'commanddeck-v10';   // v10: drops anything a signed-out answer may have left in v9
 
 /* Written by the page, read by this worker. The SW cannot see localStorage,
    but it needs the sync token to re-register a rotated push subscription while
@@ -19,6 +19,15 @@ const TOKEN_URL  = '/__sync_token';
 
 /* Must match index.html's copy and the Cron Worker's private key. */
 const VAPID_PUBLIC_KEY = 'BFbFmnxVUcx5X_6pUxHKVv-n8aX78p73b8vbe8WCLqLPSmq9ydXMWdBtKjjDCceMju1CerMDVsRWkzJiM6jrvYo';
+
+/* Only a real answer from this origin is worth keeping. Behind Cloudflare
+   Access an expired sign-in turns every request into a redirect to the
+   login page — an opaque redirect for the shell, an opaque cross-origin
+   page for anything else. Caching either one stores the login page under
+   the app's own URL: the shell's offline copy becomes a redirect, and a
+   script that wasn't cached yet becomes a page of HTML forever, which is
+   the kind of breakage only "Clear cache" used to fix. */
+const keepable = (resp) => !!resp && resp.ok && resp.type === 'basic';
 
 const SHELL = [
   '/',
@@ -98,7 +107,7 @@ self.addEventListener('fetch', (event) => {
   /* The shell itself (the page navigation, and index.html directly) —
      network-first. This has to reach the network on every load, not just
      the first one: an auth gateway sitting in front of the origin (this
-     deployment sits behind Keycloak) can only challenge a request that
+     deployment sits behind Cloudflare Access) can only challenge a request that
      actually leaves the device. Cache-first would keep answering every
      future launch out of Cache Storage forever, so an expired session
      cookie never gets the chance to redirect to the login page — it just
@@ -110,7 +119,7 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(
       fetch(request)
         .then((resp) => {
-          caches.open(CACHE).then((c) => c.put(request, resp.clone()));
+          if (keepable(resp)) caches.open(CACHE).then((c) => c.put(request, resp.clone()));
           return resp;
         })
         .catch(() => caches.match(request))
@@ -126,7 +135,11 @@ self.addEventListener('fetch', (event) => {
       (cached) =>
         cached ||
         fetch(request).then((resp) => {
-          caches.open(CACHE).then((c) => c.put(request, resp.clone()));
+          /* Same rule, for the same-origin assets. Cross-origin ones (the
+             Tailwind CDN) come back opaque by design and are kept as before. */
+          if (url.origin !== self.location.origin ? resp.ok || resp.type === 'opaque' : keepable(resp)) {
+            caches.open(CACHE).then((c) => c.put(request, resp.clone()));
+          }
           return resp;
         })
     )

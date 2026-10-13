@@ -51,6 +51,25 @@ test.describe('what gets into the feed', () => {
     expect(out.map(v => v.id)).toEqual(['aaaaaaaaaaa']);
   });
 
+  test('a church channel\'s notices are left out', () => {
+    const church = CHANNELS.find(c => c.exclude);
+    const out = parseFeed(feed(
+      entry({ id: 'aaaaaaaaaaa', title: 'Check Your Thinking' }),
+      entry({ id: 'bbbbbbbbbbb', title: 'Join Us For Wednesday Night Bible Study' }),
+      entry({ id: 'ccccccccccc', title: '2026 JDS Fall Symposium' }),
+      entry({ id: 'ddddddddddd', title: 'Unregistered thoughts' }),   // a word containing "register" is fine
+    ), church);
+    expect(out.map(v => v.id)).toEqual(['aaaaaaaaaaa', 'ddddddddddd']);
+  });
+
+  test('the channels are motivational ones, each listed once by id', () => {
+    const names = CHANNELS.map(c => c.name).join(' ');
+    for (const n of ['Motiversity', 'T.D. Jakes', 'Mel Robbins']) expect(names).toContain(n);
+    expect(names).not.toMatch(/Menk|Suleiman|Yaqeen/);
+    expect(new Set(CHANNELS.map(c => c.id)).size).toBe(CHANNELS.length);
+    for (const c of CHANNELS) expect(c.id).toMatch(/^UC[\w-]{22}$/);
+  });
+
   test('reads each channel\'s Shorts-only playlist', () => {
     expect(shortsPlaylist('UCNB_OaI4524fASt8h0IL8dw')).toBe('UUSHNB_OaI4524fASt8h0IL8dw');
   });

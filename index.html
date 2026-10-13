@@ -7630,7 +7630,7 @@ function UpdatePill() {
   return (
     <button onClick={() => u.reload()} data-testid="update-pill"
       className="glass btn" style={{ position:'fixed', left:'50%', transform:'translateX(-50%)', bottom:'calc(14px + env(safe-area-inset-bottom, 0px))', zIndex:45, fontSize:13, fontWeight:600, padding:'8px 16px', borderRadius:999, color:'var(--f1)', fontFamily:'Manrope,sans-serif', whiteSpace:'nowrap' }}>
-      Update ready — tap to reload
+      {u.reason === 'signin' ? 'Sign-in expired — tap to reload' : 'Update ready — tap to reload'}
     </button>
   );
 }
@@ -8371,15 +8371,28 @@ function SyncCard({ status, onConfigure, onDisconnect }) {
 function AppZone() {
   const u = useUpdates();
   const [msg, setMsg] = useState(null);
+  const [offerReload, setOfferReload] = useState(false);
+  /* Says what the check actually found. It used to say "latest version"
+     whenever it couldn't tell, which is the one answer that sends you off
+     to clear the cache. */
   const checkNow = async () => {
-    setMsg(null);
+    setMsg(null); setOfferReload(false);
     if (!u) { setMsg('Updates are not available in this browser.'); return; }
-    if (await u.check()) {
+    await u.check();
+    const r = u.lastResult;
+    if (r === 'newer') {
       setMsg('A new version was found — reloading…');
       setTimeout(() => u.reload(), 600);
-    } else {
-      setMsg('You have the latest version.');
+      return;
     }
+    setMsg({
+      same:      'You have the latest version.',
+      signin:    'Your Cloudflare Access sign-in has expired, so the app can’t see the server. Reload to sign in — you’ll come back to the newest version.',
+      offline:   'Couldn’t reach the server — you look to be offline. It will check again when you’re back.',
+      'not-app': 'The server answered with something that isn’t the app, so versions couldn’t be compared. Reloading fetches it fresh.',
+      unstable:  'The page comes back different on every request, so versions couldn’t be compared. Reloading fetches the newest anyway.',
+    }[r] || 'Couldn’t check just now.');
+    setOfferReload(r !== 'same' && r !== 'offline');
   };
   const clearCache = async () => {
     if (!confirm('Clear the app cache and reload? The app will re-download on next load.')) return;
@@ -8405,8 +8418,19 @@ function AppZone() {
           className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm disabled:opacity-50">
           {u?.checking ? 'Checking…' : 'Check for updates'}
         </button>
+        {offerReload && (
+          <button onClick={() => u?.reload()} data-testid="update-reload"
+            className="btn px-3 py-2 rounded-lg border border-strategy/40 text-strategy hover:bg-strategy/10 text-sm">
+            Reload
+          </button>
+        )}
         <button onClick={clearCache} className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm">Clear cache &amp; reload</button>
       </div>
+      {u?.build && (
+        <div className="text-[10px] font-mono text-bone-500 mt-2" data-testid="running-build">
+          Running build {u.build}{u.lastResult ? ` · last check: ${u.lastResult}` : ''}
+        </div>
+      )}
     </div>
   );
 }
@@ -9661,7 +9685,10 @@ function ShortsView() {
   return (
     <div className="pt-6 fadeUp">
       <SectionHeading kicker="Fuel" title="Shorts" sub="Short motivational reminders · five minutes at most · swipe or ↑ ↓ for the next"/>
-      <div data-testid="shorts" className="relative mx-auto w-full max-w-[420px] rounded-2xl overflow-hidden bg-black text-white"
+      {/* data-busy: a video playing is in use even with no taps — the update
+          check won't reload the app out from under it. */}
+      <div data-testid="shorts" data-busy={feed.length ? 'video' : undefined}
+        className="relative mx-auto w-full max-w-[420px] rounded-2xl overflow-hidden bg-black text-white"
         style={{ height: 'calc(100dvh - 14rem)', minHeight: 420 }}>
         <button onClick={() => setMuted(m => !m)} aria-label={muted ? 'Turn sound on' : 'Mute'}
           className="btn absolute right-3 top-3 z-20 w-10 h-10 rounded-full flex items-center justify-center"
@@ -10259,39 +10286,71 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
     const GUARD_KEY      = 'cd_update_reloads';
     const U = window.CDUpdates = {
       ready: false, checking: false, lastChecked: null, check, reload: () => reloadNow(),
+      /* Why a reload is wanted: 'update' (a newer version) or 'signin' (the
+         Cloudflare Access session expired — reloading is what signs you back
+         in, and lands on the newest version). */
+      reason: null,
+      /* What the last check found: 'newer' | 'same' | 'signin' | 'offline' |
+         'not-app' (the server answered with something that isn't the app) |
+         'unstable' (the page differs on every request, so can't be compared). */
+      lastResult: null,
       get build() { return baseline; },   // fingerprint of the page that is running; null until known
     };
     const emit = () => window.dispatchEvent(new Event('cd-update'));
 
+    /* Cloudflare adds to an HTML page on its way out of a proxied domain:
+       the bot-detection script carries the request's own ray id, so it is
+       different every time; the analytics beacon, email protection and nonces
+       ride along too. None of it is the app, and left in, the page "changes"
+       on every request — which the check below rightly refuses to believe,
+       so it never saw a real deploy either. Markers are split so this
+       script never matches itself. */
+    const INJECTED = ['__CF' + '$cv$params', '/cdn' + '-cgi/', 'cloudflare' + 'insights', 'challenge' + '-platform'];
+    const appText = (html) => html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, tag => INJECTED.some(m => tag.includes(m)) ? '' : tag)
+      .replace(/\sdata-cfemail="[^"]*"/gi, '')
+      .replace(/\snonce="[^"]*"/gi, '');
+
     /* A cheap stand-in for a hash: HTML is large and this only has to tell
        "same file" from "different file". */
-    function fingerprint(text) {
+    function fingerprint(html) {
+      const text = appText(html);
       let h = 0x811c9dc5;
       for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193); }
       return text.length.toString(36) + '-' + (h >>> 0).toString(36);
     }
 
     /* What the server serves now. 'no-cache' revalidates, so an unchanged
-       page is a 304 and costs next to nothing. Only an answer that is really
-       the app counts: a login page from an auth gateway, an error page or a
-       redirect would otherwise read as "a new version". */
-    async function servedBuild() {
-      const r = await fetch('/', { cache: 'no-cache' });
-      if (!r.ok || r.redirected || !/text\/html/i.test(r.headers.get('content-type') || '')) throw new Error('not the app');
+       page is a 304 and costs next to nothing. redirect 'manual' so a
+       redirect is SEEN rather than followed: behind Cloudflare Access an
+       expired sign-in answers everything with one, to its login page on
+       another origin. Followed, that is a failed cross-origin fetch, and this
+       used to read it as "nothing new" — which is how "Check for updates"
+       said "latest version" to a device that wasn't. */
+    async function served() {
+      let r;
+      try { r = await fetch('/', { cache: 'no-cache', redirect: 'manual' }); }
+      catch (e) { return { result: 'offline' }; }
+      if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400) || r.status === 401 || r.status === 403) return { result: 'signin' };
+      if (!r.ok || !/text\/html/i.test(r.headers.get('content-type') || '')) return { result: 'not-app' };
       const text = await r.text();
-      if (text.indexOf('id="root"') === -1) throw new Error('not the app');
-      return fingerprint(text);
+      if (text.indexOf('id="root"') === -1) return { result: 'not-app' };
+      return { result: 'ok', build: fingerprint(text) };
     }
 
-    /* What THIS page is running. The worker caches every shell response it
-       serves, so the cached copy is the document that loaded — even when it
-       was served stale because the network failed at launch, which asking
-       the network would get wrong. First visit has no worker yet: ask the
-       network. */
+    /* What THIS page is running. The worker caches the shell it serves, so
+       the cached copy is the document that loaded — even when it was served
+       stale because the network failed at launch, which asking the network
+       would get wrong. Only a real copy of the app counts: an older worker
+       could have stored a sign-in redirect there. First visit has no worker
+       yet: ask the network. */
     async function runningBuild() {
       try {
         const hit = await caches.match(location.origin + location.pathname + location.search);
-        if (hit) return fingerprint(await hit.text());
+        if (hit && hit.ok && hit.type === 'basic') {
+          const text = await hit.text();
+          if (text.indexOf('id="root"') !== -1) return fingerprint(text);
+        }
       } catch (e) {}
       return null;
     }
@@ -10303,12 +10362,22 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
       try {
         const reg = await navigator.serviceWorker.getRegistration();
         if (reg) await reg.update().catch(() => {});
-        const served = await servedBuild();
-        if (baseline === null) baseline = served;
-        /* Asked twice: a page whose bytes change on every request (something
-           injecting a nonce, a timestamp) would otherwise reload forever. */
-        else if (served !== baseline && served === await servedBuild()) markReady();
-      } catch (e) { /* offline, or not the app — try again at the next opportunity */ }
+        const now = await served();
+        if (now.result !== 'ok') {
+          U.lastResult = now.result;
+          if (now.result === 'signin') markReady('signin');
+        } else if (baseline === null) {
+          baseline = now.build; U.lastResult = 'same';
+        } else if (now.build === baseline) {
+          U.lastResult = 'same';
+        } else {
+          /* Asked twice: a page whose bytes change on every request for some
+             reason not stripped above would otherwise reload forever. */
+          const again = await served();
+          if (again.result === 'ok' && again.build === now.build) { U.lastResult = 'newer'; markReady('update'); }
+          else U.lastResult = again.result === 'ok' ? 'unstable' : again.result;
+        }
+      } catch (e) { U.lastResult = 'offline'; }
       finally { U.checking = false; U.lastChecked = Date.now(); emit(); }
       return U.ready;
     }
@@ -10322,6 +10391,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
       const a = document.activeElement;
       if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return false;   // typing
       if (document.querySelector('[data-modal]')) return false;                                      // a sheet is open
+      if (document.querySelector('[data-busy]')) return false;                                       // e.g. a video playing
       return Date.now() - lastInput >= IDLE_MS;
     }
 
@@ -10346,8 +10416,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
     }
 
     function tryApply() { if (U.ready && safeNow()) reloadNow(true); }
-    function markReady() {
-      if (!U.ready) { U.ready = true; emit(); }
+    function markReady(reason = 'update') {
+      /* A newer version outranks a sign-in: reloading fixes both. */
+      if (!U.ready || reason === 'update') { U.ready = true; U.reason = U.reason === 'update' ? 'update' : reason; emit(); }
       tryApply();
       if (!poll) poll = setInterval(tryApply, 3_000);
     }
@@ -10360,7 +10431,8 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
       /* updateViaCache 'none': never serve sw.js (or what it imports) from the HTTP cache. */
       try { await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }); }
       catch (err) { console.warn('SW registration failed:', err); }
-      try { baseline = (await runningBuild()) ?? (await servedBuild()); } catch (e) {}
+      baseline = await runningBuild();
+      if (baseline === null) { const now = await served(); if (now.result === 'ok') baseline = now.build; }
     });
 
     let last = Date.now();
