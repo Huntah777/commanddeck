@@ -10291,7 +10291,8 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
   if ('serviceWorker' in navigator) (function () {
     const CHECK_EVERY_MS = 30 * 60_000;   // while the app stays open
     const THROTTLE_MS    = 60_000;        // between foreground checks
-    const IDLE_MS        = 8_000;         // quiet time before an automatic reload
+    const GRACE_MS       = 60_000;        // left alone after the app opens or comes back
+    const IDLE_MS        = 60_000;        // with no touch for this long before a visible reload
     const GUARD_KEY      = 'cd_update_reloads';
     const U = window.CDUpdates = {
       ready: false, checking: false, lastChecked: null, check, reload: () => reloadNow(),
@@ -10391,17 +10392,31 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
       return U.ready;
     }
 
-    /* Reload, or wait for a moment that costs nothing. */
+    /* Reload, or wait for a moment that costs nothing.
+
+       A reload is not free here: the page compiles ~500 KB of JSX in the
+       browser, so it is several seconds of blank-and-flicker. The one moment
+       that costs nothing is when nobody is looking — so the update is applied
+       as the app is put away, and while it is on screen only after it has
+       been left alone for a good while. Never in the first minute after it
+       opens or comes back: that is when you are about to use it. */
     let lastInput = 0, poll = null;
+    let calmFrom = Date.now();                       // start of the current "leave it alone" window
     ['pointerdown', 'keydown', 'touchstart'].forEach(t =>
       window.addEventListener(t, () => { lastInput = Date.now(); }, { capture: true, passive: true }));
 
-    function safeNow() {
+    /* Something half-done that a reload would lose — true however quiet it is. */
+    function inTheMiddleOfSomething() {
       const a = document.activeElement;
-      if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return false;   // typing
-      if (document.querySelector('[data-modal]')) return false;                                      // a sheet is open
-      if (document.querySelector('[data-busy]')) return false;                                       // e.g. a video playing
-      return Date.now() - lastInput >= IDLE_MS;
+      if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return true;   // typing
+      return !!document.querySelector('[data-modal]');                                              // a sheet is open
+    }
+
+    function safeNow() {
+      if (inTheMiddleOfSomething()) return false;
+      if (document.querySelector('[data-busy]')) return false;                  // e.g. a video playing
+      const now = Date.now();
+      return now - calmFrom >= GRACE_MS && now - lastInput >= IDLE_MS;
     }
 
     /* Automatic reloads are rationed: if something is genuinely wrong, a
@@ -10432,9 +10447,22 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
       if (!poll) poll = setInterval(tryApply, 3_000);
     }
 
-    /* A new worker took control. The first install claiming the page isn't an update. */
-    const hadController = !!navigator.serviceWorker.controller;
-    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController) markReady(); });
+    /* A new worker took control. That alone is not a reason to reload: on
+       the launch after a deploy the shell is fetched fresh and the new worker
+       claims the page seconds later, so the page is ALREADY current — and
+       reloading it then was the flicker on opening. Ask whether the page
+       really differs from the server's; only then is there anything to apply. */
+    navigator.serviceWorker.addEventListener('controllerchange', () => { setTimeout(check, 1_500); });
+
+    /* Put away → apply now, unseen. Back → a fresh quiet window. */
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        if (U.ready && !inTheMiddleOfSomething()) reloadNow(true);
+      } else {
+        calmFrom = Date.now();
+      }
+    });
+    window.addEventListener('pageshow', () => { calmFrom = Date.now(); });
 
     window.addEventListener('load', async () => {
       /* updateViaCache 'none': never serve sw.js (or what it imports) from the HTTP cache. */

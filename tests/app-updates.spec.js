@@ -74,6 +74,11 @@ const deployed = (page) => page.evaluate(() => window.__deploy);
 const alive    = (page) => page.evaluate(() => window.__alive === true);
 const pill     = (page) => page.getByTestId('update-pill');
 const check    = (page) => page.evaluate(() => window.CDUpdates.check());
+/* The app leaves itself alone for a minute after opening or coming back, and
+   until it has been untouched for a minute: a reload is several seconds of
+   flicker, so it waits for a moment nobody is looking. */
+const calm  = (page) => page.clock.fastForward(70_000);
+const ready = (page) => page.waitForFunction(() => window.CDUpdates.ready === true, null, { timeout: 10_000 });
 const reloadedInto = (page, mark) => page.waitForFunction((m) => window.__deploy === m, mark, { timeout: 10_000 });
 
 test.use({ serviceWorkers: 'block' });
@@ -91,7 +96,8 @@ test.describe('noticing a new deploy', () => {
     expect(await deployed(page)).toBe('A');
 
     site.mark = 'B';
-    await check(page);                    // nothing in use, so nothing to wait for
+    await check(page);
+    await calm(page);                     // nothing in use, and a quiet minute has passed
     await reloadedInto(page, 'B');
     expect(await alive(page)).toBe(false);   // a genuine reload, not a re-render
   });
@@ -103,6 +109,8 @@ test.describe('noticing a new deploy', () => {
     // Resumed after a while: the throttle has passed, and the app becomes visible.
     await page.clock.fastForward(61_000);
     await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await ready(page);
+    await calm(page);
     await reloadedInto(page, 'B');
   });
 
@@ -138,7 +146,7 @@ test.describe('only reloading when it costs nothing', () => {
     expect(await check(page)).toBe(true);
     await expect(pill(page)).toBeVisible();
 
-    await page.clock.fastForward(20_000);                 // plenty of polls
+    await calm(page);                                     // long past the quiet minute — typing is what holds it
     expect(await alive(page)).toBe(true);                 // still here
     expect(await deployed(page)).toBe('A');
 
@@ -166,27 +174,79 @@ test.describe('only reloading when it costs nothing', () => {
 
     site.mark = 'B';
     expect(await check(page)).toBe(true);
-    await page.clock.fastForward(20_000);
+    await calm(page);
     expect(await alive(page)).toBe(true);
     await expect(pill(page)).toBeVisible();
 
     await page.locator('[data-modal]').getByRole('button', { name: 'Close' }).first().click();
     await expect(page.locator('[data-modal]')).toHaveCount(0);
-    await page.clock.fastForward(10_000);                 // and quiet long enough since that tap
+    await calm(page);                                     // and a quiet minute since that tap
     await reloadedInto(page, 'B');
   });
 
-  test('not within a few seconds of a tap', async ({ page }) => {
+  test('not while the app is being used — only after it has been left alone', async ({ page }) => {
     const site = await boot(page);
-    await page.mouse.click(5, 5);
+    await page.clock.fastForward(61_000);                 // past the opening minute
+    await page.mouse.click(5, 5);                         // …and then a tap
 
     site.mark = 'B';
     await check(page);
-    await page.clock.fastForward(5_000);
-    expect(await alive(page)).toBe(true);                 // 5s since the tap: still too soon
+    await page.clock.fastForward(30_000);
+    expect(await alive(page)).toBe(true);                 // 30s since the tap: still in use
 
-    await page.clock.fastForward(5_000);                  // 10s: quiet long enough
+    await page.clock.fastForward(40_000);                 // a minute and more of quiet
     await reloadedInto(page, 'B');
+  });
+
+  test('not in the first minute after opening — that is when it is about to be used', async ({ page }) => {
+    const site = await boot(page);
+    site.mark = 'B';
+    expect(await check(page)).toBe(true);                 // seen straight away…
+    await page.clock.fastForward(30_000);
+    expect(await alive(page)).toBe(true);                 // …but not acted on
+    await expect(pill(page)).toBeVisible();
+
+    await page.clock.fastForward(40_000);                 // the minute is over
+    await reloadedInto(page, 'B');
+  });
+
+  test('nor in the first minute after coming back to it', async ({ page }) => {
+    const site = await boot(page);
+    await page.clock.fastForward(5 * 60_000);             // it has been open a while, untouched
+    site.mark = 'B';
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));   // …and you return
+    await ready(page);
+    await page.clock.fastForward(30_000);
+    expect(await alive(page)).toBe(true);                 // you are looking at it: leave it be
+
+    await page.clock.fastForward(40_000);
+    await reloadedInto(page, 'B');
+  });
+
+  test('when the app is put away, that is when it updates — unseen', async ({ page }) => {
+    const site = await boot(page);
+    site.mark = 'B';
+    expect(await check(page)).toBe(true);                 // found while you are looking
+    expect(await alive(page)).toBe(true);                 // …and left alone
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await reloadedInto(page, 'B');                        // no waiting for a quiet minute: nobody is watching
+  });
+
+  test('but putting it away mid-sentence does not throw the sentence away', async ({ page }) => {
+    const site = await boot(page);
+    await page.evaluate(() => { const i = document.createElement('input'); document.body.appendChild(i); i.focus(); });
+    site.mark = 'B';
+    await check(page);
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await page.waitForTimeout(500);
+    expect(await alive(page)).toBe(true);
   });
 
   test('a loop is worse than a stale screen: automatic reloads are rationed', async ({ page }) => {
@@ -199,7 +259,7 @@ test.describe('only reloading when it costs nothing', () => {
 
     site.mark = 'B';
     expect(await check(page)).toBe(true);
-    await page.clock.fastForward(20_000);
+    await calm(page);
     expect(await alive(page)).toBe(true);                 // nothing automatic
     await expect(pill(page)).toBeVisible();
 
@@ -245,6 +305,7 @@ test.describe('not mistaking something else for a new version', () => {
 
     site.offline = false; site.mark = 'B';
     await check(page);
+    await calm(page);
     await reloadedInto(page, 'B');
   });
 });
@@ -266,6 +327,7 @@ test.describe('behind Cloudflare', () => {
     site.cloudflare = true;
     site.mark = 'B';
     await check(page);
+    await calm(page);
     await reloadedInto(page, 'B');
   });
 
@@ -298,7 +360,7 @@ test.describe('only reloading when it costs nothing — continued', () => {
     await page.evaluate(() => { const d = document.createElement('div'); d.id = 'vid'; d.dataset.busy = 'video'; document.body.appendChild(d); });
     site.mark = 'B';
     expect(await check(page)).toBe(true);
-    await page.clock.fastForward(20_000);
+    await calm(page);
     expect(await alive(page)).toBe(true);
 
     await page.evaluate(() => document.getElementById('vid').remove());
@@ -345,57 +407,54 @@ test.describe('the Admin → System card', () => {
 
 test.describe('a new service worker taking over', () => {
   /* sw.js changing means the browser installs a new worker, which skips
-     waiting and claims the page — and the page it claims is still running the
-     old JS, so that is a reason to reload whether or not index.html changed.
-     The browser does the swapping; what is ours is what the page does when it
-     is told, so the event is raised by hand. Needs the real worker present, so
-     this block lets it run. */
-  test.use({ serviceWorkers: 'allow' });
-
-  const load = async (page) => {
-    await page.goto('/');
-    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
-  };
+     waiting and claims the page. On the launch right after a deploy that
+     happens seconds after the page has loaded — and the shell is fetched
+     fresh, so the page is ALREADY the new version. Reloading on that signal
+     alone was the flicker on opening. It now just asks whether the page
+     really differs from what the server serves. The browser does the
+     swapping; the event is raised by hand. */
   const takeOver = (page) => page.evaluate(() => navigator.serviceWorker.dispatchEvent(new Event('controllerchange')));
 
-  test('an unchanged deploy is not mistaken for a new one — the worker\'s cached copy is the baseline', async ({ page }) => {
-    /* With a worker, "what am I running" is read back from Cache Storage, and
-       "what is served" from the network. If those two ever disagreed about the
-       same file — encoding, a stray byte — every check would read as a new
-       version and the app would reload at every opportunity. */
-    await load(page);
-    await page.waitForFunction(() => !!navigator.serviceWorker.controller, { timeout: 15_000 });
-    await page.reload();                                  // now served through the worker
-    await page.waitForFunction(() => !!window.CDUpdates?.build, { timeout: 10_000 });
-    await page.evaluate(() => { window.__alive = true; });
-
-    const fromCache = await page.evaluate(async () =>
-      !!(await caches.match(location.origin + location.pathname + location.search)));
-    expect(fromCache).toBe(true);
-
-    expect(await page.evaluate(() => window.CDUpdates.check())).toBe(false);
-    await expect(pill(page)).toHaveCount(0);
-    expect(await alive(page)).toBe(true);
-  });
-
-  test('the very first install claiming the page is not an update', async ({ page }) => {
-    await load(page);                                     // nothing controls it yet
-    await page.evaluate(() => { window.__alive = true; });
+  test('over a page that is already current, it does nothing at all', async ({ page }) => {
+    const site = await boot(page);
+    const before = site.requests;
     await takeOver(page);
-    await page.waitForTimeout(1_000);
-    expect(await alive(page)).toBe(true);
+    await page.clock.fastForward(2_000);                  // its short pause before looking
+    await page.waitForFunction(() => window.CDUpdates.lastResult === 'same', null, { timeout: 10_000 });
+    await calm(page);
+    expect(site.requests).toBeGreaterThan(before);        // it did look…
+    expect(await alive(page)).toBe(true);                 // …found nothing, and left the page alone
     await expect(pill(page)).toHaveCount(0);
   });
 
-  test('a new worker taking over a page that already had one reloads it', async ({ page }) => {
-    await load(page);
-    await page.waitForFunction(() => !!navigator.serviceWorker.controller, { timeout: 15_000 });
-    await page.reload();                                  // now it starts out controlled
-    await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
-    expect(await page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
-    await page.evaluate(() => { window.__alive = true; });
-
+  test('over a page that is out of date, it is the check that notices, and applies it quietly', async ({ page }) => {
+    const site = await boot(page);
+    site.mark = 'B';
     await takeOver(page);
-    await page.waitForFunction(() => !window.__alive, { timeout: 15_000 });
+    await page.clock.fastForward(2_000);
+    await ready(page);
+    expect(await alive(page)).toBe(true);                 // seen, not acted on yet
+    await calm(page);
+    await reloadedInto(page, 'B');
+  });
+
+  test.describe('with the real worker', () => {
+    test.use({ serviceWorkers: 'allow' });
+    const load = async (page) => {
+      await page.goto('/');
+      await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
+    };
+
+    test('a worker claiming a current page leaves it alone', async ({ page }) => {
+      await load(page);
+      await page.waitForFunction(() => !!navigator.serviceWorker.controller, { timeout: 15_000 });
+      await page.reload();                                // now it starts out controlled
+      await page.waitForFunction(() => !!window.CDUpdates?.build, { timeout: 10_000 });
+      await page.evaluate(() => { window.__alive = true; });
+      await takeOver(page);
+      await page.waitForFunction(() => window.CDUpdates.lastResult === 'same', null, { timeout: 10_000 });
+      expect(await alive(page)).toBe(true);
+      await expect(pill(page)).toHaveCount(0);
+    });
   });
 });
