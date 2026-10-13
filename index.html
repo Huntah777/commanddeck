@@ -708,7 +708,7 @@ const IDLE_SESSION = { phase: 0, endsAt: null, leftMs: null, running: false, don
    forever and resolved in one place rather than five. */
 const VIEW_ALIASES = { stats: 'admin' };
 const normaliseView = (v) => VIEW_ALIASES[v] || v;
-const VALID_VIEWS = ['today','habits','tasks','matrix','admin','stats','focus','goals'];
+const VALID_VIEWS = ['today','habits','tasks','matrix','admin','stats','focus','goals','shorts'];
 
 const TimerStore = {
   read() {
@@ -876,6 +876,9 @@ const I = {
   timer:   (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5"/><path d="M9.5 2.5h5"/><path d="M12 2.5v2"/></svg>,
   refresh: (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>,
   target:  (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1" fill="currentColor" strokeWidth="0"/></svg>,
+  play:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="5"/><path d="M10 8.5v7l6-3.5z" fill="currentColor"/></svg>,
+  volume:  (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>,
+  mute:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></svg>,
   flag:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>,
   sliders: (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="6" r="2.2" fill="var(--s0,#0a0a0b)"/><circle cx="15" cy="12" r="2.2" fill="var(--s0,#0a0a0b)"/><circle cx="8" cy="18" r="2.2" fill="var(--s0,#0a0a0b)"/></svg>,
 };
@@ -3645,6 +3648,7 @@ function App() {
             syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}/>}
         {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState} pomo={pomo}/>}
         {state.ui.view === 'goals'  && <GoalsView state={state} setState={setState}/>}
+        {state.ui.view === 'shorts' && <ShortsView/>}
       </main>
       <footer className="text-center pb-8 text-xs text-ink-500 font-mono tracking-wide">
         MADINAH · COMMAND DECK · v1.1 · {Sync.configured() ? 'cloudflare d1' : 'local only'}
@@ -3830,6 +3834,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
     { id:'admin',  label:'Admin',    icon:I.sliders },
     { id:'focus',  label:'Focus',    icon:I.timer  },
     { id:'goals',  label:'Goals',    icon:I.target },
+    { id:'shorts', label:'Shorts',   icon:I.play },
   ];
 
   return (
@@ -9585,6 +9590,210 @@ function PomodoroSettings({ cfg, onChange }) {
 /* ------------------------------------------------------------------
    GOALS VIEW  ─ Timestripe-style nested time horizons + quarters
 ------------------------------------------------------------------- */
+/* ------------------------------------------------------------------
+   SHORTS  ─ short motivational videos, five minutes at most
+   ------------------------------------------------------------------
+   A swipe feed, one video per screen, modelled on For The Ummah's short
+   lectures. The list comes from /api/shorts (functions/api/shorts.js),
+   which reads the speakers' own Shorts-only YouTube feeds; the videos are
+   embedded, never re-hosted.
+
+   The embed is driven over YouTube's postMessage protocol, so no YouTube
+   script is loaded into the app. Only the video on screen has a player —
+   the rest are thumbnails — so the feed costs one iframe however long it
+   is. Anything that turns out to be over five minutes, or can't be
+   embedded, is skipped rather than shown.
+------------------------------------------------------------------- */
+const SHORTS_EMBED     = 'https://www.youtube-nocookie.com';
+const SHORTS_MAX_SECS  = 300;
+const SHORTS_COUNTDOWN = 3;
+
+function ShortsView() {
+  const [shorts, setShorts] = useState(null);       // null = loading
+  const [failed, setFailed] = useState(false);
+  const [active, setActive] = useState(0);
+  /* Browsers only autoplay muted; one tap turns sound on for the whole feed. */
+  const [muted, setMuted]   = useState(true);
+  const [skip, setSkip]     = useState(() => new Set());
+  const scroller = useRef(null);
+
+  const load = useCallback(async () => {
+    setFailed(false); setShorts(null);
+    try {
+      const r = await fetch('/api/shorts');
+      if (!r.ok) throw new Error(String(r.status));
+      const list = (await r.json())?.shorts;
+      if (!Array.isArray(list)) throw new Error('bad payload');
+      setShorts(list);
+    } catch { setFailed(true); setShorts([]); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const feed = useMemo(() => (shorts || []).filter(v => !skip.has(v.id)), [shorts, skip]);
+
+  /* Which card is on screen. */
+  useEffect(() => {
+    const root = scroller.current;
+    if (!root) return;
+    const io = new IntersectionObserver((entries) => {
+      for (const e of entries) if (e.isIntersecting) setActive(Number(e.target.dataset.index));
+    }, { root, threshold: 0.6 });
+    root.querySelectorAll('[data-index]').forEach(el => io.observe(el));
+    return () => io.disconnect();
+  }, [feed.length]);
+
+  const goTo = useCallback((i) => {
+    scroller.current?.querySelector(`[data-index="${i}"]`)?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
+  const drop = useCallback((id) => setSkip(s => new Set(s).add(id)), []);
+
+  /* Arrow keys on a desktop, where there is no swipe. */
+  useEffect(() => {
+    const onKey = (e) => {
+      if (/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '')) return;
+      if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); goTo(Math.min(active + 1, feed.length - 1)); }
+      if (e.key === 'ArrowUp'   || e.key === 'k') { e.preventDefault(); goTo(Math.max(active - 1, 0)); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [active, feed.length, goTo]);
+
+  return (
+    <div className="pt-6 fadeUp">
+      <SectionHeading kicker="Fuel" title="Shorts" sub="Short motivational reminders · five minutes at most · swipe or ↑ ↓ for the next"/>
+      <div data-testid="shorts" className="relative mx-auto w-full max-w-[420px] rounded-2xl overflow-hidden bg-black text-white"
+        style={{ height: 'calc(100dvh - 14rem)', minHeight: 420 }}>
+        <button onClick={() => setMuted(m => !m)} aria-label={muted ? 'Turn sound on' : 'Mute'}
+          className="btn absolute right-3 top-3 z-20 w-10 h-10 rounded-full flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,.45)', backdropFilter: 'blur(8px)' }}>
+          {muted ? <I.mute className="w-5 h-5"/> : <I.volume className="w-5 h-5"/>}
+        </button>
+
+        {shorts === null ? (
+          <div className="h-full grid place-items-center text-sm text-white/70" data-testid="shorts-loading">Loading…</div>
+        ) : failed || !feed.length ? (
+          <div className="h-full grid place-items-center px-8 text-center" data-testid="shorts-error">
+            <div>
+              <p className="text-sm text-white/80">
+                {failed ? 'Couldn’t load shorts — check your connection.' : 'Nothing to show right now.'}
+              </p>
+              <button onClick={load} className="btn mt-4 rounded-full px-5 py-2.5 text-sm font-semibold" style={{ background: 'rgba(255,255,255,.15)' }}>
+                Try again
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div ref={scroller} className="no-scrollbar h-full overflow-y-scroll" style={{ scrollSnapType: 'y mandatory', overscrollBehavior: 'contain' }}>
+            {feed.map((v, i) => (
+              <section key={v.id} data-index={i} data-testid="short" data-id={v.id} aria-label={v.title}
+                className="relative h-full w-full overflow-hidden" style={{ scrollSnapAlign: 'start', scrollSnapStop: 'always' }}>
+                <ShortCard video={v} active={i === active} muted={muted} onUnmute={() => setMuted(false)}
+                  hasNext={i + 1 < feed.length} onNext={() => goTo(i + 1)} onSkip={drop}/>
+              </section>
+            ))}
+          </div>
+        )}
+      </div>
+      <p className="text-center text-[10px] text-bone-400/70 mt-2">
+        Played from the speakers’ own YouTube channels.
+      </p>
+    </div>
+  );
+}
+
+function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip }) {
+  const [ended, setEnded] = useState(false);
+  const [count, setCount] = useState(SHORTS_COUNTDOWN);
+  const frame = useRef(null);
+
+  useEffect(() => { if (!active) { setEnded(false); setCount(SHORTS_COUNTDOWN); } }, [active]);
+
+  const send = useCallback((func, args = []) => {
+    frame.current?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func, args }), SHORTS_EMBED);
+  }, []);
+
+  /* This player's own events: its length, its end, and whether it can play here at all. */
+  useEffect(() => {
+    if (!active) return;
+    const onMsg = (e) => {
+      if (e.origin !== SHORTS_EMBED || e.source !== frame.current?.contentWindow || typeof e.data !== 'string') return;
+      let m; try { m = JSON.parse(e.data); } catch { return; }
+      const info = m.info;
+      if (m.event === 'infoDelivery' && info && typeof info === 'object') {
+        /* The section's promise: five minutes at most. */
+        if (info.duration > SHORTS_MAX_SECS) { onSkip(v.id); return; }
+        if (info.playerState === 0) setEnded(true);
+      }
+      if (m.event === 'onStateChange' && info === 0) setEnded(true);
+      /* 100: removed or private · 101/150: the channel doesn't allow embedding. */
+      if (m.event === 'onError' && (info === 100 || info === 101 || info === 150)) onSkip(v.id);
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, [active, v.id, onSkip]);
+
+  useEffect(() => { if (active) send(muted ? 'mute' : 'unMute'); }, [muted, active, send]);
+
+  /* Finished: count down, then on to the next one. */
+  useEffect(() => {
+    if (!ended || !active) return;
+    if (count <= 0) { if (hasNext) onNext(); return; }
+    const t = setTimeout(() => setCount(c => c - 1), 1000);
+    return () => clearTimeout(t);
+  }, [ended, active, count, hasNext, onNext]);
+
+  /* end= caps playback at five minutes even before the player has said how long it is. */
+  const src = `${SHORTS_EMBED}/embed/${v.id}?enablejsapi=1&playsinline=1&autoplay=1&mute=${muted ? 1 : 0}`
+    + `&rel=0&modestbranding=1&iv_load_policy=3&end=${SHORTS_MAX_SECS}&origin=${encodeURIComponent(location.origin)}`;
+  const subscribe = () => frame.current?.contentWindow?.postMessage(JSON.stringify({ event: 'listening', id: v.id, channel: 'widget' }), SHORTS_EMBED);
+
+  return (
+    <>
+      <div className="absolute inset-0 grid place-items-center">
+        {active ? (
+          <iframe ref={frame} src={src} onLoad={subscribe} title={v.title} data-testid="short-player"
+            allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen
+            className="h-full w-full border-0"/>
+        ) : (
+          <img src={`https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`} alt="" loading="lazy" className="h-full w-full object-cover opacity-60"/>
+        )}
+      </div>
+
+      {/* Over the bottom of the card; the middle stays free for the player's own controls. */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pt-16 pb-4"
+        style={{ background: 'linear-gradient(to top, rgba(0,0,0,.9), rgba(0,0,0,.5) 55%, transparent)' }}>
+        <div className="text-[12px] font-semibold" style={{ color: '#f3d27a' }}>{v.channel}</div>
+        <div className="text-[15px] font-semibold leading-snug" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{v.title}</div>
+        <div className="pointer-events-auto mt-3 flex flex-wrap items-center gap-2">
+          {muted && active && (
+            <button onClick={onUnmute} className="btn flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-semibold"
+              style={{ background: '#fff', color: '#000' }}>
+              <I.volume className="w-4 h-4"/> Tap for sound
+            </button>
+          )}
+          {hasNext && (
+            <button onClick={onNext} className="btn rounded-full px-3 py-1.5 text-[12px] font-semibold" style={{ background: 'rgba(255,255,255,.15)' }}>
+              Next ↓
+            </button>
+          )}
+        </div>
+      </div>
+
+      {ended && active && (
+        <div className="absolute inset-0 z-20 grid place-items-center px-8 text-center" style={{ background: 'rgba(0,0,0,.7)' }} data-testid="short-ended">
+          <div>
+            <p className="text-sm text-white/80">{hasNext ? `Next in ${count}…` : 'You’re all caught up.'}</p>
+            <button onClick={() => { setEnded(false); setCount(SHORTS_COUNTDOWN); send('pauseVideo'); }}
+              className="btn mt-4 rounded-full px-4 py-2.5 text-sm font-semibold" style={{ background: 'rgba(255,255,255,.15)' }}>
+              Stay here
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function GoalsView({ state, setState }) {
   const [adding, setAdding] = useState(null);  /* { horizon, quarter } */
   const [editing, setEditing] = useState(null);

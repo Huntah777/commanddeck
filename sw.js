@@ -63,6 +63,11 @@ self.addEventListener('fetch', (event) => {
   // API calls — never intercept, let them reach the network
   if (url.pathname.startsWith('/api/')) return;
 
+  /* YouTube (the Shorts tab) — thumbnails, embeds and video pass straight
+     through. Cache-first below would keep one thumbnail per video ever
+     shown, forever, and offline a short can't play anyway. */
+  if (/(^|\.)(ytimg\.com|youtube\.com|youtube-nocookie\.com|googlevideo\.com)$/.test(url.hostname)) return;
+
   // Google Fonts — stale-while-revalidate
   if (url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com') {
     event.respondWith(

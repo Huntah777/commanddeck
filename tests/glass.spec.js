@@ -113,7 +113,7 @@ test.describe('Liquid Glass', () => {
   });
 
   test('the lens is not a button, so tabs are still found by their text', async ({ page }) => {
-    await expect(page.locator('nav.glass-nav > button')).toHaveCount(7);
+    await expect(page.locator('nav.glass-nav > button')).toHaveCount(8);
     await expect(page.locator('nav.glass-nav > span.lens')).toHaveCount(1);
   });
 });
