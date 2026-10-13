@@ -9641,10 +9641,13 @@ function ShortsView() {
   const [skip, setSkip]     = useState(() => new Set());
   const scroller = useRef(null);
 
-  const load = useCallback(async () => {
+  /* `fresh` asks the server to rebuild the feed rather than serve its cached
+     copy. 'no-cache' either way: a browser that kept an older answer (the
+     endpoint used to allow half an hour) must not keep showing it. */
+  const load = useCallback(async (fresh = false) => {
     setFailed(false); setShorts(null);
     try {
-      const r = await fetch('/api/shorts');
+      const r = await fetch(fresh ? '/api/shorts?refresh=1' : '/api/shorts', { cache: 'no-cache' });
       if (!r.ok) throw new Error(String(r.status));
       const list = (await r.json())?.shorts;
       if (!Array.isArray(list)) throw new Error('bad payload');
@@ -9690,6 +9693,12 @@ function ShortsView() {
       <div data-testid="shorts" data-busy={feed.length ? 'video' : undefined}
         className="relative mx-auto w-full max-w-[420px] rounded-2xl overflow-hidden bg-black text-white"
         style={{ height: 'calc(100dvh - 14rem)', minHeight: 420 }}>
+        <button onClick={() => { setSkip(new Set()); setActive(0); load(true); }} aria-label="Refresh shorts"
+          title="Fetch the latest from the channels" data-testid="shorts-refresh"
+          className="btn absolute left-3 top-3 z-20 w-10 h-10 rounded-full flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,.45)', backdropFilter: 'blur(8px)' }}>
+          <I.refresh className="w-5 h-5"/>
+        </button>
         <button onClick={() => setMuted(m => !m)} aria-label={muted ? 'Turn sound on' : 'Mute'}
           className="btn absolute right-3 top-3 z-20 w-10 h-10 rounded-full flex items-center justify-center"
           style={{ background: 'rgba(0,0,0,.45)', backdropFilter: 'blur(8px)' }}>
@@ -9704,7 +9713,7 @@ function ShortsView() {
               <p className="text-sm text-white/80">
                 {failed ? 'Couldn’t load shorts — check your connection.' : 'Nothing to show right now.'}
               </p>
-              <button onClick={load} className="btn mt-4 rounded-full px-5 py-2.5 text-sm font-semibold" style={{ background: 'rgba(255,255,255,.15)' }}>
+              <button onClick={() => load()} className="btn mt-4 rounded-full px-5 py-2.5 text-sm font-semibold" style={{ background: 'rgba(255,255,255,.15)' }}>
                 Try again
               </button>
             </div>

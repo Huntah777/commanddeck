@@ -95,17 +95,30 @@ export async function fetchShorts(fetchFn = fetch) {
   return interleave(lists);
 }
 
+/* The edge cache outlives deploys. Keyed on the channel list itself, so
+   changing CHANNELS takes effect on the very next request instead of
+   serving the old line-up for up to half an hour. */
+export const cacheKey = (origin) =>
+  `${origin}/api/shorts?channels=${CHANNELS.map(c => c.id).join(',')}`;
+
 export async function onRequestGet({ request, waitUntil }) {
   const cache = caches.default;
-  const key = new Request(new URL('/api/shorts', request.url).toString());
-  const hit = await cache.match(key);
-  if (hit) return hit;
+  const url = new URL(request.url);
+  const key = new Request(cacheKey(url.origin));
+  /* ?refresh=1 skips the cached copy and rebuilds it — for "I changed the
+     channels, show me now". */
+  if (!url.searchParams.has('refresh')) {
+    const hit = await cache.match(key);
+    if (hit) return hit;
+  }
 
   const shorts = await fetchShorts();
   const res = new Response(JSON.stringify({ shorts, maxSeconds: MAX_SECONDS, fetchedAt: Date.now() }), {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': `public, max-age=${TTL}`,
+      /* s-maxage is the edge's half hour; max-age=0 keeps the browser from
+         holding its own copy on top, which no deploy could ever reach. */
+      'Cache-Control': `public, max-age=0, s-maxage=${TTL}`,
       'X-Content-Type-Options': 'nosniff',
     },
   });

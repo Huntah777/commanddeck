@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { parseFeed, interleave, fetchShorts, shortsPlaylist, CHANNELS, MAX_SECONDS } from '../functions/api/shorts.js';
+import { parseFeed, interleave, fetchShorts, shortsPlaylist, cacheKey, onRequestGet, CHANNELS, MAX_SECONDS } from '../functions/api/shorts.js';
 
 /* Shorts — short motivational videos, five minutes at most.
 
@@ -99,6 +99,44 @@ test.describe('what gets into the feed', () => {
     expect(out.length).toBe(CHANNELS.length - 1);
   });
 
+  test('the cache key is the channel list, so changing channels reaches people straight away', () => {
+    const key = cacheKey('https://deck.example');
+    for (const c of CHANNELS) expect(key).toContain(c.id);
+    expect(key.startsWith('https://deck.example/api/shorts?')).toBe(true);
+  });
+
+  test('the edge copy is reused, ?refresh rebuilds it, and the browser is told not to keep one', async () => {
+    /* A stand-in for the Workers edge cache and for YouTube. */
+    const store = new Map();
+    const realCaches = globalThis.caches, realFetch = globalThis.fetch;
+    globalThis.caches = { default: {
+      match: async (k) => store.get(k.url)?.clone(),
+      put:   async (k, r) => { store.set(k.url, r); },
+    } };
+    let fetches = 0;
+    globalThis.fetch = async (url) => {
+      fetches++;
+      const n = CHANNELS.findIndex(c => String(url).includes(shortsPlaylist(c.id)));
+      return new Response(feed(entry({ id: `vid${n}`.padEnd(11, 'x'), title: `${CHANNELS[n].name} on grit` })), { status: 200 });
+    };
+    const waits = [];
+    const ctx = (path) => ({ request: new Request(`https://deck.example${path}`), waitUntil: (p) => waits.push(p) });
+    try {
+      const first = await onRequestGet(ctx('/api/shorts'));
+      await Promise.all(waits);
+      expect(first.headers.get('Cache-Control')).toBe('public, max-age=0, s-maxage=1800');
+      const afterFirst = fetches;
+
+      await onRequestGet(ctx('/api/shorts'));                 // served from the edge copy
+      expect(fetches).toBe(afterFirst);
+
+      await onRequestGet(ctx('/api/shorts?refresh=1'));       // goes back to the channels
+      expect(fetches).toBe(afterFirst * 2);
+    } finally {
+      globalThis.caches = realCaches; globalThis.fetch = realFetch;
+    }
+  });
+
   test('the promise is five minutes', () => {
     expect(MAX_SECONDS).toBe(300);
   });
@@ -134,9 +172,10 @@ const PLAYER = `<!doctype html><html><body style="background:#111"><script>
 test.use({ serviceWorkers: 'block' });   // routes must see the requests
 
 async function boot(page, { shorts = [short(V.first), short(V.second), short(V.third)], status = 200 } = {}) {
-  const api = { calls: 0, status, shorts };
-  await page.route('**/api/shorts', route => {
+  const api = { calls: 0, status, shorts, urls: [] };
+  await page.route(u => new URL(u).pathname === '/api/shorts', route => {
     api.calls++;
+    api.urls.push(route.request().url());
     return api.status === 200
       ? route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ shorts: api.shorts }) })
       : route.fulfill({ status: api.status, body: 'nope' });
@@ -240,6 +279,18 @@ test.describe('the Shorts tab', () => {
     api.status = 200;
     await page.getByRole('button', { name: 'Try again' }).click();
     await expect(page.getByTestId('short')).toHaveCount(3);
+  });
+
+  test('the refresh button rebuilds the feed from the channels', async ({ page }) => {
+    const api = await boot(page);
+    await expect(page.getByTestId('short')).toHaveCount(3);
+    expect(api.urls.at(-1)).not.toContain('refresh');
+
+    api.shorts = [short(V.second, 'A brand new one')];
+    await page.getByTestId('shorts-refresh').click();
+    await expect(page.getByTestId('short')).toHaveCount(1);
+    await expect(page.getByTestId('short')).toHaveAttribute('aria-label', 'A brand new one');
+    expect(api.urls.at(-1)).toContain('/api/shorts?refresh=1');
   });
 
   test('an empty feed is not shown as a blank screen', async ({ page }) => {
