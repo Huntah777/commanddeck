@@ -9629,15 +9629,17 @@ function PomodoroSettings({ cfg, onChange }) {
    embedded, is skipped rather than shown.
 ------------------------------------------------------------------- */
 const SHORTS_EMBED     = 'https://www.youtube-nocookie.com';
-const SHORTS_MAX_SECS  = 300;
+const SHORTS_MAX_SECS  = 300;   /* also the length of one part of a long video */
 const SHORTS_COUNTDOWN = 3;
 
 function ShortsView() {
   const [shorts, setShorts] = useState(null);       // null = loading
   const [failed, setFailed] = useState(false);
   const [active, setActive] = useState(0);
-  /* Browsers only autoplay muted; one tap turns sound on for the whole feed. */
-  const [muted, setMuted]   = useState(true);
+  /* Sound on from the start. Starting muted and unmuting later meant
+     reloading the player, and a reloaded player with sound is one the
+     browser won't autoplay — it showed YouTube's play button instead. */
+  const [muted, setMuted]   = useState(false);
   const [skip, setSkip]     = useState(() => new Set());
   const scroller = useRef(null);
 
@@ -9740,9 +9742,19 @@ function ShortsView() {
 function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip }) {
   const [ended, setEnded] = useState(false);
   const [count, setCount] = useState(SHORTS_COUNTDOWN);
+  /* A long video (a speaker with no Shorts of their own) plays in
+     five-minute parts: start/end on the embed, the next part after the
+     countdown. Its length comes from the player once it has loaded. */
+  const [part, setPart]         = useState(0);
+  const [duration, setDuration] = useState(null);
   const frame = useRef(null);
+  const parts   = v.long ? (duration ? Math.max(1, Math.ceil(duration / SHORTS_MAX_SECS)) : null) : 1;
+  const hasMore = !!v.long && (parts == null || part + 1 < parts);
+  const start   = v.long ? part * SHORTS_MAX_SECS : 0;
+  const end     = v.long ? (part + 1) * SHORTS_MAX_SECS : SHORTS_MAX_SECS;
+  const nextPart = () => { setPart(p => p + 1); setEnded(false); setCount(SHORTS_COUNTDOWN); };
 
-  useEffect(() => { if (!active) { setEnded(false); setCount(SHORTS_COUNTDOWN); } }, [active]);
+  useEffect(() => { if (!active) { setEnded(false); setCount(SHORTS_COUNTDOWN); setPart(0); } }, [active]);
 
   const send = useCallback((func, args = []) => {
     frame.current?.contentWindow?.postMessage(JSON.stringify({ event: 'command', func, args }), SHORTS_EMBED);
@@ -9756,8 +9768,10 @@ function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip 
       let m; try { m = JSON.parse(e.data); } catch { return; }
       const info = m.info;
       if (m.event === 'infoDelivery' && info && typeof info === 'object') {
-        /* The section's promise: five minutes at most. */
-        if (info.duration > SHORTS_MAX_SECS) { onSkip(v.id); return; }
+        /* The section's promise: five minutes at most — a short that runs
+           longer is dropped; a long video is played in parts instead. */
+        if (info.duration > 0 && v.long) setDuration(info.duration);
+        else if (info.duration > SHORTS_MAX_SECS) { onSkip(v.id); return; }
         if (info.playerState === 0) setEnded(true);
       }
       if (m.event === 'onStateChange' && info === 0) setEnded(true);
@@ -9770,24 +9784,29 @@ function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip 
 
   useEffect(() => { if (active) send(muted ? 'mute' : 'unMute'); }, [muted, active, send]);
 
-  /* Finished: count down, then on to the next one. */
+  /* Finished: count down, then on to the next part, or the next one. */
   useEffect(() => {
     if (!ended || !active) return;
-    if (count <= 0) { if (hasNext) onNext(); return; }
+    if (count <= 0) { if (hasMore) nextPart(); else if (hasNext) onNext(); return; }
     const t = setTimeout(() => setCount(c => c - 1), 1000);
     return () => clearTimeout(t);
-  }, [ended, active, count, hasNext, onNext]);
+  }, [ended, active, count, hasMore, hasNext, onNext]);
 
-  /* end= caps playback at five minutes even before the player has said how long it is. */
-  const src = `${SHORTS_EMBED}/embed/${v.id}?enablejsapi=1&playsinline=1&autoplay=1&mute=${muted ? 1 : 0}`
-    + `&rel=0&modestbranding=1&iv_load_policy=3&end=${SHORTS_MAX_SECS}&origin=${encodeURIComponent(location.origin)}`;
+  /* end= caps playback at five minutes even before the player has said how long it is.
+     The address is fixed for as long as this card is the active one: muting
+     and unmuting go over postMessage, never through a changed src, because a
+     changed src reloads the player. */
+  const src = useMemo(() =>
+    `${SHORTS_EMBED}/embed/${v.id}?enablejsapi=1&playsinline=1&autoplay=1&mute=${muted ? 1 : 0}`
+    + `&rel=0&modestbranding=1&iv_load_policy=3&start=${start}&end=${end}&origin=${encodeURIComponent(location.origin)}`,
+  [v.id, active, part]);
   const subscribe = () => frame.current?.contentWindow?.postMessage(JSON.stringify({ event: 'listening', id: v.id, channel: 'widget' }), SHORTS_EMBED);
 
   return (
     <>
       <div className="absolute inset-0 grid place-items-center">
         {active ? (
-          <iframe ref={frame} src={src} onLoad={subscribe} title={v.title} data-testid="short-player"
+          <iframe key={`${v.id}-${part}`} ref={frame} src={src} onLoad={subscribe} title={v.title} data-testid="short-player"
             allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen
             className="h-full w-full border-0"/>
         ) : (
@@ -9801,10 +9820,20 @@ function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip 
         <div className="text-[12px] font-semibold" style={{ color: '#f3d27a' }}>{v.channel}</div>
         <div className="text-[15px] font-semibold leading-snug" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{v.title}</div>
         <div className="pointer-events-auto mt-3 flex flex-wrap items-center gap-2">
+          {v.long && (
+            <span data-testid="short-part" className="rounded-full px-3 py-1.5 text-[12px] font-semibold tabular-nums" style={{ background: 'rgba(255,255,255,.15)' }}>
+              Part {part + 1}{parts ? ` of ${parts}` : ''} · 5 min
+            </span>
+          )}
           {muted && active && (
             <button onClick={onUnmute} className="btn flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-semibold"
               style={{ background: '#fff', color: '#000' }}>
               <I.volume className="w-4 h-4"/> Tap for sound
+            </button>
+          )}
+          {hasMore && (
+            <button onClick={nextPart} className="btn rounded-full px-3 py-1.5 text-[12px] font-semibold" style={{ background: 'rgba(255,255,255,.15)' }}>
+              Next part
             </button>
           )}
           {hasNext && (
@@ -9818,7 +9847,9 @@ function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip 
       {ended && active && (
         <div className="absolute inset-0 z-20 grid place-items-center px-8 text-center" style={{ background: 'rgba(0,0,0,.7)' }} data-testid="short-ended">
           <div>
-            <p className="text-sm text-white/80">{hasNext ? `Next in ${count}…` : 'You’re all caught up.'}</p>
+            <p className="text-sm text-white/80">
+              {hasMore ? `Part ${part + 2}${parts ? ` of ${parts}` : ''} in ${count}…` : hasNext ? `Next in ${count}…` : 'You’re all caught up.'}
+            </p>
             <button onClick={() => { setEnded(false); setCount(SHORTS_COUNTDOWN); send('pauseVideo'); }}
               className="btn mt-4 rounded-full px-4 py-2.5 text-sm font-semibold" style={{ background: 'rgba(255,255,255,.15)' }}>
               Stay here

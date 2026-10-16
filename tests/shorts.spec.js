@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { parseFeed, interleave, fetchShorts, shortsPlaylist, cacheKey, onRequestGet, CHANNELS, MAX_SECONDS } from '../functions/api/shorts.js';
+import { parseFeed, interleave, fetchShorts, shortsPlaylist, feedPlaylist, cacheKey, onRequestGet, CHANNELS, MAX_SECONDS } from '../functions/api/shorts.js';
 
 /* Shorts — short motivational videos, five minutes at most.
 
@@ -62,9 +62,35 @@ test.describe('what gets into the feed', () => {
     expect(out.map(v => v.id)).toEqual(['aaaaaaaaaaa', 'ddddddddddd']);
   });
 
+  test('Jim Rohn has no Shorts, so his full talks are kept — flagged long', () => {
+    const rohn = CHANNELS.find(c => c.name === 'Jim Rohn');
+    expect(rohn.full).toBe(true);
+    expect(feedPlaylist(rohn)).toBe(`UU${rohn.id.slice(2)}`);
+    const out = parseFeed(feed(
+      entry({ id: 'aaaaaaaaaaa', title: 'The Art of Exceptional Living', shorts: false }),
+      entry({ id: 'bbbbbbbbbbb', title: 'A clip' }),               // a real Short, if one ever appears
+    ), rohn);
+    expect(out.map(v => [v.id, !!v.long])).toEqual([['aaaaaaaaaaa', true], ['bbbbbbbbbbb', false]]);
+  });
+
+  test('a Shorts channel still refuses an ordinary upload', () => {
+    const harvey = CHANNELS.find(c => c.name === 'Steve Harvey');
+    expect(feedPlaylist(harvey)).toMatch(/^UUSH/);
+    expect(parseFeed(feed(entry({ id: 'aaaaaaaaaaa', title: '#motivation', shorts: false })), harvey)).toEqual([]);
+  });
+
+  test('Steve Harvey: only the motivation, not the Family Feud and kids clips', () => {
+    const harvey = CHANNELS.find(c => c.name === 'Steve Harvey');
+    const out = parseFeed(feed(
+      entry({ id: 'aaaaaaaaaaa', title: 'Why Giving Up Is NOT an Option! #motivation #steveharvey #shorts' }),
+      entry({ id: 'bbbbbbbbbbb', title: 'Kids Guess 80s Tech! #steveharvey #kids #shorts' }),
+    ), harvey);
+    expect(out.map(v => v.id)).toEqual(['aaaaaaaaaaa']);
+  });
+
   test('the channels are motivational ones, each listed once by id', () => {
     const names = CHANNELS.map(c => c.name).join(' ');
-    for (const n of ['Motiversity', 'T.D. Jakes', 'Mel Robbins']) expect(names).toContain(n);
+    for (const n of ['Motiversity', 'T.D. Jakes', 'Mel Robbins', 'Steve Harvey', 'Jim Rohn']) expect(names).toContain(n);
     expect(names).not.toMatch(/Menk|Suleiman|Yaqeen/);
     expect(new Set(CHANNELS.map(c => c.id)).size).toBe(CHANNELS.length);
     for (const c of CHANNELS) expect(c.id).toMatch(/^UC[\w-]{22}$/);
@@ -89,13 +115,16 @@ test.describe('what gets into the feed', () => {
     const asked = [];
     const out = await fetchShorts(async (url) => {
       asked.push(url);
-      if (url.includes(shortsPlaylist(CHANNELS[0].id))) throw new Error('down');
-      const n = CHANNELS.findIndex(c => url.includes(shortsPlaylist(c.id)));
-      // Named after the speaker, so a shared channel's titleMatch keeps it too.
-      return new Response(feed(entry({ id: `vid${n}`.padEnd(11, 'x'), title: `${CHANNELS[n].name} on patience` })), { status: 200 });
+      if (url.includes(feedPlaylist(CHANNELS[0]))) throw new Error('down');
+      const n = CHANNELS.findIndex(c => url.includes(feedPlaylist(c)));
+      // Tagged, so a shared channel's titleMatch keeps it too.
+      return new Response(feed(entry({ id: `vid${n}`.padEnd(11, 'x'), title: `${CHANNELS[n].name} on patience #motivation` })), { status: 200 });
     });
     expect(asked).toHaveLength(CHANNELS.length);
-    expect(asked.every(u => u.includes('playlist_id=UUSH'))).toBe(true);
+    /* Shorts-only playlists — except a speaker with no Shorts, whose uploads are read. */
+    for (const c of CHANNELS) {
+      expect(asked.some(u => u.includes(`playlist_id=${c.full ? 'UU' + c.id.slice(2) : 'UUSH' + c.id.slice(2)}`))).toBe(true);
+    }
     expect(out.length).toBe(CHANNELS.length - 1);
   });
 
@@ -116,8 +145,8 @@ test.describe('what gets into the feed', () => {
     let fetches = 0;
     globalThis.fetch = async (url) => {
       fetches++;
-      const n = CHANNELS.findIndex(c => String(url).includes(shortsPlaylist(c.id)));
-      return new Response(feed(entry({ id: `vid${n}`.padEnd(11, 'x'), title: `${CHANNELS[n].name} on grit` })), { status: 200 });
+      const n = CHANNELS.findIndex(c => String(url).includes(feedPlaylist(c)));
+      return new Response(feed(entry({ id: `vid${n}`.padEnd(11, 'x'), title: `${CHANNELS[n].name} on grit #motivation` })), { status: 200 });
     };
     const waits = [];
     const ctx = (path) => ({ request: new Request(`https://deck.example${path}`), waitUntil: (p) => waits.push(p) });
@@ -152,6 +181,7 @@ const V = {
   long:   'LONGddddddd',   // reports 10 minutes
   locked: 'LOCKEDeeeee',   // the channel doesn't allow embedding
   ends:   'ENDSfffffff',   // finishes straight away
+  talk:   'PARTSggggggg',  // a 12-minute talk: three five-minute parts
 };
 const short = (id, title = `Short ${id}`) => ({ id, title, channel: 'Speaker', published: '2026-10-01' });
 
@@ -162,7 +192,8 @@ const PLAYER = `<!doctype html><html><body style="background:#111"><script>
   const say = (m) => parent.postMessage(JSON.stringify(m), '*');
   window.addEventListener('message', () => {});
   setTimeout(() => {
-    if (id.startsWith('LONG'))   say({ event: 'infoDelivery', info: { duration: 600 } });
+    if (id.startsWith('PARTS'))  say({ event: 'infoDelivery', info: { duration: 720 } });
+    else if (id.startsWith('LONG'))   say({ event: 'infoDelivery', info: { duration: 600 } });
     else if (id.startsWith('LOCKED')) say({ event: 'onError', info: 150 });
     else if (id.startsWith('ENDS'))   { say({ event: 'infoDelivery', info: { duration: 40 } }); say({ event: 'onStateChange', info: 0 }); }
     else say({ event: 'infoDelivery', info: { duration: 45, playerState: 1 } });
@@ -203,22 +234,26 @@ test.describe('the Shorts tab', () => {
     else await expect(page.locator('nav button').filter({ hasText: /^Shorts$/ })).toBeVisible();
   });
 
-  test('plays the first short — muted, so the browser will let it autoplay, and capped at five minutes', async ({ page }) => {
+  test('plays the first short — with sound from the start, and capped at five minutes', async ({ page }) => {
     await boot(page);
     await expect(page.getByTestId('short')).toHaveCount(3);
     await expect(player(page)).toHaveCount(1);              // one player, however long the feed
     expect(await playing(page)).toBe(V.first);
     const src = await player(page).getAttribute('src');
     expect(src).toContain('youtube-nocookie.com/embed/');
-    expect(src).toContain('mute=1');
+    expect(src).toContain('mute=0');
     expect(src).toContain('end=300');
+    await expect(page.getByRole('button', { name: 'Tap for sound' })).toHaveCount(0);
   });
 
-  test('one tap turns the sound on', async ({ page }) => {
+  test('muting and unmuting never reload the player', async ({ page }) => {
     await boot(page);
-    await page.getByRole('button', { name: 'Tap for sound' }).click();
-    await expect(player(page)).toHaveAttribute('src', /mute=0/);
+    const before = await player(page).getAttribute('src');
+    await page.getByRole('button', { name: 'Mute' }).click();
+    await expect(page.getByRole('button', { name: 'Turn sound on' }).first()).toBeVisible();
+    await page.getByRole('button', { name: 'Turn sound on' }).first().click();
     await expect(page.getByRole('button', { name: 'Mute' })).toBeVisible();
+    expect(await player(page).getAttribute('src')).toBe(before);
   });
 
   test('Next moves to the next short, and only that one plays', async ({ page }) => {
@@ -242,6 +277,30 @@ test.describe('the Shorts tab', () => {
     await boot(page, { shorts: [short(V.long, 'A long talk'), short(V.second)] });
     await expect(page.locator(`[data-testid="short"][data-id="${V.long}"]`)).toHaveCount(0, { timeout: 10_000 });
     await expect.poll(() => playing(page), { timeout: 10_000 }).toBe(V.second);
+  });
+
+  test('a long video from a speaker with no Shorts plays in five-minute parts', async ({ page }) => {
+    await boot(page, { shorts: [{ ...short(V.talk, 'The Art of Exceptional Living'), long: true }, short(V.second)] });
+    await expect.poll(() => playing(page)).toBe(V.talk);
+    const src = () => player(page).getAttribute('src');
+    expect(await src()).toMatch(/start=0&end=300/);
+    await expect(page.getByTestId('short-part')).toHaveText(/Part 1 of 3 · 5 min/);   // 720s → 3 parts
+
+    await page.getByRole('button', { name: 'Next part' }).click();
+    await expect.poll(src).toMatch(/start=300&end=600/);
+    await expect(page.getByTestId('short-part')).toHaveText(/Part 2 of 3/);
+    await page.getByRole('button', { name: 'Next part' }).click();
+    await expect.poll(src).toMatch(/start=600&end=900/);
+    await expect(page.getByRole('button', { name: 'Next part' })).toHaveCount(0);      // the last part
+    expect(await playing(page)).toBe(V.talk);                                           // never dropped as "too long"
+    await expect(page.getByTestId('short').filter({ has: page.locator('[data-testid="short-player"]') })).toHaveCount(1);
+  });
+
+  test('a short has no parts', async ({ page }) => {
+    await boot(page);
+    await expect(page.getByTestId('short-part')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Next part' })).toHaveCount(0);
+    expect(await player(page).getAttribute('src')).toMatch(/start=0&end=300/);
   });
 
   test('so is one whose channel does not allow it to be embedded', async ({ page }) => {

@@ -23,6 +23,10 @@
    drops matching ones — for a church channel's service notices, which are
    not motivation.
 
+   `full` is for a speaker whose own channel posts no Shorts: its ordinary
+   uploads are used instead, flagged `long`, and the page plays each one in
+   five-minute parts (as For The Ummah's short lectures do).
+
    No David Goggins: he has no YouTube channel of his own, and the ones
    using his name are reposts with a few thousand subscribers. His speeches
    turn up on the compilation channels below (Motiversity in particular). */
@@ -36,6 +40,13 @@ export const CHANNELS = [
   /* T.D. Jakes' church. His own talk-show channel posts no Shorts. */
   { id: 'UCjQbTcszB-gRhDByY9WhySw', name: 'T.D. Jakes · The Potter’s House',
     exclude: /\b(join us|bible study|symposium|livestream|live stream|service times?|register|tickets?|conference)\b/i },
+  /* His official channel mixes the motivation with Family Feud and kids
+     clips; its motivational Shorts are tagged as such. */
+  { id: 'UCNnnebGhmIJ8MQ4X1HwphRw', name: 'Steve Harvey', titleMatch: /motivation/i },
+  /* Jim Rohn's own channel posts no Shorts, so his full talks are used and
+     played in five-minute parts. The look-alike "Official Page" and tribute
+     channels are reposts — not used. */
+  { id: 'UCYTU8Egqn5826b0Pshx7ZeQ', name: 'Jim Rohn', full: true },
 ];
 
 /* Five minutes. Shorts are capped well under this; it is the promise the
@@ -48,13 +59,18 @@ const TTL = 1800;
    Shorts-only one is UUSH. */
 export const shortsPlaylist = (channelId) => `UUSH${channelId.slice(2)}`;
 
+/* What to read for a channel: its Shorts, or — for a `full` one — all its uploads (UU). */
+export const feedPlaylist = (ch) => ch.full ? `UU${ch.id.slice(2)}` : shortsPlaylist(ch.id);
+
 const decode = (s) => s
   .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
   .replace(/&amp;/g, '&');
 
-/* One feed → [{ id, title, channel, published }]. Anything that is not a
-   /shorts/ link is dropped: if YouTube ever answers the Shorts playlist with
-   ordinary uploads, a forty-minute talk must not slip into a five-minute feed. */
+/* One feed → [{ id, title, channel, published, long? }]. Anything that is not
+   a /shorts/ link is dropped: if YouTube ever answers the Shorts playlist with
+   ordinary uploads, a forty-minute talk must not slip into a five-minute feed.
+   A `full` channel is the one deliberate exception — its ordinary uploads are
+   kept and marked `long`, so the page plays them in five-minute parts. */
 export function parseFeed(xml, ch) {
   const out = [];
   for (const m of String(xml).matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
@@ -64,10 +80,11 @@ export function parseFeed(xml, ch) {
     const published = /<published>([^<]+)<\/published>/.exec(e)?.[1] || '';
     const link      = /<link rel="alternate" href="([^"]+)"/.exec(e)?.[1] || '';
     if (!id || !/^[\w-]{11}$/.test(id) || !title) continue;
-    if (!link.includes('/shorts/')) continue;
+    const isShort = link.includes('/shorts/');
+    if (!isShort && !ch.full) continue;
     if (ch.titleMatch && !ch.titleMatch.test(decode(title))) continue;
     if (ch.exclude && ch.exclude.test(decode(title))) continue;
-    out.push({ id, title: decode(title), channel: ch.name, published });
+    out.push({ id, title: decode(title), channel: ch.name, published, ...(isShort ? {} : { long: true }) });
   }
   return out;
 }
@@ -88,7 +105,7 @@ export function interleave(lists) {
 export async function fetchShorts(fetchFn = fetch) {
   const lists = await Promise.all(CHANNELS.map(async (ch) => {
     try {
-      const r = await fetchFn(`https://www.youtube.com/feeds/videos.xml?playlist_id=${shortsPlaylist(ch.id)}`);
+      const r = await fetchFn(`https://www.youtube.com/feeds/videos.xml?playlist_id=${feedPlaylist(ch)}`);
       return r.ok ? parseFeed(await r.text(), ch) : [];
     } catch { return []; }
   }));
