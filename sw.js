@@ -48,7 +48,9 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE).then((cache) => cache.addAll(SHELL))
   );
-  self.skipWaiting();
+  /* Do NOT call self.skipWaiting() here. The page posts SKIP_WAITING when
+     the user explicitly accepts the update; activating mid-session caused
+     the page-flash and partial-load glitch. */
 });
 
 self.addEventListener('activate', (event) => {
@@ -181,6 +183,12 @@ self.addEventListener('message', (event) => {
   /* Immediate notification from the page (e.g. Pomodoro complete) */
   if (event.data?.type === 'SHOW_NOTIFICATION') {
     swNotify(event.data.title, event.data.body, event.data.tag, true);
+    return;
+  }
+
+  /* Page posts this when the user clicks "Update" in the update toast. */
+  if (event.data?.type === 'SKIP_WAITING') {
+    self.skipWaiting();
     return;
   }
 
