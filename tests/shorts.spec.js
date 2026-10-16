@@ -226,12 +226,12 @@ async function boot(page, { shorts = [short(V.first), short(V.second), short(V.t
 const player  = (page) => page.getByTestId('short-player');
 const playing = async (page) => (await player(page).getAttribute('src'))?.match(/\/embed\/([\w-]+)\?/)?.[1];
 
-test.describe('the Shorts tab', () => {
+test.describe('the Motivation tab', () => {
   test('is in the navigation', async ({ page }) => {
     await boot(page);
     const select = page.getByLabel('Section');
-    if (await select.isVisible()) await expect(select.locator('option', { hasText: 'Shorts' })).toHaveCount(1);
-    else await expect(page.locator('nav button').filter({ hasText: /^Shorts$/ })).toBeVisible();
+    if (await select.isVisible()) await expect(select.locator('option', { hasText: 'Motivation' })).toHaveCount(1);
+    else await expect(page.locator('nav button').filter({ hasText: /^Motivation$/ })).toBeVisible();
   });
 
   test('plays the first short — with sound from the start, and capped at five minutes', async ({ page }) => {
@@ -259,7 +259,7 @@ test.describe('the Shorts tab', () => {
   test('Next moves to the next short, and only that one plays', async ({ page }) => {
     await boot(page);
     await expect.poll(() => playing(page)).toBe(V.first);
-    await page.getByTestId('short').first().getByRole('button', { name: 'Next ↓' }).click();
+    await page.getByTestId('short').first().getByRole('button', { name: 'Next short' }).click();
     await expect.poll(() => playing(page), { timeout: 10_000 }).toBe(V.second);
     await expect(player(page)).toHaveCount(1);
   });
@@ -294,6 +294,56 @@ test.describe('the Shorts tab', () => {
     await expect(page.getByRole('button', { name: 'Next part' })).toHaveCount(0);      // the last part
     expect(await playing(page)).toBe(V.talk);                                           // never dropped as "too long"
     await expect(page.getByTestId('short').filter({ has: page.locator('[data-testid="short-player"]') })).toHaveCount(1);
+  });
+
+  test('fills the whole screen, over the header', async ({ page }) => {
+    await boot(page);
+    const vp = page.viewportSize();
+    const box = await page.getByTestId('shorts').boundingBox();
+    expect(box).toMatchObject({ x: 0, y: 0 });
+    expect(Math.round(box.width)).toBe(vp.width);
+    expect(Math.round(box.height)).toBe(vp.height);
+    /* The app's own header is underneath, not beside it. */
+    const top = await page.evaluate(() => document.elementFromPoint(innerWidth / 2, 4)?.closest('[data-testid="shorts"]') != null);
+    expect(top).toBe(true);
+    /* The page behind can't scroll out from under it. */
+    expect(await page.evaluate(() => document.body.style.overflow)).toBe('hidden');
+  });
+
+  test('a Short is a portrait column — the player is as tall as the screen', async ({ page }) => {
+    await boot(page);
+    const vp = page.viewportSize();
+    const p = await player(page).boundingBox();
+    expect(Math.round(p.height)).toBe(vp.height);
+    expect(p.width).toBeLessThanOrEqual(Math.ceil(vp.height * 9 / 16) + 1);
+    expect(p.width).toBeLessThanOrEqual(vp.width);
+  });
+
+  test('on-screen up and down buttons move through the feed (the player eats swipes)', async ({ page }) => {
+    await boot(page);
+    await expect(page.getByTestId('short-position')).toHaveText('1 / 3');
+    await expect(page.getByRole('button', { name: 'Previous short' })).toBeDisabled();
+    await page.getByRole('button', { name: 'Next short' }).click();
+    await expect.poll(() => playing(page), { timeout: 10_000 }).toBe(V.second);
+    await expect(page.getByTestId('short-position')).toHaveText('2 / 3');
+    await page.getByRole('button', { name: 'Previous short' }).click();
+    await expect.poll(() => playing(page), { timeout: 10_000 }).toBe(V.first);
+  });
+
+  test('the back button (and Escape) leave for the app', async ({ page }) => {
+    await boot(page);
+    await page.getByRole('button', { name: 'Back to Command Deck' }).click();
+    await expect(page.getByTestId('shorts')).toHaveCount(0);
+    expect(await page.evaluate(() => document.body.style.overflow)).not.toBe('hidden');
+
+    await page.evaluate(() => {
+      const s = JSON.parse(localStorage.getItem('madinah_v1'));
+      s.ui.view = 'shorts'; localStorage.setItem('madinah_v1', JSON.stringify(s));
+    });
+    await page.reload();
+    await expect(page.getByTestId('shorts')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('shorts')).toHaveCount(0);
   });
 
   test('a short has no parts', async ({ page }) => {
@@ -334,7 +384,7 @@ test.describe('the Shorts tab', () => {
 
   test('a failed load says so, and trying again recovers', async ({ page }) => {
     const api = await boot(page, { status: 502 });
-    await expect(page.getByTestId('shorts-error')).toContainText('Couldn’t load shorts');
+    await expect(page.getByTestId('shorts-error')).toContainText('Couldn’t load the videos');
     api.status = 200;
     await page.getByRole('button', { name: 'Try again' }).click();
     await expect(page.getByTestId('short')).toHaveCount(3);

@@ -3648,7 +3648,7 @@ function App() {
             syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}/>}
         {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState} pomo={pomo}/>}
         {state.ui.view === 'goals'  && <GoalsView state={state} setState={setState}/>}
-        {state.ui.view === 'shorts' && <ShortsView/>}
+        {state.ui.view === 'shorts' && <ShortsView onExit={() => setView('today')}/>}
       </main>
       <footer className="text-center pb-8 text-xs text-ink-500 font-mono tracking-wide">
         MADINAH · COMMAND DECK · v1.1 · {Sync.configured() ? 'cloudflare d1' : 'local only'}
@@ -3834,7 +3834,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
     { id:'admin',  label:'Admin',    icon:I.sliders },
     { id:'focus',  label:'Focus',    icon:I.timer  },
     { id:'goals',  label:'Goals',    icon:I.target },
-    { id:'shorts', label:'Shorts',   icon:I.play },
+    { id:'shorts', label:'Motivation', icon:I.play },
   ];
 
   return (
@@ -9632,7 +9632,7 @@ const SHORTS_EMBED     = 'https://www.youtube-nocookie.com';
 const SHORTS_MAX_SECS  = 300;   /* also the length of one part of a long video */
 const SHORTS_COUNTDOWN = 3;
 
-function ShortsView() {
+function ShortsView({ onExit }) {
   const [shorts, setShorts] = useState(null);       // null = loading
   const [failed, setFailed] = useState(false);
   const [active, setActive] = useState(0);
@@ -9676,6 +9676,15 @@ function ShortsView() {
   }, []);
   const drop = useCallback((id) => setSkip(s => new Set(s).add(id)), []);
 
+  /* A full-screen view: the page underneath stays put, and Escape leaves. */
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onEsc = (e) => { if (e.key === 'Escape') onExit?.(); };
+    window.addEventListener('keydown', onEsc);
+    return () => { document.body.style.overflow = prev; window.removeEventListener('keydown', onEsc); };
+  }, [onExit]);
+
   /* Arrow keys on a desktop, where there is no swipe. */
   useEffect(() => {
     const onKey = (e) => {
@@ -9688,24 +9697,32 @@ function ShortsView() {
   }, [active, feed.length, goTo]);
 
   return (
-    <div className="pt-6 fadeUp">
-      <SectionHeading kicker="Fuel" title="Shorts" sub="Short motivational reminders · five minutes at most · swipe or ↑ ↓ for the next"/>
-      {/* data-busy: a video playing is in use even with no taps — the update
-          check won't reload the app out from under it. */}
-      <div data-testid="shorts" data-busy={feed.length ? 'video' : undefined}
-        className="relative mx-auto w-full max-w-[420px] rounded-2xl overflow-hidden bg-black text-white"
-        style={{ height: 'calc(100dvh - 14rem)', minHeight: 420 }}>
-        <button onClick={() => { setSkip(new Set()); setActive(0); load(true); }} aria-label="Refresh shorts"
-          title="Fetch the latest from the channels" data-testid="shorts-refresh"
-          className="btn absolute left-3 top-3 z-20 w-10 h-10 rounded-full flex items-center justify-center"
-          style={{ background: 'rgba(0,0,0,.45)', backdropFilter: 'blur(8px)' }}>
-          <I.refresh className="w-5 h-5"/>
-        </button>
+    /* The whole screen, over the app's header and tabs — the player is
+       the page. data-busy: a video playing is in use even with no taps, so
+       the update check won't reload the app out from under it. */
+    <div data-testid="shorts" data-busy={feed.length ? 'video' : undefined}
+      className="fixed inset-0 z-40 bg-black text-white" style={{ height: '100dvh' }}>
+      <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex items-center justify-between px-3"
+        style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 10px)' }}>
+        <div className="pointer-events-auto flex items-center gap-2">
+          <button onClick={onExit} aria-label="Back to Command Deck" title="Back (Esc)" data-testid="shorts-exit"
+            className="btn w-11 h-11 rounded-full flex items-center justify-center"
+            style={{ background: 'rgba(0,0,0,.5)', backdropFilter: 'blur(8px)' }}>
+            <I.chev className="w-5 h-5" style={{ transform: 'rotate(90deg)' }}/>
+          </button>
+          <button onClick={() => { setSkip(new Set()); setActive(0); load(true); }} aria-label="Refresh motivation"
+            title="Fetch the latest from the channels" data-testid="shorts-refresh"
+            className="btn w-11 h-11 rounded-full flex items-center justify-center"
+            style={{ background: 'rgba(0,0,0,.5)', backdropFilter: 'blur(8px)' }}>
+            <I.refresh className="w-5 h-5"/>
+          </button>
+        </div>
         <button onClick={() => setMuted(m => !m)} aria-label={muted ? 'Turn sound on' : 'Mute'}
-          className="btn absolute right-3 top-3 z-20 w-10 h-10 rounded-full flex items-center justify-center"
-          style={{ background: 'rgba(0,0,0,.45)', backdropFilter: 'blur(8px)' }}>
+          className="btn pointer-events-auto w-11 h-11 rounded-full flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,.5)', backdropFilter: 'blur(8px)' }}>
           {muted ? <I.mute className="w-5 h-5"/> : <I.volume className="w-5 h-5"/>}
         </button>
+      </div>
 
         {shorts === null ? (
           <div className="h-full grid place-items-center text-sm text-white/70" data-testid="shorts-loading">Loading…</div>
@@ -9713,7 +9730,7 @@ function ShortsView() {
           <div className="h-full grid place-items-center px-8 text-center" data-testid="shorts-error">
             <div>
               <p className="text-sm text-white/80">
-                {failed ? 'Couldn’t load shorts — check your connection.' : 'Nothing to show right now.'}
+                {failed ? 'Couldn’t load the videos — check your connection.' : 'Nothing to show right now.'}
               </p>
               <button onClick={() => load()} className="btn mt-4 rounded-full px-5 py-2.5 text-sm font-semibold" style={{ background: 'rgba(255,255,255,.15)' }}>
                 Try again
@@ -9726,20 +9743,18 @@ function ShortsView() {
               <section key={v.id} data-index={i} data-testid="short" data-id={v.id} aria-label={v.title}
                 className="relative h-full w-full overflow-hidden" style={{ scrollSnapAlign: 'start', scrollSnapStop: 'always' }}>
                 <ShortCard video={v} active={i === active} muted={muted} onUnmute={() => setMuted(false)}
+                  position={`${i + 1} / ${feed.length}`}
+                  hasPrev={i > 0} onPrev={() => goTo(i - 1)}
                   hasNext={i + 1 < feed.length} onNext={() => goTo(i + 1)} onSkip={drop}/>
               </section>
             ))}
           </div>
         )}
-      </div>
-      <p className="text-center text-[10px] text-bone-400/70 mt-2">
-        Played from the speakers’ own YouTube channels.
-      </p>
     </div>
   );
 }
 
-function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip }) {
+function ShortCard({ video: v, active, muted, onUnmute, position, hasPrev, onPrev, hasNext, onNext, onSkip }) {
   const [ended, setEnded] = useState(false);
   const [count, setCount] = useState(SHORTS_COUNTDOWN);
   /* A long video (a speaker with no Shorts of their own) plays in
@@ -9802,21 +9817,46 @@ function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip 
   [v.id, active, part]);
   const subscribe = () => frame.current?.contentWindow?.postMessage(JSON.stringify({ event: 'listening', id: v.id, channel: 'widget' }), SHORTS_EMBED);
 
+  /* The stage: a portrait column for a Short (the whole width on a phone,
+     centred on a wide screen), the full width for a landscape talk. */
   return (
-    <>
+    <div className="relative mx-auto h-full" data-testid="short-stage"
+      style={{ width: v.long ? '100%' : 'min(100%, calc(100dvh * 9 / 16))' }}>
       <div className="absolute inset-0 grid place-items-center">
         {active ? (
           <iframe key={`${v.id}-${part}`} ref={frame} src={src} onLoad={subscribe} title={v.title} data-testid="short-player"
             allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowFullScreen
-            className="h-full w-full border-0"/>
+            className={v.long ? 'aspect-video w-full border-0' : 'h-full w-full border-0'}/>
         ) : (
-          <img src={`https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`} alt="" loading="lazy" className="h-full w-full object-cover opacity-60"/>
+          <img src={`https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`} alt="" loading="lazy"
+            className={v.long ? 'aspect-video w-full object-cover opacity-60' : 'h-full w-full object-cover opacity-60'}/>
         )}
       </div>
 
+      {/* The embedded player swallows swipes, so the feed is also scrollable
+          from a thin strip down the left edge, and from these buttons. */}
+      <div className="absolute inset-y-0 left-0 z-10 w-6" aria-hidden="true"/>
+      {active && (
+        <div className="absolute right-3 z-20 flex flex-col items-center gap-3"
+          style={{ bottom: 'calc(env(safe-area-inset-bottom, 0px) + 7.5rem)' }}>
+          <button onClick={onPrev} disabled={!hasPrev} aria-label="Previous short" data-testid="short-prev"
+            className="btn w-12 h-12 rounded-full flex items-center justify-center disabled:opacity-30"
+            style={{ background: 'rgba(0,0,0,.5)', backdropFilter: 'blur(8px)' }}>
+            <I.chev className="w-6 h-6" style={{ transform: 'rotate(180deg)' }}/>
+          </button>
+          <span className="text-[11px] font-mono tabular-nums text-white/80 drop-shadow" data-testid="short-position">{position}</span>
+          <button onClick={onNext} disabled={!hasNext} aria-label="Next short" data-testid="short-next"
+            className="btn w-12 h-12 rounded-full flex items-center justify-center disabled:opacity-30"
+            style={{ background: 'rgba(0,0,0,.5)', backdropFilter: 'blur(8px)' }}>
+            <I.chev className="w-6 h-6"/>
+          </button>
+        </div>
+      )}
+
       {/* Over the bottom of the card; the middle stays free for the player's own controls. */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-4 pt-16 pb-4"
-        style={{ background: 'linear-gradient(to top, rgba(0,0,0,.9), rgba(0,0,0,.5) 55%, transparent)' }}>
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 pl-4 pr-20 pt-16"
+        style={{ paddingBottom: 'calc(env(safe-area-inset-bottom, 0px) + 20px)',
+                 background: 'linear-gradient(to top, rgba(0,0,0,.9), rgba(0,0,0,.5) 55%, transparent)' }}>
         <div className="text-[12px] font-semibold" style={{ color: '#f3d27a' }}>{v.channel}</div>
         <div className="text-[15px] font-semibold leading-snug" style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{v.title}</div>
         <div className="pointer-events-auto mt-3 flex flex-wrap items-center gap-2">
@@ -9836,16 +9876,11 @@ function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip 
               Next part
             </button>
           )}
-          {hasNext && (
-            <button onClick={onNext} className="btn rounded-full px-3 py-1.5 text-[12px] font-semibold" style={{ background: 'rgba(255,255,255,.15)' }}>
-              Next ↓
-            </button>
-          )}
         </div>
       </div>
 
       {ended && active && (
-        <div className="absolute inset-0 z-20 grid place-items-center px-8 text-center" style={{ background: 'rgba(0,0,0,.7)' }} data-testid="short-ended">
+        <div className="absolute inset-0 z-30 grid place-items-center px-8 text-center" style={{ background: 'rgba(0,0,0,.7)' }} data-testid="short-ended">
           <div>
             <p className="text-sm text-white/80">
               {hasMore ? `Part ${part + 2}${parts ? ` of ${parts}` : ''} in ${count}…` : hasNext ? `Next in ${count}…` : 'You’re all caught up.'}
@@ -9857,7 +9892,7 @@ function ShortCard({ video: v, active, muted, onUnmute, hasNext, onNext, onSkip 
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }
 
