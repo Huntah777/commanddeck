@@ -1,13 +1,15 @@
 /* Bump when the static assets below (vendor libs, icons) change: they are
    served cache-first, so a stale cache name keeps serving the previous
    versions indefinitely. Editing this file at all is what makes the browser
-   install a new worker, and the page reloads when one takes over.
+   install a new worker.
 
-   The shell (index.html) does not depend on this bump. It is network-first —
-   see the fetch handler — and the page itself compares what the server
-   serves with what it is running whenever the app comes to the foreground
-   (the update script at the bottom of index.html), so a deploy that only
-   touches index.html still reaches an app that was left open. */
+   The new worker waits until the page reloads on its own — see the install
+   handler below. The update script at the bottom of index.html detects that
+   the server has newer HTML and reloads at a safe moment (when backgrounded
+   or idle), so mid-session flashing cannot happen.
+
+   The shell (index.html) is network-first — see the fetch handler — so a
+   deploy that only touches index.html still reaches an app that was left open. */
 const CACHE = 'commanddeck-v10';   // v10: drops anything a signed-out answer may have left in v9
 
 /* Written by the page, read by this worker. The SW cannot see localStorage,

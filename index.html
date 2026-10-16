@@ -10291,8 +10291,6 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
   if ('serviceWorker' in navigator) (function () {
     const CHECK_EVERY_MS = 30 * 60_000;   // while the app stays open
     const THROTTLE_MS    = 60_000;        // between foreground checks
-    const GRACE_MS       = 60_000;        // left alone after the app opens or comes back
-    const IDLE_MS        = 60_000;        // with no touch for this long before a visible reload
     const GUARD_KEY      = 'cd_update_reloads';
     const U = window.CDUpdates = {
       ready: false, checking: false, lastChecked: null, check, reload: () => reloadNow(),
@@ -10392,31 +10390,11 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
       return U.ready;
     }
 
-    /* Reload, or wait for a moment that costs nothing.
-
-       A reload is not free here: the page compiles ~500 KB of JSX in the
-       browser, so it is several seconds of blank-and-flicker. The one moment
-       that costs nothing is when nobody is looking — so the update is applied
-       as the app is put away, and while it is on screen only after it has
-       been left alone for a good while. Never in the first minute after it
-       opens or comes back: that is when you are about to use it. */
-    let lastInput = 0, poll = null;
-    let calmFrom = Date.now();                       // start of the current "leave it alone" window
-    ['pointerdown', 'keydown', 'touchstart'].forEach(t =>
-      window.addEventListener(t, () => { lastInput = Date.now(); }, { capture: true, passive: true }));
-
     /* Something half-done that a reload would lose — true however quiet it is. */
     function inTheMiddleOfSomething() {
       const a = document.activeElement;
       if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return true;   // typing
       return !!document.querySelector('[data-modal]');                                              // a sheet is open
-    }
-
-    function safeNow() {
-      if (inTheMiddleOfSomething()) return false;
-      if (document.querySelector('[data-busy]')) return false;                  // e.g. a video playing
-      const now = Date.now();
-      return now - calmFrom >= GRACE_MS && now - lastInput >= IDLE_MS;
     }
 
     /* Automatic reloads are rationed: if something is genuinely wrong, a
@@ -10439,12 +10417,13 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
       location.reload();
     }
 
-    function tryApply() { if (U.ready && safeNow()) reloadNow(true); }
     function markReady(reason = 'update') {
       /* A newer version outranks a sign-in: reloading fixes both. */
       if (!U.ready || reason === 'update') { U.ready = true; U.reason = U.reason === 'update' ? 'update' : reason; emit(); }
-      tryApply();
-      if (!poll) poll = setInterval(tryApply, 3_000);
+      /* No visible-state auto-reload poll. The UpdatePill handles the case
+         where the app is on screen; the visibilitychange handler below reloads
+         silently when the app is put away. Polling every 3 s and reloading
+         after 60 s of idle was causing the mid-session flash the user saw. */
     }
 
     /* A new worker took control. That alone is not a reason to reload: on
@@ -10454,15 +10433,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
        really differs from the server's; only then is there anything to apply. */
     navigator.serviceWorker.addEventListener('controllerchange', () => { setTimeout(check, 1_500); });
 
-    /* Put away → apply now, unseen. Back → a fresh quiet window. */
+    /* Put away → apply now, unseen. */
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'hidden') {
         if (U.ready && !inTheMiddleOfSomething()) reloadNow(true);
-      } else {
-        calmFrom = Date.now();
       }
     });
-    window.addEventListener('pageshow', () => { calmFrom = Date.now(); });
 
     window.addEventListener('load', async () => {
       /* updateViaCache 'none': never serve sw.js (or what it imports) from the HTTP cache. */
