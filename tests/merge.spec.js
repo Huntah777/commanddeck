@@ -210,3 +210,28 @@ test.describe('mergeState — admin settings', () => {
     expect(merged.admin.hijriOffset).toBe(-1);
   });
 });
+
+test.describe('mergeState — saved videos', () => {
+  const vid = (id, modifiedAt) => ({ id, title: id, channel: 'Speaker', modifiedAt });
+
+  test('a bookmark made on each of two devices is kept on both', () => {
+    const merged = mergeState({ savedVideos: [vid('aaaaaaaaaaa', ago(5_000))] }, { savedVideos: [vid('bbbbbbbbbbb', ago(1_000))] });
+    expect(merged.savedVideos.map(v => v.id).sort()).toEqual(['aaaaaaaaaaa', 'bbbbbbbbbbb']);
+  });
+
+  test('removing one sticks, and the other device cannot put it back', () => {
+    const merged = mergeState(
+      { savedVideos: [vid('aaaaaaaaaaa', ago(60_000))] },
+      { savedVideos: [], deleted: { aaaaaaaaaaa: ago(1_000) } },
+    );
+    expect(merged.savedVideos).toEqual([]);
+  });
+
+  test('saving it again after removing it brings it back', () => {
+    const merged = mergeState(
+      { savedVideos: [], deleted: { aaaaaaaaaaa: ago(60_000) } },
+      { savedVideos: [vid('aaaaaaaaaaa', NOW)] },
+    );
+    expect(merged.savedVideos.map(v => v.id)).toEqual(['aaaaaaaaaaa']);
+  });
+});

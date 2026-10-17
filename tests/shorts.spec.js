@@ -182,6 +182,8 @@ const V = {
   locked: 'LOCKEDeeeee',   // the channel doesn't allow embedding
   ends:   'ENDSfffffff',   // finishes straight away
   talk:   'PARTSggggggg',  // a 12-minute talk: three five-minute parts
+  paused: 'PAUSEDhhhhh',   // loaded but not playing
+  stuck:  'STUCKiiiiiii',  // the browser refused to autoplay: cued, never started
 };
 const short = (id, title = `Short ${id}`) => ({ id, title, channel: 'Speaker', published: '2026-10-01' });
 
@@ -190,9 +192,15 @@ const short = (id, title = `Short ${id}`) => ({ id, title, channel: 'Speaker', p
 const PLAYER = `<!doctype html><html><body style="background:#111"><script>
   const id = location.pathname.split('/').pop();
   const say = (m) => parent.postMessage(JSON.stringify(m), '*');
-  window.addEventListener('message', () => {});
+  /* A tap on the big button asks for playVideo; the real player answers with its new state. */
+  window.addEventListener('message', (e) => {
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.func === 'playVideo') say({ event: 'infoDelivery', info: { playerState: 1 } });
+  });
   setTimeout(() => {
-    if (id.startsWith('PARTS'))  say({ event: 'infoDelivery', info: { duration: 720 } });
+    if (id.startsWith('PAUSED')) say({ event: 'infoDelivery', info: { duration: 45, playerState: 2 } });
+    else if (id.startsWith('STUCK')) say({ event: 'infoDelivery', info: { duration: 45, playerState: 5 } });
+    else if (id.startsWith('PARTS'))  say({ event: 'infoDelivery', info: { duration: 720 } });
     else if (id.startsWith('LONG'))   say({ event: 'infoDelivery', info: { duration: 600 } });
     else if (id.startsWith('LOCKED')) say({ event: 'onError', info: 150 });
     else if (id.startsWith('ENDS'))   { say({ event: 'infoDelivery', info: { duration: 40 } }); say({ event: 'onStateChange', info: 0 }); }
@@ -202,7 +210,7 @@ const PLAYER = `<!doctype html><html><body style="background:#111"><script>
 
 test.use({ serviceWorkers: 'block' });   // routes must see the requests
 
-async function boot(page, { shorts = [short(V.first), short(V.second), short(V.third)], status = 200 } = {}) {
+async function boot(page, { shorts = [short(V.first), short(V.second), short(V.third)], status = 200, saved = [] } = {}) {
   const api = { calls: 0, status, shorts, urls: [] };
   await page.route(u => new URL(u).pathname === '/api/shorts', route => {
     api.calls++;
@@ -214,10 +222,14 @@ async function boot(page, { shorts = [short(V.first), short(V.second), short(V.t
   await page.route('https://www.youtube-nocookie.com/**', route =>
     route.fulfill({ status: 200, contentType: 'text/html', body: PLAYER }));
   await page.route('https://i.ytimg.com/**', route => route.fulfill({ status: 404, body: '' }));
-  await page.addInitScript(() => {
-    localStorage.setItem('madinah_v1', JSON.stringify({ habits: [], tasks: [], blocks: [], logs: {}, ui: { view: 'shorts' } }));
+  /* `saved` is passed in — this runs in the page, where the test's variables don't exist.
+     Seeded once, so a reload keeps whatever the page has since saved. */
+  await page.addInitScript((saved) => {
+    if (!localStorage.getItem('madinah_v1')) {
+      localStorage.setItem('madinah_v1', JSON.stringify({ habits: [], tasks: [], blocks: [], logs: {}, savedVideos: saved, ui: { view: 'shorts' } }));
+    }
     localStorage.setItem('madinah_ui_local_v1', JSON.stringify({ view: 'shorts' }));
-  });
+  }, saved);
   await page.goto('/');
   await page.waitForFunction(() => document.querySelector('#root')?.children.length > 0, { timeout: 10_000 });
   return api;
@@ -344,6 +356,66 @@ test.describe('the Motivation tab', () => {
     await expect(page.getByTestId('shorts')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('shorts')).toHaveCount(0);
+  });
+
+  test('a big play button covers a player that is waiting, and starts it', async ({ page }) => {
+    await boot(page, { shorts: [short(V.paused), short(V.second)] });
+    const big = page.getByTestId('short-play');
+    await expect(big).toBeVisible();
+    const b = await big.boundingBox();
+    expect(b.width).toBeGreaterThanOrEqual(96);              // not the embed's little one
+    await big.click();
+    await expect(big).toHaveCount(0);                        // the player said it is playing
+  });
+
+  test('…also when the browser would not autoplay it (cued, never started)', async ({ page }) => {
+    await boot(page, { shorts: [short(V.stuck)] });
+    await expect(page.getByTestId('short-play')).toBeVisible({ timeout: 5_000 });
+  });
+
+  test('…but never over a video that is playing', async ({ page }) => {
+    await boot(page);
+    await expect.poll(() => playing(page)).toBe(V.first);
+    await page.waitForTimeout(2200);                          // past the grace period
+    await expect(page.getByTestId('short-play')).toHaveCount(0);
+  });
+
+  test('bookmarking: save, see only the saved ones, and remove', async ({ page }) => {
+    await boot(page);
+    const toggle = page.getByTestId('shorts-saved-toggle');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    await page.getByRole('button', { name: 'Bookmark this video' }).click();
+    await expect(page.getByRole('button', { name: 'Remove bookmark' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(toggle).toContainText('1');
+
+    /* It is kept — a reload still has it. */
+    await page.reload();
+    await expect(page.getByTestId('shorts-saved-toggle')).toContainText('1');
+
+    await page.getByTestId('shorts-saved-toggle').click();
+    await expect(page.getByTestId('short')).toHaveCount(1);
+    await expect.poll(() => playing(page)).toBe(V.first);
+    await expect(page.getByTestId('short-position')).toHaveText('1 / 1');
+
+    await page.getByRole('button', { name: 'Remove bookmark' }).click();
+    await expect(page.getByTestId('shorts-saved-empty')).toBeVisible();
+    await page.getByRole('button', { name: 'Back to all videos' }).click();
+    await expect(page.getByTestId('short')).toHaveCount(3);
+  });
+
+  test('saved videos can be watched when the live feed will not load', async ({ page }) => {
+    await boot(page, { status: 500, saved: [{ ...short(V.second, 'Kept'), modifiedAt: 1 }] });
+    await expect(page.getByTestId('shorts-error')).toBeVisible();
+    await page.getByTestId('shorts-saved-toggle').click();
+    await expect.poll(() => playing(page)).toBe(V.second);
+  });
+
+  test('a saved long video keeps playing in parts', async ({ page }) => {
+    await boot(page, { saved: [{ ...short(V.talk, 'A talk'), long: true, modifiedAt: 1 }] });
+    await page.getByTestId('shorts-saved-toggle').click();
+    await expect.poll(() => playing(page)).toBe(V.talk);
+    await expect(page.getByTestId('short-part')).toContainText('of 3');
   });
 
   test('a short has no parts', async ({ page }) => {
