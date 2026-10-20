@@ -3661,7 +3661,6 @@ function App() {
       </footer>
       {setupOpen && <TokenSetupModal current={Sync.getToken()} onClose={()=>setSetupOpen(false)} onSubmit={connectWithToken}/>}
       {background?.source === 'unsplash' && background?.attribution && <UnsplashCredit attribution={background.attribution}/>}
-      <UpdatePill/>
     </div>
   );
 }
@@ -7616,31 +7615,6 @@ function UnsplashCredit({ attribution }) {
   );
 }
 
-/* Re-render when the update script (bottom of this file) reports a change. */
-function useUpdates() {
-  const [, bump] = useState(0);
-  useEffect(() => {
-    const on = () => bump(n => n + 1);
-    window.addEventListener('cd-update', on);
-    return () => window.removeEventListener('cd-update', on);
-  }, []);
-  return window.CDUpdates || null;
-}
-
-/* A newer version is waiting but reloading now would cost something — text
-   half typed, a sheet open, a tap a moment ago. It reloads by itself once
-   that passes; this is for not waiting. */
-function UpdatePill() {
-  const u = useUpdates();
-  if (!u?.ready) return null;
-  return (
-    <button onClick={() => u.reload()} data-testid="update-pill"
-      className="glass btn" style={{ position:'fixed', left:'50%', transform:'translateX(-50%)', bottom:'calc(14px + env(safe-area-inset-bottom, 0px))', zIndex:45, fontSize:13, fontWeight:600, padding:'8px 16px', borderRadius:999, color:'var(--f1)', fontFamily:'Manrope,sans-serif', whiteSpace:'nowrap' }}>
-      {u.reason === 'signin' ? 'Sign-in expired — tap to reload' : 'Update ready — tap to reload'}
-    </button>
-  );
-}
-
 function BackgroundCard({ background, changeBg, theme }) {
   const [urlInput, setUrlInput]   = useState(background?.source === 'url' ? background.url : '');
   const [query, setQuery]         = useState('');
@@ -8375,31 +8349,6 @@ function SyncCard({ status, onConfigure, onDisconnect }) {
 }
 
 function AppZone() {
-  const u = useUpdates();
-  const [msg, setMsg] = useState(null);
-  const [offerReload, setOfferReload] = useState(false);
-  /* Says what the check actually found. It used to say "latest version"
-     whenever it couldn't tell, which is the one answer that sends you off
-     to clear the cache. */
-  const checkNow = async () => {
-    setMsg(null); setOfferReload(false);
-    if (!u) { setMsg('Updates are not available in this browser.'); return; }
-    await u.check();
-    const r = u.lastResult;
-    if (r === 'newer') {
-      setMsg('A new version was found — reloading…');
-      setTimeout(() => u.reload(), 600);
-      return;
-    }
-    setMsg({
-      same:      'You have the latest version.',
-      signin:    'Your Cloudflare Access sign-in has expired, so the app can’t see the server. Reload to sign in — you’ll come back to the newest version.',
-      offline:   'Couldn’t reach the server — you look to be offline. It will check again when you’re back.',
-      'not-app': 'The server answered with something that isn’t the app, so versions couldn’t be compared. Reloading fetches it fresh.',
-      unstable:  'The page comes back different on every request, so versions couldn’t be compared. Reloading fetches the newest anyway.',
-    }[r] || 'Couldn’t check just now.');
-    setOfferReload(r !== 'same' && r !== 'offline');
-  };
   const clearCache = async () => {
     if (!confirm('Clear the app cache and reload? The app will re-download on next load.')) return;
     try {
@@ -8414,29 +8363,8 @@ function AppZone() {
     <div className="card p-5">
       <div className="text-[10px] font-mono tracking-widest text-bone-400">APP</div>
       <div className="font-display text-xl text-bone-100 mt-1 mb-1">Cache &amp; updates</div>
-      <div className="text-sm text-bone-400 mb-3">
-        New versions install themselves when you open the app, or a few seconds after you stop using it.
-        If something still looks out of date, check now — clearing the cache is the last resort.
-      </div>
-      {msg && <div data-testid="update-msg" className="text-xs text-bone-300 mb-3 px-2.5 py-2 rounded-lg border border-ink-700">{msg}</div>}
-      <div className="flex flex-wrap gap-2">
-        <button onClick={checkNow} disabled={u?.checking} data-testid="check-updates"
-          className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm disabled:opacity-50">
-          {u?.checking ? 'Checking…' : 'Check for updates'}
-        </button>
-        {offerReload && (
-          <button onClick={() => u?.reload()} data-testid="update-reload"
-            className="btn px-3 py-2 rounded-lg border border-strategy/40 text-strategy hover:bg-strategy/10 text-sm">
-            Reload
-          </button>
-        )}
-        <button onClick={clearCache} className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm">Clear cache &amp; reload</button>
-      </div>
-      {u?.build && (
-        <div className="text-[10px] font-mono text-bone-500 mt-2" data-testid="running-build">
-          Running build {u.build}{u.lastResult ? ` · last check: ${u.lastResult}` : ''}
-        </div>
-      )}
+      <div className="text-sm text-bone-400 mb-3">If the app feels stale after an update, clear the cache and reload.</div>
+      <button onClick={clearCache} className="btn px-3 py-2 rounded-lg border border-ink-700 hover:bg-ink-800 text-bone-300 text-sm">Clear cache &amp; reload</button>
     </div>
   );
 }
@@ -9723,10 +9651,8 @@ function ShortsView({ state, setState, onExit }) {
   }, [active, feed.length, goTo]);
 
   return (
-    /* The whole screen, over the app's header and tabs — the player is
-       the page. data-busy: a video playing is in use even with no taps, so
-       the update check won't reload the app out from under it. */
-    <div data-testid="shorts" data-busy={feed.length ? 'video' : undefined}
+    /* The whole screen, over the app's header and tabs — the player is the page. */
+    <div data-testid="shorts"
       className="fixed inset-0 z-40 bg-black text-white" style={{ height: '100dvh' }}>
       <div className="pointer-events-none absolute inset-x-0 top-0 z-40 flex items-center justify-between px-3"
         style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 10px)' }}>
@@ -10425,199 +10351,13 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 
 <script>
-  /* Service worker registration, and picking up a new deploy without anyone
-     clearing the PWA.
-
-     Why it went stale: a Home Screen app is RESUMED, not reloaded, so the
-     browser's own service-worker update check — which runs on navigation —
-     almost never happens. And when a new worker did take over, the page that
-     was already open kept running the old JS.
-
-     There is no build step to stamp a version id into, so the version IS the
-     page: a fingerprint of the HTML the server hands out. Nothing to bump, so
-     nothing to forget. Whenever the app comes back to the foreground (and
-     every 30 minutes while it stays open) it asks the browser to re-check
-     sw.js and compares the served HTML with the HTML it is running. A newer
-     one reloads the app — but only when that costs nothing: not mid-typing,
-     not with a sheet open, not seconds after a tap. Otherwise an "Update
-     ready" pill waits. A new worker taking over (sw.js changed) means the
-     same thing and goes the same way.
-
-     Plain script on purpose: registration must still happen if the app
-     itself fails to start. The app talks to this through window.CDUpdates
-     and the 'cd-update' event. */
-  if ('serviceWorker' in navigator) (function () {
-    const CHECK_EVERY_MS = 30 * 60_000;   // while the app stays open
-    const THROTTLE_MS    = 60_000;        // between foreground checks
-    const GUARD_KEY      = 'cd_update_reloads';
-    const U = window.CDUpdates = {
-      ready: false, checking: false, lastChecked: null, check, reload: () => reloadNow(),
-      /* Why a reload is wanted: 'update' (a newer version) or 'signin' (the
-         Cloudflare Access session expired — reloading is what signs you back
-         in, and lands on the newest version). */
-      reason: null,
-      /* What the last check found: 'newer' | 'same' | 'signin' | 'offline' |
-         'not-app' (the server answered with something that isn't the app) |
-         'unstable' (the page differs on every request, so can't be compared). */
-      lastResult: null,
-      get build() { return baseline; },   // fingerprint of the page that is running; null until known
-    };
-    const emit = () => window.dispatchEvent(new Event('cd-update'));
-
-    /* Cloudflare adds to an HTML page on its way out of a proxied domain:
-       the bot-detection script carries the request's own ray id, so it is
-       different every time; the analytics beacon, email protection and nonces
-       ride along too. None of it is the app, and left in, the page "changes"
-       on every request — which the check below rightly refuses to believe,
-       so it never saw a real deploy either. Markers are split so this
-       script never matches itself. */
-    const INJECTED = ['__CF' + '$cv$params', '/cdn' + '-cgi/', 'cloudflare' + 'insights', 'challenge' + '-platform'];
-    const appText = (html) => html
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, tag => INJECTED.some(m => tag.includes(m)) ? '' : tag)
-      .replace(/\sdata-cfemail="[^"]*"/gi, '')
-      .replace(/\snonce="[^"]*"/gi, '');
-
-    /* A cheap stand-in for a hash: HTML is large and this only has to tell
-       "same file" from "different file". */
-    function fingerprint(html) {
-      const text = appText(html);
-      let h = 0x811c9dc5;
-      for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193); }
-      return text.length.toString(36) + '-' + (h >>> 0).toString(36);
-    }
-
-    /* What the server serves now. 'no-cache' revalidates, so an unchanged
-       page is a 304 and costs next to nothing. redirect 'manual' so a
-       redirect is SEEN rather than followed: behind Cloudflare Access an
-       expired sign-in answers everything with one, to its login page on
-       another origin. Followed, that is a failed cross-origin fetch, and this
-       used to read it as "nothing new" — which is how "Check for updates"
-       said "latest version" to a device that wasn't. */
-    async function served() {
-      let r;
-      try { r = await fetch('/', { cache: 'no-cache', redirect: 'manual' }); }
-      catch (e) { return { result: 'offline' }; }
-      if (r.type === 'opaqueredirect' || (r.status >= 300 && r.status < 400) || r.status === 401 || r.status === 403) return { result: 'signin' };
-      if (!r.ok || !/text\/html/i.test(r.headers.get('content-type') || '')) return { result: 'not-app' };
-      const text = await r.text();
-      if (text.indexOf('id="root"') === -1) return { result: 'not-app' };
-      return { result: 'ok', build: fingerprint(text) };
-    }
-
-    /* What THIS page is running. The worker caches the shell it serves, so
-       the cached copy is the document that loaded — even when it was served
-       stale because the network failed at launch, which asking the network
-       would get wrong. Only a real copy of the app counts: an older worker
-       could have stored a sign-in redirect there. First visit has no worker
-       yet: ask the network. */
-    async function runningBuild() {
-      try {
-        const hit = await caches.match(location.origin + location.pathname + location.search);
-        if (hit && hit.ok && hit.type === 'basic') {
-          const text = await hit.text();
-          if (text.indexOf('id="root"') !== -1) return fingerprint(text);
-        }
-      } catch (e) {}
-      return null;
-    }
-
-    let baseline = null;
-    async function check() {
-      if (U.checking) return U.ready;
-      U.checking = true; emit();
-      try {
-        const reg = await navigator.serviceWorker.getRegistration();
-        if (reg) await reg.update().catch(() => {});
-        const now = await served();
-        if (now.result !== 'ok') {
-          U.lastResult = now.result;
-          if (now.result === 'signin') markReady('signin');
-        } else if (baseline === null) {
-          baseline = now.build; U.lastResult = 'same';
-        } else if (now.build === baseline) {
-          U.lastResult = 'same';
-        } else {
-          /* Asked twice: a page whose bytes change on every request for some
-             reason not stripped above would otherwise reload forever. */
-          const again = await served();
-          if (again.result === 'ok' && again.build === now.build) { U.lastResult = 'newer'; markReady('update'); }
-          else U.lastResult = again.result === 'ok' ? 'unstable' : again.result;
-        }
-      } catch (e) { U.lastResult = 'offline'; }
-      finally { U.checking = false; U.lastChecked = Date.now(); emit(); }
-      return U.ready;
-    }
-
-    /* Something half-done that a reload would lose — true however quiet it is. */
-    function inTheMiddleOfSomething() {
-      const a = document.activeElement;
-      if (a && (a.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) return true;   // typing
-      return !!document.querySelector('[data-modal]');                                              // a sheet is open
-    }
-
-    /* Automatic reloads are rationed: if something is genuinely wrong, a
-       loop is worse than a stale screen. Tapping the pill is never rationed. */
-    function mayAutoReload() {
-      try {
-        const now = Date.now();
-        const recent = JSON.parse(sessionStorage.getItem(GUARD_KEY) || '[]').filter(t => now - t < 10 * 60_000);
-        return recent.length < 3 && !(recent.length && now - recent[recent.length - 1] < 15_000);
-      } catch (e) { return false; }   // can't ration → don't automate
-    }
-
-    function reloadNow(auto) {
-      if (auto && !mayAutoReload()) return;
-      try {
-        const now = Date.now();
-        const recent = JSON.parse(sessionStorage.getItem(GUARD_KEY) || '[]').filter(t => now - t < 10 * 60_000);
-        sessionStorage.setItem(GUARD_KEY, JSON.stringify([...recent, now]));
-      } catch (e) {}
-      location.reload();
-    }
-
-    function markReady(reason = 'update') {
-      /* A newer version outranks a sign-in: reloading fixes both. */
-      if (!U.ready || reason === 'update') { U.ready = true; U.reason = U.reason === 'update' ? 'update' : reason; emit(); }
-      /* No visible-state auto-reload poll. The UpdatePill handles the case
-         where the app is on screen; the visibilitychange handler below reloads
-         silently when the app is put away. Polling every 3 s and reloading
-         after 60 s of idle was causing the mid-session flash the user saw. */
-    }
-
-    /* A new worker took control. That alone is not a reason to reload: on
-       the launch after a deploy the shell is fetched fresh and the new worker
-       claims the page seconds later, so the page is ALREADY current — and
-       reloading it then was the flicker on opening. Ask whether the page
-       really differs from the server's; only then is there anything to apply. */
-    navigator.serviceWorker.addEventListener('controllerchange', () => { setTimeout(check, 1_500); });
-
-    /* Put away → apply now, unseen. */
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') {
-        if (U.ready && !inTheMiddleOfSomething()) reloadNow(true);
-      }
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+      navigator.serviceWorker.register('/sw.js').catch(function(err) {
+        console.warn('SW registration failed:', err);
+      });
     });
-
-    window.addEventListener('load', async () => {
-      /* updateViaCache 'none': never serve sw.js (or what it imports) from the HTTP cache. */
-      try { await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }); }
-      catch (err) { console.warn('SW registration failed:', err); }
-      baseline = await runningBuild();
-      if (baseline === null) { const now = await served(); if (now.result === 'ok') baseline = now.build; }
-    });
-
-    let last = Date.now();
-    const maybeCheck = () => {
-      if (document.visibilityState !== 'visible' || Date.now() - last < THROTTLE_MS) return;
-      last = Date.now();
-      check();
-    };
-    document.addEventListener('visibilitychange', maybeCheck);
-    window.addEventListener('focus', maybeCheck);
-    window.addEventListener('pageshow', maybeCheck);
-    window.addEventListener('online', maybeCheck);
-    setInterval(() => { last = 0; maybeCheck(); }, CHECK_EVERY_MS);
-  })();
+  }
 </script>
 </body>
 </html>

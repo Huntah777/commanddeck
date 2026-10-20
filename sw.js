@@ -1,15 +1,8 @@
 /* Bump when the static assets below (vendor libs, icons) change: they are
    served cache-first, so a stale cache name keeps serving the previous
-   versions indefinitely. Editing this file at all is what makes the browser
-   install a new worker.
-
-   The new worker waits until the page reloads on its own — see the install
-   handler below. The update script at the bottom of index.html detects that
-   the server has newer HTML and reloads at a safe moment (when backgrounded
-   or idle), so mid-session flashing cannot happen.
-
-   The shell (index.html) is network-first — see the fetch handler — so a
-   deploy that only touches index.html still reaches an app that was left open. */
+   versions indefinitely. The shell itself (index.html) is network-first —
+   see the fetch handler. If the app still looks stale after a deploy,
+   Admin › Cache & updates › "Clear cache & reload". */
 const CACHE = 'commanddeck-v10';   // v10: drops anything a signed-out answer may have left in v9
 
 /* Written by the page, read by this worker. The SW cannot see localStorage,
@@ -50,9 +43,7 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE).then((cache) => cache.addAll(SHELL))
   );
-  /* Do NOT call self.skipWaiting() here. The page posts SKIP_WAITING when
-     the user explicitly accepts the update; activating mid-session caused
-     the page-flash and partial-load glitch. */
+  self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
@@ -185,12 +176,6 @@ self.addEventListener('message', (event) => {
   /* Immediate notification from the page (e.g. Pomodoro complete) */
   if (event.data?.type === 'SHOW_NOTIFICATION') {
     swNotify(event.data.title, event.data.body, event.data.tag, true);
-    return;
-  }
-
-  /* Page posts this when the user clicks "Update" in the update toast. */
-  if (event.data?.type === 'SKIP_WAITING') {
-    self.skipWaiting();
     return;
   }
 
