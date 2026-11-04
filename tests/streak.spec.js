@@ -63,8 +63,41 @@ test.describe('the day streak counts a day at 74%, not 100%', () => {
     expect(await streakValue(page)).toBe(4);
   });
 
-  test('the streak stops counting at the first day below the bar', async ({ page }) => {
-    await boot(page, seedFor('2026-07-30', [3, 3, 1, 3]));
+  test('two consecutive days below the bar break the streak (grace absorbed the first)', async ({ page }) => {
+    // today✓ yesterday✓ 2-days-ago✗(grace) 3-days-ago✗(break) → 2
+    await boot(page, seedFor('2026-07-30', [3, 3, 1, 1, 3]));
     expect(await streakValue(page)).toBe(2);
+  });
+});
+
+test.describe('tiered grace — longer streaks earn more forgiveness days', () => {
+  test('a single miss at low streak (s<3) is bridged by the one available grace', async ({ page }) => {
+    // s=2, miss(grace1), continue → 3
+    await boot(page, seedFor('2026-07-30', [3, 3, 1, 3]));
+    expect(await streakValue(page)).toBe(3);
+  });
+
+  test('two misses at low streak exhaust the single grace and break', async ({ page }) => {
+    // s=1, miss(grace1), miss(none left) → 1
+    await boot(page, seedFor('2026-07-30', [3, 1, 1, 3]));
+    expect(await streakValue(page)).toBe(1);
+  });
+
+  test('a miss before any days are done does not trigger grace', async ({ page }) => {
+    // s=0 → graceLimit=0 → break → 0
+    await boot(page, seedFor('2026-07-30', [1, 3, 3, 3]));
+    expect(await streakValue(page)).toBe(0);
+  });
+
+  test('at 3+ days a second isolated miss is also forgiven', async ({ page }) => {
+    // s=1, miss(grace1), s=2,3, miss(grace2 unlocked at s=3), s=4 → 4
+    await boot(page, seedFor('2026-07-30', [3, 1, 3, 3, 1, 3]));
+    expect(await streakValue(page)).toBe(4);
+  });
+
+  test('three consecutive misses at a 3-day streak exhaust both graces and break', async ({ page }) => {
+    // s=3, miss(grace1), miss(grace2), miss(none left) → 3
+    await boot(page, seedFor('2026-07-30', [3, 3, 3, 1, 1, 1, 3]));
+    expect(await streakValue(page)).toBe(3);
   });
 });

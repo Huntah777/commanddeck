@@ -3777,16 +3777,25 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
      were done. The bar is STREAK_THRESHOLD, not 100%: with a lot of habits
      scheduled on the same day, missing one shouldn't erase the whole day's
      effort. Per-habit streaks (HabitCard, HabitChecklist) are unaffected —
-     those track one habit at a time, where "done" has no percentage to miss. */
+     those track one habit at a time, where "done" has no percentage to miss.
+     Missed days are forgiven up to a tiered limit: 1 grace at s≥1, 2 at s≥3,
+     3 at s≥6, etc. — floor(s/3)+1. A miss before any days are counted gets
+     no grace. */
   const streak = useMemo(() => {
     let s = 0, cursor = new Date(sel);
+    let gracesUsed = 0;
     while (true) {
       const k = fmtKey(cursor);
       const h = state.habits.filter(x => x.days.includes(cursor.getDay()));
       const l = state.logs[k] || {};
       if (!h.length) break;
       const r = h.filter(x => l[x.id]).length / h.length;
-      if (r >= STREAK_THRESHOLD) { s++; cursor = addDays(cursor, -1); } else break;
+      if (r >= STREAK_THRESHOLD) { s++; cursor = addDays(cursor, -1); }
+      else {
+        const graceLimit = s >= 1 ? Math.floor(s / 3) + 1 : 0;
+        if (gracesUsed < graceLimit) { gracesUsed++; cursor = addDays(cursor, -1); }
+        else break;
+      }
       if (s > 365) break;
     }
     return s;
