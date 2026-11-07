@@ -10,9 +10,9 @@ const DAILY = [0,1,2,3,4,5,6];
 /* Four habits scheduled every day, for four days ending on `end`
    (inclusive), with `donePerDay[i]` of them logged done on day i
    (0 = end, 1 = end-1, ...). */
-function seedFor(end, donePerDay) {
+function seedFor(end, donePerDay, days = DAILY) {
   const habits = Array.from({ length: 4 }, (_, i) => ({
-    id: `h-${i}`, name: `Habit ${i}`, pillar: 'deen', days: DAILY, created: 1,
+    id: `h-${i}`, name: `Habit ${i}`, pillar: 'deen', days, created: 1,
   }));
   const logs = {};
   const endDate = new Date(`${end}T12:00:00Z`);
@@ -54,8 +54,9 @@ test.describe('the day streak counts a day at 74%, not 100%', () => {
   });
 
   test('2 of 4 habits (50%) still breaks it', async ({ page }) => {
-    await boot(page, seedFor('2026-07-30', [2, 3, 3, 3]));
-    expect(await streakValue(page)).toBe(0);
+    // s=1, 50%(grace1), 50%(none left → reset), today✓ → 1
+    await boot(page, seedFor('2026-07-30', [4, 2, 2, 3]));
+    expect(await streakValue(page)).toBe(1);
   });
 
   test('100% is not required — the streak does not stop at a partial day', async ({ page }) => {
@@ -84,9 +85,28 @@ test.describe('tiered grace — longer streaks earn more forgiveness days', () =
   });
 
   test('a miss before any days are done does not trigger grace', async ({ page }) => {
-    // s=0 → graceLimit=0 → break → 0
+    // miss at s=0 → no grace, s=1, today✓ → 2
+    await boot(page, seedFor('2026-07-30', [3, 3, 1]));
+    expect(await streakValue(page)).toBe(2);
+  });
+
+  test('today not yet done is pending, not a miss', async ({ page }) => {
+    // s=3, today 25% (day not over) → 3, not 0
     await boot(page, seedFor('2026-07-30', [1, 3, 3, 3]));
-    expect(await streakValue(page)).toBe(0);
+    expect(await streakValue(page)).toBe(3);
+  });
+
+  test('graces are earned by the streak built before the miss', async ({ page }) => {
+    // s=6 (3 graces), miss(grace1), miss(grace2), today✓ → 7.
+    // Walking backwards sized the allowance from today alone and gave 1.
+    await boot(page, seedFor('2026-07-30', [3, 1, 1, 3, 3, 3, 3, 3, 3]));
+    expect(await streakValue(page)).toBe(7);
+  });
+
+  test('a day with no habits scheduled neither counts nor breaks', async ({ page }) => {
+    // 2026-07-29 is a Wednesday with nothing scheduled → Mon, Tue, Thu → 3
+    await boot(page, seedFor('2026-07-30', [3, 0, 3, 3], [0, 1, 2, 4, 5, 6]));
+    expect(await streakValue(page)).toBe(3);
   });
 
   test('at 3+ days a second isolated miss is also forgiven', async ({ page }) => {

@@ -3780,23 +3780,30 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
      those track one habit at a time, where "done" has no percentage to miss.
      Missed days are forgiven up to a tiered limit: 1 grace at s≥1, 2 at s≥3,
      3 at s≥6, etc. — floor(s/3)+1. A miss before any days are counted gets
-     no grace. */
+     no grace.
+     Walked forwards in time, so the allowance comes from the streak built
+     *before* a miss — walking backwards sized it from the days after it,
+     and a long streak with two recent misses collapsed to 1. Today (and
+     anything later) isn't over yet, so falling short there is pending, not
+     a miss; a day with nothing scheduled is neutral. */
   const streak = useMemo(() => {
-    let s = 0, cursor = new Date(sel);
-    let gracesUsed = 0;
-    while (true) {
+    const selKey = fmtKey(sel), today = todayKey();
+    const logged = Object.keys(state.logs).filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k) && k <= selKey).sort();
+    if (!logged.length) return 0;
+    const earliest = addDays(sel, -366);
+    let cursor = parseKey(logged[0]);
+    if (cursor < earliest) cursor = earliest;
+    let s = 0, gracesUsed = 0;
+    for (; fmtKey(cursor) <= selKey; cursor = addDays(cursor, 1)) {
       const k = fmtKey(cursor);
       const h = state.habits.filter(x => x.days.includes(cursor.getDay()));
+      if (!h.length) continue;
       const l = state.logs[k] || {};
-      if (!h.length) break;
       const r = h.filter(x => l[x.id]).length / h.length;
-      if (r >= STREAK_THRESHOLD) { s++; cursor = addDays(cursor, -1); }
-      else {
-        const graceLimit = s >= 1 ? Math.floor(s / 3) + 1 : 0;
-        if (gracesUsed < graceLimit) { gracesUsed++; cursor = addDays(cursor, -1); }
-        else break;
-      }
-      if (s > 365) break;
+      if (r >= STREAK_THRESHOLD) s++;
+      else if (k >= today) continue;
+      else if (s >= 1 && gracesUsed < Math.floor(s / 3) + 1) gracesUsed++;
+      else { s = 0; gracesUsed = 0; }
     }
     return s;
   }, [state.logs, state.habits, state.ui.selectedDate]);
