@@ -881,6 +881,7 @@ const I = {
   volume:  (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>,
   mute:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></svg>,
   flag:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>,
+  shield:  (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 3l7 3v6c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6l7-3z"/></svg>,
   sliders: (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="6" r="2.2" fill="var(--s0,#0a0a0b)"/><circle cx="15" cy="12" r="2.2" fill="var(--s0,#0a0a0b)"/><circle cx="8" cy="18" r="2.2" fill="var(--s0,#0a0a0b)"/></svg>,
 };
 
@@ -3756,6 +3757,45 @@ function TimerPill({ pomo, onClick, active }) {
    the whole day's effort. */
 const STREAK_THRESHOLD = 0.74;
 
+/* Tiered grace, shared by the day streak and every habit's own streak.
+   A miss is forgiven while the run has allowance left: 1 grace at s≥1,
+   2 at s≥3, 3 at s≥6 — floor(s/3)+1 — so a longer run earns more slack.
+   A forgiven miss neither adds to the run nor breaks it; a miss with
+   nothing left resets it, graces and all. There's nothing to click —
+   it's applied as the run is counted, and GraceBadge shows what it did.
+   `days` is chronological, each { k, out } with out 'hit' | 'miss' |
+   'skip' (nothing scheduled, or a day not over yet). */
+const graceAllowance = (s) => s >= 1 ? Math.floor(s / 3) + 1 : 0;
+function graceRun(days) {
+  let streak = 0, forgiven = [];
+  for (const { k, out } of days) {
+    if (out === 'hit') streak++;
+    else if (out !== 'miss') continue;
+    else if (forgiven.length < graceAllowance(streak)) forgiven.push(k);
+    else { streak = 0; forgiven = []; }
+  }
+  return { streak, forgiven, allowance: graceAllowance(streak) };
+}
+
+/* Graces used out of the run's allowance, with the forgiven days and the
+   next tier in the tooltip. `always` shows it at 0 used too — the header
+   wants that; a habit row only speaks up once a grace has been spent. */
+function GraceBadge({ run, always, className = '' }) {
+  const used = run.forgiven.length;
+  if (!run.streak || (!used && !always)) return null;
+  const fmt = (k) => parseKey(k).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  const title = [
+    used ? `Forgiven: ${run.forgiven.map(fmt).join(', ')}.` : 'No misses forgiven in this run.',
+    `${run.streak} days earns ${run.allowance} grace${run.allowance === 1 ? '' : 's'}; the next comes at ${run.allowance * 3}.`,
+  ].join(' ');
+  return (
+    <span data-testid="streak-grace" title={title} aria-label={`${used} of ${run.allowance} graces used. ${title}`}
+      className={`font-mono flex items-center gap-0.5 ${used ? 'text-strategy' : 'text-bone-400'} ${className}`}>
+      <I.shield className="w-3 h-3"/>{used}/{run.allowance}
+    </span>
+  );
+}
+
 function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync, onSyncNow, pomo }) {
   const today = new Date();
   const sel = parseKey(state.ui.selectedDate || todayKey());
@@ -3776,37 +3816,32 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
   /* current streak — consecutive days back from selected where enough habits
      were done. The bar is STREAK_THRESHOLD, not 100%: with a lot of habits
      scheduled on the same day, missing one shouldn't erase the whole day's
-     effort. Per-habit streaks (HabitCard, HabitChecklist) are unaffected —
-     those track one habit at a time, where "done" has no percentage to miss.
-     Missed days are forgiven up to a tiered limit: 1 grace at s≥1, 2 at s≥3,
-     3 at s≥6, etc. — floor(s/3)+1. A miss before any days are counted gets
-     no grace.
+     effort. Per-habit streaks (habitStreak) count one habit at a time,
+     where "done" has no percentage to miss; both forgive misses through
+     graceRun.
      Walked forwards in time, so the allowance comes from the streak built
      *before* a miss — walking backwards sized it from the days after it,
      and a long streak with two recent misses collapsed to 1. Today (and
      anything later) isn't over yet, so falling short there is pending, not
      a miss; a day with nothing scheduled is neutral. */
-  const streak = useMemo(() => {
+  const run = useMemo(() => {
     const selKey = fmtKey(sel), today = todayKey();
     const logged = Object.keys(state.logs).filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k) && k <= selKey).sort();
-    if (!logged.length) return 0;
+    if (!logged.length) return graceRun([]);
     const earliest = addDays(sel, -366);
     let cursor = parseKey(logged[0]);
     if (cursor < earliest) cursor = earliest;
-    let s = 0, gracesUsed = 0;
+    const days = [];
     for (; fmtKey(cursor) <= selKey; cursor = addDays(cursor, 1)) {
       const k = fmtKey(cursor);
       const h = state.habits.filter(x => x.days.includes(cursor.getDay()));
-      if (!h.length) continue;
       const l = state.logs[k] || {};
-      const r = h.filter(x => l[x.id]).length / h.length;
-      if (r >= STREAK_THRESHOLD) s++;
-      else if (k >= today) continue;
-      else if (s >= 1 && gracesUsed < Math.floor(s / 3) + 1) gracesUsed++;
-      else { s = 0; gracesUsed = 0; }
+      const hit = h.length && h.filter(x => l[x.id]).length / h.length >= STREAK_THRESHOLD;
+      days.push({ k, out: hit ? 'hit' : (!h.length || k >= today) ? 'skip' : 'miss' });
     }
-    return s;
+    return graceRun(days);
   }, [state.logs, state.habits, state.ui.selectedDate]);
+  const streak = run.streak;
 
   /* Publish the header's real height so anything else that wants to
      stick below it lands in the right place. Measured rather than
@@ -3909,6 +3944,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
               <div className="font-display text-2xl text-strategy flex items-center gap-1.5 leading-none mt-1 justify-end">
                 <I.flame className="w-5 h-5"/> {streak}
               </div>
+              <GraceBadge run={run} always className="text-[9px] justify-end mt-1"/>
             </div>
             <div className="h-10 w-px bg-ink-700"/>
             <div className="text-right">
@@ -3972,6 +4008,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
             <I.flame className="w-4 h-4 text-strategy"/>
             <span className="font-display text-xl text-strategy leading-none">{streak}</span>
             <span className="font-mono text-[10px] tracking-widest text-bone-400 uppercase">streak</span>
+            <GraceBadge run={run} always className="text-[10px] ml-1"/>
           </div>
           <div className="w-px h-5 bg-ink-700"/>
           <div className="flex items-center gap-1.5">
@@ -6018,7 +6055,7 @@ function HabitChecklist({ habits, log, toggle, state, setState }) {
           <div className="space-y-1">
             {g.items.map(h => {
               const on = !!log[h.id];
-              const s = habitStreak(state, h, sel);
+              const run = habitStreakRun(state, h, sel), s = run.streak;
               const slot = slotForHabit(state, h.id);
               return (
                 <div key={h.id} data-testid="checklist-habit">
@@ -6038,7 +6075,10 @@ function HabitChecklist({ habits, log, toggle, state, setState }) {
                         )}
                       </div>
                     </button>
-                    {s > 0 && <div className="font-mono text-[10px] text-bone-400 flex items-center gap-0.5 shrink-0"><I.flame className="w-3 h-3"/>{s}</div>}
+                    {s > 0 && <div className="font-mono text-[10px] text-bone-400 flex items-center gap-1.5 shrink-0">
+                      <span className="flex items-center gap-0.5"><I.flame className="w-3 h-3"/>{s}</span>
+                      <GraceBadge run={run}/>
+                    </div>}
                     {/* Putting today's habits on the day, from where you
                         actually look at them. */}
                     {setState && (
@@ -6100,28 +6140,31 @@ function habitWindow(state, h, end, n) {
   return out;
 }
 
-/* Consecutive scheduled days done, counting back from `end`.
+/* Scheduled days done in a run ending on `end`, with missed sessions
+   forgiven by the same tiered grace as the day streak (graceRun).
    Unscheduled days are stepped over rather than breaking the run — a
    Monday-only habit has a streak of three after three Mondays, not a
-   streak of one. The 366 cap is what stops a habit scheduled on no days
-   at all (days: []) from walking backwards forever.
+   streak of one. Looks back at most a year, walked forwards so the
+   allowance comes from the run built before a miss.
 
    The end day being scheduled but not yet ticked doesn't zero the run:
    at nine in the morning a three-day streak is still three days, and
    ticking today turns it into four. Reporting 0 until the moment you
    tick would mean every streak in the app reads zero for most of the
    day it is describing. */
-function habitStreak(state, h, end) {
-  let cursor = new Date(end);
-  if (h.days.includes(cursor.getDay()) && !(state.logs[fmtKey(cursor)] || {})[h.id]) cursor = addDays(cursor, -1);
-  let s = 0;
-  for (let i = 0; i < 366; i++) {
-    if (!h.days.includes(cursor.getDay())) { cursor = addDays(cursor, -1); continue; }
-    if ((state.logs[fmtKey(cursor)] || {})[h.id]) { s++; cursor = addDays(cursor, -1); }
-    else break;
+function habitStreakRun(state, h, end) {
+  const endKey = fmtKey(end), today = todayKey();
+  const days = [];
+  for (let i = 365; i >= 0; i--) {
+    const d = addDays(end, -i), k = fmtKey(d);
+    const out = !h.days.includes(d.getDay()) ? 'skip'
+      : (state.logs[k] || {})[h.id] ? 'hit'
+      : (k === endKey || k >= today) ? 'skip' : 'miss';
+    days.push({ k, out });
   }
-  return s;
+  return graceRun(days);
 }
+const habitStreak = (state, h, end) => habitStreakRun(state, h, end).streak;
 
 const MILESTONE_STORE_KEY = 'madinah_habit_milestones_v1';
 const HABIT_MILESTONES = [22, 44, 66];
@@ -6724,7 +6767,8 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit, onTogglePrayer,
   const fardNow = FARD_PRAYERS.length - fardMissing(dayLog).length;
 
   const days   = useMemo(() => habitWindow(state, h, sel, HABIT_WINDOW_DAYS), [state.logs, h.id, h.days, selKey]);
-  const streak = useMemo(() => habitStreak(state, h, sel), [state.logs, h.id, h.days, selKey]);
+  const run    = useMemo(() => habitStreakRun(state, h, sel), [state.logs, h.id, h.days, selKey]);
+  const streak = run.streak;
   const [msLevel1, , msLocked] = habitMilestoneThresholds(h);
   const sched      = days.filter(d => d.scheduled);
   const completion = sched.length ? Math.round(sched.filter(d => d.done).length / sched.length * 100) : 0;
@@ -6792,12 +6836,13 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit, onTogglePrayer,
       </div>
 
       {streak > 0 && (
-        <div className="flex items-center gap-1.5 shrink-0" data-testid="habit-streak">
-          <span className="font-mono text-xs flex items-center gap-0.5"
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span className="font-mono text-xs flex items-center gap-0.5" data-testid="habit-streak"
             style={{ color: streak >= msLocked ? '#10b981' : streak >= msLevel1 - 1 ? '#f59e0b' : p.color }}
             title={streak >= msLocked ? `${streak} sessions — habit locked in` : streak >= msLevel1 - 1 ? `${streak} sessions — ready to level up` : `${streak} scheduled sessions in a row`}>
             <I.flame className="w-3.5 h-3.5"/>{streak}
           </span>
+          <GraceBadge run={run} className="text-[10px]"/>
           {streak >= msLocked && (
             <span className="font-mono text-[9px] px-1.5 py-px rounded-full leading-tight"
               style={{ color: '#10b981', border: '1px solid #10b98140', background: '#10b98110' }}>

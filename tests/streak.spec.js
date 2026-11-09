@@ -121,3 +121,41 @@ test.describe('tiered grace — longer streaks earn more forgiveness days', () =
     expect(await streakValue(page)).toBe(3);
   });
 });
+
+test.describe('grace is visible, and applies to each habit too', () => {
+  const headerGrace = (page) => page.getByText('DAY STREAK').locator('..').getByTestId('streak-grace');
+  const checklistRow = (page, name) => page.getByTestId('checklist-habit').filter({ hasText: name });
+
+  test('the header shows graces used out of the allowance', async ({ page }) => {
+    // s=1, miss(grace1), s=2, s=3 → 3 days earns 2, 1 spent
+    await boot(page, seedFor('2026-07-30', [3, 3, 1, 3]));
+    await expect(headerGrace(page)).toHaveText('1/2');
+    await expect(headerGrace(page)).toHaveAttribute('title', /Forgiven: .*28/);
+  });
+
+  test('and shows 0 spent when nothing has been forgiven', async ({ page }) => {
+    await boot(page, seedFor('2026-07-30', [3, 3, 3, 3]));
+    await expect(headerGrace(page)).toHaveText('0/2');
+  });
+
+  test("a habit's own missed session is forgiven, not a reset", async ({ page }) => {
+    // Habit 3 is only done on 4-of-4 days: done, missed, done, done(today) → 3
+    await boot(page, seedFor('2026-07-30', [4, 4, 2, 4]));
+    const row = checklistRow(page, 'Habit 3');
+    await expect(row).toContainText('3');
+    await expect(row.getByTestId('streak-grace')).toHaveText('1/2');
+  });
+
+  test('a habit with no forgiven sessions shows no grace badge', async ({ page }) => {
+    await boot(page, seedFor('2026-07-30', [4, 4, 2, 4]));
+    await expect(checklistRow(page, 'Habit 0').getByTestId('streak-grace')).toHaveCount(0);
+  });
+
+  test('two missed sessions in a row at a short run still break a habit', async ({ page }) => {
+    // Habit 3: done, missed, missed, done(today) → 1
+    await boot(page, seedFor('2026-07-30', [4, 2, 2, 4]));
+    const row = checklistRow(page, 'Habit 3');
+    await expect(row.getByTestId('streak-grace')).toHaveCount(0);
+    await expect(row.locator('.font-mono').first()).toHaveText('1');
+  });
+});
