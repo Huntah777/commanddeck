@@ -10,7 +10,7 @@ const DAILY = [0,1,2,3,4,5,6];
 /* Four habits scheduled every day, for four days ending on `end`
    (inclusive), with `donePerDay[i]` of them logged done on day i
    (0 = end, 1 = end-1, ...). */
-function seedFor(end, donePerDay, days = DAILY) {
+function seedFor(end, donePerDay, days = DAILY, holidays = []) {
   const habits = Array.from({ length: 4 }, (_, i) => ({
     id: `h-${i}`, name: `Habit ${i}`, pillar: 'deen', days, created: 1,
   }));
@@ -23,7 +23,7 @@ function seedFor(end, donePerDay, days = DAILY) {
     for (let h = 0; h < done; h++) logs[k][`h-${h}`] = 1;
   });
   return {
-    habits, logs, tasks: [], blocks: [], people: [], pomodoroLogs: [],
+    habits, logs, tasks: [], blocks: [], people: [], pomodoroLogs: [], admin: { holidays },
     lists: [{ id: 'l-inbox', name: 'Inbox', color: '#9a9788' }],
     ui: { view: 'today', selectedDate: end },
   };
@@ -157,5 +157,55 @@ test.describe('grace is visible, and applies to each habit too', () => {
     const row = checklistRow(page, 'Habit 3');
     await expect(row.getByTestId('streak-grace')).toHaveCount(0);
     await expect(row.locator('.font-mono').first()).toHaveText('1');
+  });
+});
+
+test.describe('holiday mode pauses every streak', () => {
+  const checklistRow = (page, name) => page.getByTestId('checklist-habit').filter({ hasText: name });
+
+  test('missed days inside a holiday neither break the day streak nor spend grace', async ({ page }) => {
+    // s=1, three missed holiday days (skipped), today✓ → 2, 0 graces used.
+    // Without the holiday: grace1, then reset → 1.
+    await boot(page, seedFor('2026-07-30', [3, 1, 1, 1, 3], DAILY, [{ start: '2026-07-27', end: '2026-07-29' }]));
+    expect(await streakValue(page)).toBe(2);
+    await expect(page.getByText('DAY STREAK').locator('..').getByTestId('streak-grace')).toHaveText('0/1');
+  });
+
+  test("a habit's missed sessions on holiday are paused too", async ({ page }) => {
+    // Habit 3: done, missed, missed (holiday), done today → 2, no grace spent
+    await boot(page, seedFor('2026-07-30', [4, 2, 2, 4], DAILY, [{ start: '2026-07-28', end: '2026-07-29' }]));
+    const row = checklistRow(page, 'Habit 3');
+    await expect(row.locator('.font-mono').first()).toHaveText('2');
+    await expect(row.getByTestId('streak-grace')).toHaveCount(0);
+  });
+
+  test('days you did hit on holiday still count', async ({ page }) => {
+    await boot(page, seedFor('2026-07-30', [3, 3, 3], DAILY, [{ start: '2026-07-28', end: '2026-07-29' }]));
+    expect(await streakValue(page)).toBe(3);
+  });
+
+  test('an open holiday shows as paused, and ending it from Today brings the streak back', async ({ page }) => {
+    await boot(page, seedFor('2026-07-30', [1, 1, 3], DAILY, [{ start: '2026-07-29' }]));
+    expect(await streakValue(page)).toBe(1);
+    await expect(page.getByTestId('holiday-on')).toBeVisible();
+    await expect(page.getByTestId('holiday-banner')).toBeVisible();
+    await page.getByTestId('holiday-banner').getByRole('button', { name: 'END' }).click();
+    // Ended on yesterday: that miss stays paused, today is back to normal (pending).
+    await expect(page.getByTestId('holiday-on')).toHaveCount(0);
+    await expect(page.getByTestId('holiday-banner')).toHaveCount(0);
+    expect(await streakValue(page)).toBe(1);
+  });
+
+  test('holiday mode is switched on from Admin › Setup', async ({ page }) => {
+    await boot(page, seedFor('2026-07-30', [3, 3, 3]));
+    await page.getByRole('button', { name: 'Admin' }).click();
+    await page.getByTestId('admin-nav').getByRole('button', { name: 'Setup' }).click();
+    const card = page.getByTestId('holiday-card');
+    await card.getByRole('button', { name: 'Start holiday' }).click();
+    await expect(card).toContainText('On holiday since');
+    await expect(page.getByTestId('holiday-on')).toBeVisible();
+    await card.getByRole('button', { name: 'End holiday' }).click();
+    await expect(card.getByRole('button', { name: 'Start holiday' })).toBeVisible();
+    await expect(page.getByTestId('holiday-on')).toHaveCount(0);
   });
 });

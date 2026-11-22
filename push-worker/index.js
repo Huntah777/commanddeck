@@ -535,8 +535,11 @@ export async function buildTodaysSchedule(state, tz, parts) {
      doesn't alert covers nothing, so the habit's own reminder must stand. */
   const scheduled = new Set(resolveBlocks(state)
     .filter(b => b.alerts === true && b.habitId && b.every?.includes(dow)).map(b => b.habitId));
+  /* On holiday (admin.holidays, end null while still on) the habits are
+     paused, so nothing nags about them — same rule as the app's buildPlan. */
+  const habitsPaused = (state.admin?.holidays || []).some(hol => hol.start <= todayKey && (!hol.end || todayKey <= hol.end));
   for (const h of state.habits || []) {
-    if (!h.reminder || !h.days?.includes(dow) || doneToday[h.id]) continue;
+    if (habitsPaused || !h.reminder || !h.days?.includes(dow) || doneToday[h.id]) continue;
     if (scheduled.has(h.id)) continue;
     const [hh, mm] = h.reminder.split(':').map(Number);
     push(`h-${h.id}`, 'Habit reminder', h.name, zonedHmToUtcMs(y, mo, d, hh, mm, tz));

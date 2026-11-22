@@ -575,3 +575,15 @@ test.describe('when a push is allowed to arrive', () => {
     expect(h['Content-Encoding']).toBe('aes128gcm');
   });
 });
+
+test.describe('notification plan — holiday mode', () => {
+  test('habit reminders are muted on a day inside a holiday', async () => {
+    const { schedule } = await build({ habits: [habit()], admin: { holidays: [{ start: '2026-07-14' }] } });
+    expect(find(schedule, 'h-h1')).toBeUndefined();
+  });
+
+  test('and come back once the holiday has ended', async () => {
+    const { schedule } = await build({ habits: [habit()], admin: { holidays: [{ start: '2026-07-10', end: '2026-07-14' }] } });
+    expect(find(schedule, 'h-h1')).toBeDefined();
+  });
+});

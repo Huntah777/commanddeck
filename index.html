@@ -2815,8 +2815,10 @@ function buildPlan(state) {
      otherwise it would get no alert at all. */
   const scheduled = new Set(resolveBlocks(state)
     .filter(b => b.alerts === true && b.habitId && b.every.includes(dow)).map(b => b.habitId));
+  /* On holiday the habits are paused, so nothing nags about them. */
+  const habitsPaused = holidayOn(state, zonedKey);
   (state.habits || []).forEach(h => {
-    if (!h.reminder || !h.days.includes(dow) || doneToday[h.id]) return;
+    if (habitsPaused || !h.reminder || !h.days.includes(dow) || doneToday[h.id]) return;
     if (scheduled.has(h.id)) return;
     const [hr, mn] = h.reminder.split(':').map(Number);
     push(`h-${h.id}`, 'Habit reminder', h.name, atHm(hr, mn));
@@ -3766,6 +3768,15 @@ const STREAK_THRESHOLD = 0.74;
    `days` is chronological, each { k, out } with out 'hit' | 'miss' |
    'skip' (nothing scheduled, or a day not over yet). */
 const graceAllowance = (s) => s >= 1 ? Math.floor(s / 3) + 1 : 0;
+
+/* Holiday mode — admin.holidays: [{ start, end }] as date keys, end null
+   while the holiday is still on. Every streak is paused across one: a
+   missed day (or a habit's missed session) inside it is 'skip', not
+   'miss', so it neither breaks a run nor spends a grace. A day you did
+   hit still counts — paused, not frozen. Lives in admin so it syncs
+   whole-value like the other low-edit settings. */
+const holidayOn = (state, k) => (state.admin?.holidays || []).some(h => h.start <= k && (!h.end || k <= h.end));
+const openHoliday = (state) => (state.admin?.holidays || []).find(h => !h.end) || null;
 function graceRun(days) {
   let streak = 0, forgiven = [];
   for (const { k, out } of days) {
@@ -3837,10 +3848,11 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
       const h = state.habits.filter(x => x.days.includes(cursor.getDay()));
       const l = state.logs[k] || {};
       const hit = h.length && h.filter(x => l[x.id]).length / h.length >= STREAK_THRESHOLD;
-      days.push({ k, out: hit ? 'hit' : (!h.length || k >= today) ? 'skip' : 'miss' });
+      days.push({ k, out: hit ? 'hit' : (!h.length || k >= today || holidayOn(state, k)) ? 'skip' : 'miss' });
     }
     return graceRun(days);
-  }, [state.logs, state.habits, state.ui.selectedDate]);
+  }, [state.logs, state.habits, state.ui.selectedDate, state.admin?.holidays]);
+  const holidayToday = holidayOn(state, todayKey());
   const streak = run.streak;
 
   /* Publish the header's real height so anything else that wants to
@@ -3944,7 +3956,9 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
               <div className="font-display text-2xl text-strategy flex items-center gap-1.5 leading-none mt-1 justify-end">
                 <I.flame className="w-5 h-5"/> {streak}
               </div>
-              <GraceBadge run={run} always className="text-[9px] justify-end mt-1"/>
+              {holidayToday
+                ? <div data-testid="holiday-on" className="font-mono text-[9px] text-strategy flex items-center gap-0.5 justify-end mt-1"><I.moon className="w-3 h-3"/>PAUSED · HOLIDAY</div>
+                : <GraceBadge run={run} always className="text-[9px] justify-end mt-1"/>}
             </div>
             <div className="h-10 w-px bg-ink-700"/>
             <div className="text-right">
@@ -4008,7 +4022,9 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
             <I.flame className="w-4 h-4 text-strategy"/>
             <span className="font-display text-xl text-strategy leading-none">{streak}</span>
             <span className="font-mono text-[10px] tracking-widest text-bone-400 uppercase">streak</span>
-            <GraceBadge run={run} always className="text-[10px] ml-1"/>
+            {holidayToday
+              ? <span className="font-mono text-[10px] text-strategy flex items-center gap-0.5 ml-1"><I.moon className="w-3 h-3"/>PAUSED</span>
+              : <GraceBadge run={run} always className="text-[10px] ml-1"/>}
           </div>
           <div className="w-px h-5 bg-ink-700"/>
           <div className="flex items-center gap-1.5">
@@ -4326,6 +4342,16 @@ function TodayView({ state, setState }) {
       {/* Habits */}
       <section className={wide ? 'col-span-12 md:col-span-6' : 'col-span-12 lg:col-span-3'}>
         <SectionHeading kicker="03 / Discipline" title="Habits for today" sub={`${habitsToday.filter(h=>log[h.id]).length} / ${habitsToday.length} complete`}/>
+        {holidayOn(state, dKey) && (
+          <div data-testid="holiday-banner" className="card-soft p-3 mb-3 flex items-center gap-2 text-sm text-bone-300">
+            <I.moon className="w-4 h-4 text-strategy shrink-0"/>
+            <span className="flex-1">On holiday — streaks are paused. Tick anything you do; nothing missed counts against you.</span>
+            {openHoliday(state) && dKey === todayKey() && (
+              <button onClick={() => setState(endHoliday)}
+                className="btn shrink-0 px-2.5 py-1 rounded-lg text-xs font-mono border border-ink-700 hover:bg-ink-800">END</button>
+            )}
+          </div>
+        )}
         <HabitChecklist habits={habitsToday} log={log} toggle={toggleHabit} state={state} setState={setState}/>
       </section>
     </div>
@@ -6159,7 +6185,7 @@ function habitStreakRun(state, h, end) {
     const d = addDays(end, -i), k = fmtKey(d);
     const out = !h.days.includes(d.getDay()) ? 'skip'
       : (state.logs[k] || {})[h.id] ? 'hit'
-      : (k === endKey || k >= today) ? 'skip' : 'miss';
+      : (k === endKey || k >= today || holidayOn(state, k)) ? 'skip' : 'miss';
     days.push({ k, out });
   }
   return graceRun(days);
@@ -6767,7 +6793,7 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit, onTogglePrayer,
   const fardNow = FARD_PRAYERS.length - fardMissing(dayLog).length;
 
   const days   = useMemo(() => habitWindow(state, h, sel, HABIT_WINDOW_DAYS), [state.logs, h.id, h.days, selKey]);
-  const run    = useMemo(() => habitStreakRun(state, h, sel), [state.logs, h.id, h.days, selKey]);
+  const run    = useMemo(() => habitStreakRun(state, h, sel), [state.logs, h.id, h.days, selKey, state.admin?.holidays]);
   const streak = run.streak;
   const [msLevel1, , msLocked] = habitMilestoneThresholds(h);
   const sched      = days.filter(d => d.scheduled);
@@ -7628,6 +7654,7 @@ function AdminView({ state, setState, hydrate, theme, setTheme, background, chan
         {tab === 'setup' && (
           <>
             <SectionHeading kicker={section.kicker} title={section.title} sub={section.sub}/>
+            <HolidayCard state={state} setState={setState}/>
             <AdminCard state={state} setState={setState}/>
             <SalahCard state={state} setState={setState}/>
           </>
@@ -8331,6 +8358,74 @@ function NotificationsCard({ state, setState }) {
 }
 
 const GOAL_REMINDER_DEFAULTS = { on: true, time: '07:00', eveningOn: true, eveningTime: '18:00' };
+
+/* Starting a holiday closes any open one first, so there is only ever one
+   running. Ending it closes it on yesterday: today is back to normal, and
+   it's pending until it's over anyway, so it can't cost you. A holiday
+   that started today or hadn't started yet covers nothing and is simply
+   dropped. The start can be back-dated for the day you forgot to switch
+   it on. */
+const startHoliday = (state, start) => ({
+  ...state,
+  admin: { ...state.admin, holidays: [
+    ...(state.admin?.holidays || []).filter(h => h.end),
+    { start },
+  ] },
+});
+const endHoliday = (state) => {
+  const today = todayKey(), yesterday = fmtKey(addDays(parseKey(today), -1));
+  return {
+    ...state,
+    admin: { ...state.admin, holidays: (state.admin?.holidays || [])
+      .filter(h => h.end || h.start < today)
+      .map(h => h.end ? h : { ...h, end: yesterday }) },
+  };
+};
+
+function HolidayCard({ state, setState }) {
+  const open = openHoliday(state);
+  const [from, setFrom] = useState(todayKey());
+  const fmt = (k) => parseKey(k).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  const past = (state.admin?.holidays || []).filter(h => h.end).slice(-3).reverse();
+
+  return (
+    <div className="card p-5" data-testid="holiday-card">
+      <div className="text-[10px] font-mono tracking-widest text-bone-400">HOLIDAY MODE</div>
+      <div className="font-display text-xl text-bone-100 mt-1 mb-1">Pause every streak</div>
+      <div className="text-sm text-bone-400 mb-3">
+        While it's on, days you miss don't break the day streak or any habit's streak, and don't
+        use up grace. Anything you do tick still counts. Habit reminders are muted.
+      </div>
+      {open ? (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm text-strategy flex items-center gap-1.5">
+            <I.moon className="w-4 h-4"/>
+            {open.start > todayKey() ? `Starts ${fmt(open.start)}` : `On holiday since ${fmt(open.start)}`}
+          </span>
+          <button onClick={() => setState(endHoliday)}
+            className="btn px-3 py-2 rounded-lg text-sm border border-combat/40 text-combat hover:bg-combat/10">
+            End holiday
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs text-bone-400 shrink-0">From</span>
+          <input type="date" value={from} onChange={e => setFrom(e.target.value)} aria-label="Holiday start"
+            className="bg-ink-800 border border-ink-700 rounded-lg px-3 py-2 text-bone-100 text-sm"/>
+          <button onClick={() => from && setState(s => startHoliday(s, from))}
+            className="btn px-3 py-2 rounded-lg text-sm border border-ink-700 hover:bg-ink-800 text-bone-300">
+            Start holiday
+          </button>
+        </div>
+      )}
+      {past.length > 0 && (
+        <div className="text-xs font-mono text-bone-500 mt-3">
+          Last: {past.map(h => h.start === h.end ? fmt(h.start) : `${fmt(h.start)} – ${fmt(h.end)}`).join(' · ')}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function GoalReminderCard({ state, setState }) {
   const gr = { ...GOAL_REMINDER_DEFAULTS, ...(state.ui?.goalsReminder || {}) };
