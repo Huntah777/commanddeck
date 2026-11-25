@@ -4439,10 +4439,6 @@ function WeekStrip({ state, sel, setDate }) {
    Deliberately the same write (`toggle`) as the checklist and the
    timeline block, so a habit ticked here is ticked everywhere.
 ------------------------------------------------------------------- */
-/* The five prayers behind Fard Prayers, each tickable on its own. Ticking
-   one writes the same `salah-*` entry as the calendar's prayer row, so the
-   two always agree; the habit above completes itself on the fifth. Lives
-   beside the habit's button, never inside it — a button in a button is not
 function HabitChips({ habits, log, toggle, state }) {
   if (!habits.length) return null;
   const sorted = [...habits].sort((a, b) => (log[a.id] ? 1 : 0) - (log[b.id] ? 1 : 0));
