@@ -1819,9 +1819,6 @@ const fardStamp     = (log) => Math.max(1, ...FARD_PRAYERS.map(p => tickStamp(lo
    pomodoroLogs entry does, not the moment the app happened to notice. */
 function tickHabit(s, dKey, id, at = Date.now()) {
   if ((s.logs?.[dKey] || {})[id]) return s;
-  /* Fard Prayers refuses every tick — a toggle, a Focus session aimed at
-     it — until all five prayers are in. syncFardHabits is what ticks it. */
-  if (isFardHabit((s.habits || []).find(h => h.id === id)) && fardMissing(s.logs?.[dKey]).length) return s;
   const logs    = { ...(s.logs?.[dKey]    || {}), [id]: at };
   const logsOff = { ...(s.logsOff?.[dKey] || {}) };
   delete logsOff[id];
@@ -1871,10 +1868,6 @@ function syncFardHabits(s, dKey) {
    they cannot drift apart the way three hand-copied versions of this
    were already starting to. */
 function toggleHabitLog(s, dKey, id) {
-  /* Fard Prayers is derived, never toggled: a tap on it can only confirm
-     what the five prayers already say. */
-  if (isFardHabit((s.habits || []).find(h => h.id === id))) return syncFardHabits(s, dKey);
-
   let next = !(s.logs?.[dKey] || {})[id] ? tickHabit(s, dKey, id) : untickHabit(s, dKey, id);
 
   /* If this habit is named after a prayer, keep the calendar's salah block
@@ -1890,10 +1883,6 @@ function toggleHabitLog(s, dKey, id) {
       if (habitOn !== salahOn) next = toggleHabitLog(next, dKey, salahId);
     }
   }
-
-  /* One of the five prayers just moved: Fard Prayers follows it, up when
-     that was the last one missing and back down when it was un-ticked. */
-  if (FARD_PRAYERS.some(p => fardSalahId(p) === id)) next = syncFardHabits(next, dKey);
 
   return next;
 }
@@ -2458,12 +2447,10 @@ function mergePrayerHabitsIntoFard(s) {
    prayers. A device that heard about the fourth prayer from one device and
    the fifth from another has all five and no habit tick — each side's own
    sync only ever saw its half — so this runs wherever state is adopted. */
-function reconcileFardLogs(s) {
-  if (!(s.habits || []).some(isFardHabit)) return s;
-  let next = s;
-  for (const dKey of Object.keys(s.logs || {})) next = syncFardHabits(next, dKey);
-  return next;
-}
+/* Fard Prayers is now a plain manually-ticked habit, so there is nothing
+   to reconcile against the individual prayer logs. Kept as a no-op so the
+   call site at state adoption does not need changing. */
+function reconcileFardLogs(s) { return s; }
 
 /* ------------------------------------------------------------------
    NOTIFICATION SCHEDULER  +  WEB PUSH (background)
@@ -4456,28 +4443,6 @@ function WeekStrip({ state, sel, setDate }) {
    one writes the same `salah-*` entry as the calendar's prayer row, so the
    two always agree; the habit above completes itself on the fifth. Lives
    beside the habit's button, never inside it — a button in a button is not
-   valid, and the habit's own tap is deliberately inert until these are done. */
-function FardPrayerChips({ log, color, onToggle }) {
-  return (
-    <div className="flex flex-wrap gap-1" data-testid="fard-prayers">
-      {FARD_PRAYERS.map(p => {
-        const on = !!log[fardSalahId(p)];
-        return (
-          <button key={p} onClick={() => onToggle(p)}
-            data-testid="fard-prayer" data-prayer={p} data-done={on ? '1' : '0'} aria-pressed={on}
-            aria-label={`${on ? 'Untick' : 'Tick'} ${p}`}
-            className="btn font-mono text-[10px] leading-none px-2 py-1.5 rounded-md border transition-colors"
-            style={on
-              ? { background: color, borderColor: color, color: '#0a0a0b' }
-              : { background: 'transparent', borderColor: `${color}55`, color: '#9a9788' }}>
-            {p}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function HabitChips({ habits, log, toggle, state }) {
   if (!habits.length) return null;
   const sorted = [...habits].sort((a, b) => (log[a.id] ? 1 : 0) - (log[b.id] ? 1 : 0));
@@ -4486,14 +4451,9 @@ function HabitChips({ habits, log, toggle, state }) {
       {sorted.map(h => {
         const p  = pillarByIdFromState(h.pillar, state);
         const on = !!log[h.id];
-        /* Fard Prayers can't be ticked from here — it shows how far along
-           it is instead, and the prayers are ticked where they are listed. */
-        const fardLeft = isFardHabit(h) && !on ? fardMissing(log).length : 0;
         return (
           <button key={h.id} onClick={() => toggle(h.id)}
             data-testid="habit-chip" aria-pressed={on}
-            aria-disabled={fardLeft > 0 || undefined}
-            title={fardLeft > 0 ? `${FARD_PRAYERS.length - fardLeft}/${FARD_PRAYERS.length} prayers — ticks itself when all five are done` : undefined}
             aria-label={`${on ? 'Untick' : 'Tick'} ${h.name}`}
             className="btn shrink-0 flex flex-col items-center gap-1.5" style={{ width: 72 }}>
             <span className="w-12 h-12 rounded-full flex items-center justify-center border-2 transition-all"
@@ -4510,7 +4470,7 @@ function HabitChips({ habits, log, toggle, state }) {
                 become "Sunnah…" for want of one more line. */}
             <span className={`text-[10px] leading-tight text-center ${on ? 'text-bone-100' : 'text-bone-400'}`}
               style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-              {h.name}{fardLeft > 0 && <span className="font-mono"> {FARD_PRAYERS.length - fardLeft}/{FARD_PRAYERS.length}</span>}
+              {h.name}
             </span>
           </button>
         );
@@ -6117,12 +6077,6 @@ function HabitChecklist({ habits, log, toggle, state, setState }) {
                       </button>
                     )}
                   </div>
-                  {isFardHabit(h) && setState && (
-                    <div className="pl-7 pb-1.5">
-                      <FardPrayerChips log={log} color={g.pillar.color}
-                        onToggle={p => setState(st => toggleHabitLog(st, dKey, fardSalahId(p)))}/>
-                    </div>
-                  )}
                   {scheduling === h.id && setState && (
                     <HabitSlotPicker habit={h} slot={slot} onClose={()=>setScheduling(null)}
                       onSave={(next)=>{ setState(st => saveHabitWithSlot(st, h, next)); setScheduling(null); }}/>
@@ -6786,11 +6740,6 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit, onTogglePrayer,
   const p    = pillarByIdFromState(h.pillar, state);
   const slot = slotForHabit(state, h.id);
   const selKey = fmtKey(sel);
-  /* Fard Prayers counts prayers, not days: its badge reads n/5 and the five
-     are listed under the name, each tickable. */
-  const fard    = isFardHabit(h);
-  const dayLog  = state.logs?.[selKey] || {};
-  const fardNow = FARD_PRAYERS.length - fardMissing(dayLog).length;
 
   const days   = useMemo(() => habitWindow(state, h, sel, HABIT_WINDOW_DAYS), [state.logs, h.id, h.days, selKey]);
   const run    = useMemo(() => habitStreakRun(state, h, sel), [state.logs, h.id, h.days, selKey, state.admin?.holidays]);
@@ -6832,7 +6781,7 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit, onTogglePrayer,
           <div className="flex items-center gap-2 mt-1 flex-wrap">
             <span className="font-mono text-[10px] px-1.5 py-px rounded border"
               style={on ? { color: p.color, borderColor: `${p.color}66` } : { color: '#9a9788', borderColor: 'var(--s3)' }}>
-              {offDay ? '—' : fard ? `${fardNow}/${FARD_PRAYERS.length}` : on ? '1/1' : '0/1'}
+              {offDay ? '—' : on ? '1/1' : '0/1'}
             </span>
             <span className="font-mono text-[10px] tracking-wider text-bone-400">{dayLabel}</span>
             {h.salahAnchor
@@ -6840,9 +6789,6 @@ function HabitRow({ h, state, sel, on, offDay, onToggle, onEdit, onTogglePrayer,
               : slot && <span className="font-mono text-[10px] text-bone-400">{toHM(slot.start)}</span>}
           </div>
         </button>
-        {fard && onTogglePrayer && !reordering && !offDay && (
-          <div className="mt-2"><FardPrayerChips log={dayLog} color={p.color} onToggle={onTogglePrayer}/></div>
-        )}
       </div>
 
       {/* The thirty days behind this one, in the width the row has
