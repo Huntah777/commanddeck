@@ -3257,12 +3257,390 @@ const beatPreset = (hz) => BEAT_PRESETS.find(p => p.hz === hz) || null;
 const BEAT_MIN = 0.5, BEAT_MAX = 50;
 const fmtHz = (hz) => `${Number.isInteger(hz) ? hz : hz.toFixed(1)} Hz`;
 
-const NOISE_TYPES = [
-  { id: 'none',  label: 'None'  },
-  { id: 'brown', label: 'Brown' },
-  { id: 'pink',  label: 'Pink'  },
-  { id: 'white', label: 'White' },
+/* ── The bed: what plays underneath the tone ─────────────────────────
+   Noise, nature and hums. There are no recordings: every sound is
+   synthesised here, once, into a loop — so it works offline, costs
+   nothing to download, and nobody's sample library is being shipped.
+   (The setting is still called `noise` in storage; it predates the
+   other two groups.)
+
+   Three rules every sound follows.
+
+   It loops without a seam. Nothing is cut at the end of the buffer:
+   filters are run twice round the ring so the second lap starts from the
+   state the first lap ended in, events near the end spill over into the
+   start, slow movements complete a whole number of cycles per loop, and
+   every steady pitch completes a whole number of cycles too.
+
+   It has no rhythm of its own between 1 and 40 Hz. That is the range the
+   beat lives in, and a fan flutter at 8 Hz would be a second, competing
+   beat. Movement here is either slower than once a second (waves, gusts,
+   breath) or irregular (drops, crackles, bubbles).
+
+   Hums are the same in both ears and tuned to the tone. Anything tonal
+   that differed between the ears would make a binaural beat of its own;
+   and a hum is built on the tone's pitch an octave or two down, so where
+   its partials meet the tone they meet it in tune, not a few hertz off. ── */
+const BED_GROUPS = [
+  { id: 'noise',  label: 'Noise'  },
+  { id: 'nature', label: 'Nature' },
+  { id: 'hum',    label: 'Hum'    },
 ];
+const BED_SOUNDS = [
+  { id: 'none',   group: 'noise',  label: 'None'  },
+  { id: 'brown',  group: 'noise',  label: 'Brown', secs: 10, rate: 24000 },
+  { id: 'pink',   group: 'noise',  label: 'Pink',  secs: 10, rate: 32000 },
+  { id: 'white',  group: 'noise',  label: 'White', secs: 10 },
+  { id: 'rain',   group: 'nature', label: 'Rain',   secs: 20, rate: 24000 },
+  { id: 'ocean',  group: 'nature', label: 'Ocean',  secs: 36, rate: 16000 },
+  { id: 'stream', group: 'nature', label: 'Stream', secs: 20, rate: 16000 },
+  { id: 'wind',   group: 'nature', label: 'Wind',   secs: 30, rate: 16000 },
+  { id: 'fire',   group: 'nature', label: 'Fire',   secs: 20, rate: 24000 },
+  { id: 'night',  group: 'nature', label: 'Night crickets', secs: 24, rate: 16000 },
+  { id: 'drone',  group: 'hum', label: 'Deep drone',    secs: 30, rate: 16000, tuned: true },
+  { id: 'voice',  group: 'hum', label: 'Voice hum',     secs: 30, rate: 16000, tuned: true },
+  { id: 'bowl',   group: 'hum', label: 'Resonant bowl', secs: 30, rate: 16000, tuned: true },
+  { id: 'fan',    group: 'hum', label: 'Fan',           secs: 12, rate: 16000, tuned: true },
+];
+const bedSound = (id) => BED_SOUNDS.find(s => s.id === id) || BED_SOUNDS[0];
+
+/* Render one bed loop: { left, right, sr, secs }. Pure — no AudioContext
+   — so it can be tested.
+
+   Rendered at the lowest rate the sound needs (`rate`), not the
+   context's: a drone has nothing above a couple of kHz, and rendering it
+   at 48 kHz would be three times the work for nothing. The buffer is
+   created at that rate and Web Audio resamples it on playback. Only
+   noise, which genuinely fills the spectrum, renders at full rate. */
+function renderBed(id, ctxRate, carrier = 200) {
+  const sound = bedSound(id);
+  if (!sound.secs) return null;
+  const sr = Math.min(ctxRate, sound.rate || ctxRate);
+  const TAU = Math.PI * 2, rnd = Math.random;
+  const secs = sound.secs, len = Math.round(sr * secs);
+  /* Snap a frequency to a whole number of cycles per loop. */
+  const q = (f) => Math.max(1, Math.round(f * secs)) / secs;
+  /* One-pole low-pass coefficient for a cutoff. */
+  const coef = (fc) => 1 - Math.exp(-TAU * Math.min(fc, sr * 0.45) / sr);
+  const white = () => { const w = new Float32Array(len); for (let i = 0; i < len; i++) w[i] = rnd() * 2 - 1; return w; };
+  /* Run a stateful per-sample step twice round the ring, keep lap two. */
+  const ring = (step) => {
+    const out = new Float32Array(len);
+    for (let lap = 0; lap < 2; lap++) for (let i = 0; i < len; i++) out[i] = step(i);
+    return out;
+  };
+  /* A slow control signal, evaluated every 64 samples and interpolated.
+     fn takes loop position 0..1 and must itself be periodic. */
+  const ctl = (fn) => {
+    const n = Math.ceil(len / 64) + 1, a = new Float32Array(n);
+    for (let j = 0; j < n; j++) a[j] = fn(((j * 64) % len) / len);
+    return (i) => { const j = i >> 6, f = (i & 63) / 64; return a[j] + (a[j + 1] - a[j]) * f; };
+  };
+  /* Smooth random wander in 0..1 that closes on itself: a few sines with
+     whole numbers of cycles per loop, random phases. */
+  const wander = (cycles) => {
+    const ph = cycles.map(() => rnd() * TAU), w = cycles.map(k => 1 / Math.sqrt(k));
+    const norm = w.reduce((a, b) => a + b, 0);
+    return (t) => 0.5 + 0.5 * cycles.reduce((s, k, m) => s + w[m] * Math.sin(TAU * k * t + ph[m]), 0) / norm;
+  };
+  /* Add a short event at `start`, wrapping past the end into the start. */
+  const event = (out, start, n, fn) => { for (let k = 0; k < n; k++) out[(start + k) % len] += fn(k); };
+  /* Add a steady sine into `out`, optionally shaped by env(i). A rotating
+     phasor rather than Math.sin per sample — far cheaper, and plenty
+     stable over a loop's length in doubles. */
+  const addSine = (out, f, amp, env) => {
+    const c = Math.cos(TAU * f / sr), s = Math.sin(TAU * f / sr), ph = rnd() * TAU;
+    let x = Math.cos(ph), y = Math.sin(ph);
+    for (let i = 0; i < len; i++) {
+      out[i] += y * amp * (env ? env(i) : 1);
+      const nx = x * c - y * s; y = x * s + y * c; x = nx;
+    }
+  };
+
+  const noiseBrown = () => { const w = white(); let b = 0; return ring(i => (b = (b + 0.02 * w[i]) / 1.02)); };
+  const noisePink = () => {
+    const w = white(); let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+    return ring(i => {
+      const x = w[i];
+      /* Paul Kellet's refined pink filter */
+      b0 = 0.99886 * b0 + x * 0.0555179; b1 = 0.99332 * b1 + x * 0.0750759;
+      b2 = 0.96900 * b2 + x * 0.1538520; b3 = 0.86650 * b3 + x * 0.3104856;
+      b4 = 0.55000 * b4 + x * 0.5329522; b5 = -0.7616 * b5 - x * 0.0168980;
+      const y = b0 + b1 + b2 + b3 + b4 + b5 + b6 + x * 0.5362; b6 = x * 0.115926;
+      return y;
+    });
+  };
+  const lowpass = (src, fc, poles = 1) => {
+    const a = coef(fc); const st = new Float64Array(poles);
+    return ring(i => { let x = src[i]; for (let p = 0; p < poles; p++) x = (st[p] += (x - st[p]) * a); return x; });
+  };
+
+  /* ── Nature ── one channel at a time, so the ears hear different
+     drops, waves and crackles: width, not a mono recording. `shared`
+     holds anything both channels must agree on. */
+  const nature = {
+    rain(ch, shared) {
+      /* The hiss of a lot of distant rain: noise with the rumble and the
+         top end taken off. */
+      const w = white(); let lo = 0, y = 0;
+      const aLo = coef(450), aHi = coef(6500);
+      const out = ring(i => { lo += (w[i] - lo) * aLo; y += ((w[i] - lo) - y) * aHi; return y * 0.4; });
+      /* Drops close by: tiny bright pings, mostly faint, a few not. */
+      const drops = Math.round(secs * 50);
+      for (let d = 0; d < drops; d++) {
+        const f = 1500 + rnd() * 4500, tau = (0.0015 + rnd() * 0.005) * sr, amp = 0.04 + rnd() ** 3 * 0.55;
+        const step = TAU * f / sr, decay = Math.exp(-1 / tau);
+        let env = amp;
+        event(out, (rnd() * len) | 0, Math.ceil(tau * 6), k => { const v = env * Math.sin(step * k); env *= decay; return v; });
+      }
+      return out;
+    },
+    ocean(ch, shared) {
+      /* Waves arrive every 7–11 s; both ears hear the same sea, the far
+         ear a moment later. Swell = raised-cosine rise, slow fall. */
+      if (!shared.waves) {
+        const n = 4;
+        shared.waves = Array.from({ length: n }, (_, k) => ({
+          at: (k + 0.15 + rnd() * 0.7) * secs / n,
+          rise: 2.2 + rnd() * 1.4, fall: 3.5 + rnd() * 2.5, size: 0.7 + rnd() * 0.3,
+        }));
+      }
+      const lag = ch ? 0.35 : 0;
+      const envAt = (t => {
+        const s = t * secs;
+        let e = 0.16;
+        for (const w of shared.waves) {
+          const dt = (((s - w.at - lag) % secs) + secs) % secs;
+          e += w.size * (dt < w.rise ? Math.sin(Math.PI / 2 * dt / w.rise) ** 2 : Math.exp(-(dt - w.rise) / w.fall));
+        }
+        return Math.min(1.2, e);
+      });
+      const env = ctl(envAt), cut = ctl(t => coef(220 + 1500 * envAt(t)));
+      const w = white(); let y1 = 0, y2 = 0, h = 0;
+      return ring(i => {
+        const e = env(i), a = cut(i);
+        y1 += (w[i] - y1) * a; y2 += (y1 - y2) * a;     // the body of the wave
+        h += (w[i] - h) * 0.35;                         // the foam: a brighter wash on the crest
+        return y2 * e * 3 + (w[i] - h) * e ** 3 * 0.05;
+      });
+    },
+    stream(ch) {
+      /* A shallow brook is mostly bubbles: tiny sine blips whose pitch
+         rises as they burst, over a brighter running hiss. */
+      const w = white(); let lo = 0, y = 0, flutter = 0.5;
+      const aLo = coef(900), aHi = coef(4000), aFl = coef(5);
+      const n2 = white();
+      const out = ring(i => {
+        lo += (w[i] - lo) * aLo; y += ((w[i] - lo) - y) * aHi;
+        flutter += (0.5 + n2[i] * 0.5 - flutter) * aFl;   // irregular, not a rhythm
+        return y * (0.25 + flutter * 0.5);
+      });
+      const bubbles = Math.round(secs * 70);
+      for (let b = 0; b < bubbles; b++) {
+        const f0 = 350 + rnd() ** 2 * 1400, n = Math.round((0.008 + rnd() * 0.025) * sr);
+        const amp = 0.03 + rnd() ** 2 * 0.25;
+        let ph = 0;
+        event(out, (rnd() * len) | 0, n, k => {
+          const p = k / n; ph += TAU * f0 * (1 + 0.9 * p) / sr;
+          return amp * Math.sin(ph) * Math.sin(Math.PI * p) * (1 - p);
+        });
+      }
+      return out;
+    },
+    wind(ch, shared) {
+      /* Gusts: band-passed noise whose centre and level wander slowly.
+         The gusts are shared so the ears hear one wind, not two. */
+      shared.gust = shared.gust || wander([1, 2, 3, 5, 8]);
+      shared.pitch = shared.pitch || wander([1, 3, 4, 7]);
+      const pitchAt = (t) => shared.pitch((t + (ch ? 0.01 : 0)) % 1);
+      const gust = ctl(shared.gust);
+      const svf = ctl(t => {
+        const fc = 160 + 750 * pitchAt(t) * (0.5 + shared.gust(t));
+        return 2 * Math.sin(Math.PI * Math.min(fc, sr / 6) / sr);
+      });
+      const w = white(); let low = 0, band = 0, rum = 0;
+      return ring(i => {
+        const g = gust(i), f = svf(i), qd = 0.45;   // state-variable band-pass
+        low += f * band; const high = w[i] - low - qd * band; band += f * high;
+        rum += (w[i] - rum) * 0.004;
+        return band * (0.2 + 0.8 * g ** 1.5) + rum * 2;
+      });
+    },
+    fire(ch) {
+      /* A low roar, then crackles: short clicks of noise, mostly tiny,
+         sometimes in quick clusters, and the odd deeper pop. */
+      const w = white(); let r1 = 0, r2 = 0;
+      const a = coef(320);
+      const out = ring(i => { r1 += (w[i] - r1) * a; r2 += (r1 - r2) * a; return r2 * 1.2; });
+      const clusters = Math.round(secs * 9);
+      for (let c = 0; c < clusters; c++) {
+        const at = (rnd() * len) | 0, count = rnd() < 0.25 ? 3 + ((rnd() * 6) | 0) : 1;
+        for (let k = 0; k < count; k++) {
+          const n = Math.round((0.0004 + rnd() * 0.0025) * sr), amp = 0.03 + rnd() ** 4 * 0.45;
+          let prev = 0;
+          event(out, at + ((rnd() * 0.09 * sr) | 0), n, j => {
+            const x = rnd() * 2 - 1, d = x - prev; prev = x;           // differentiated: a click, not a thud
+            return amp * d * Math.exp(-4 * j / n);
+          });
+        }
+      }
+      const pops = Math.round(secs * 0.6);
+      for (let p = 0; p < pops; p++) {
+        const f = 110 + rnd() * 200, tau = 0.012 * sr, amp = 0.15 + rnd() * 0.2;
+        event(out, (rnd() * len) | 0, Math.ceil(tau * 5), k => amp * Math.sin(TAU * f * k / sr) * Math.exp(-k / tau));
+      }
+      return out;
+    },
+    night(ch) {
+      /* Still night air, and crickets: each one a few short tone pulses
+         per chirp. Pulse spacing is jittered so no two chirps keep time
+         — a cricket's ~30 Hz pulse rate would otherwise sit right in the
+         gamma range. Each ear gets its own crickets. */
+      const out = lowpass(noisePink(), 900).map(v => v * 0.5);
+      const crickets = 2 + (rnd() < 0.5 ? 1 : 0);
+      for (let c = 0; c < crickets; c++) {
+        const f = 4100 + rnd() * 1100, chirps = Math.round(secs / (0.75 + rnd() * 0.5));
+        const amp = (0.08 + rnd() * 0.12) * (c === 0 ? 1 : 0.5);
+        for (let k = 0; k < chirps; k++) {
+          let at = Math.round(((k + rnd() * 0.15) * secs / chirps) * sr);
+          const pulses = 3 + ((rnd() * 2) | 0);
+          for (let p = 0; p < pulses; p++) {
+            const n = Math.round((0.011 + rnd() * 0.007) * sr), ph = rnd() * TAU;
+            event(out, at, n, j => amp * Math.sin(Math.PI * j / n) * Math.sin(ph + TAU * f * j / sr));
+            at += Math.round((0.019 + rnd() * 0.012) * sr);
+          }
+        }
+      }
+      return out;
+    },
+  };
+
+  /* ── Hums ── built on the tone's pitch: `low` is two octaves under
+     it, `mid` one. Rendered once, mono, into both ears. */
+  const low = carrier / 4, mid = carrier / 2;
+  const hums = {
+    drone() {
+      /* An organ-ish drone: ten partials of `low`, each a close pair
+         drifting through each other over tens of seconds — a shimmer far
+         too slow to be heard as a beat — with the brightness swelling
+         and settling twice a loop. */
+      const wf = wander([1, 2]);
+      const swell = ctl(t => 0.35 + 0.65 * wf(t));
+      const out = new Float32Array(len);
+      for (let n = 1; n <= 10; n++) {
+        const f = q(n * low), split = (1 + (n % 3)) / secs, amp = 1 / n ** 1.1;
+        if (f + split > sr / 2.2) break;
+        addSine(out, f, amp, n >= 3 ? swell : null);
+        addSine(out, f + split, amp, n >= 3 ? swell : null);
+      }
+      return out;
+    },
+    voice() {
+      /* Three hummed voices — the tone an octave down, a fifth above
+         that, and the tone's own pitch — mouths closed: a strong low
+         resonance near 260 Hz and little above 1 kHz. Each breathes in
+         its own phrases, staggered so the hum never stops all at once.
+         No vibrato: a 5 Hz wobble is a theta-range rhythm. The pitch
+         only drifts, a few cents, over the whole loop. */
+      const voices = [
+        { f: q(mid), amp: 1,    phrase: 10,  off: 0   },
+        { f: q(mid * 1.5), amp: 0.45, phrase: 7.5, off: 2.6 },
+        { f: q(mid * 2), amp: 0.3,  phrase: 15,  off: 6.1 },
+      ];
+      const TABLE = 4096;
+      const out = new Float32Array(len);
+      for (const v of voices) {
+        const table = new Float32Array(TABLE + 1);
+        for (let h = 1; h * v.f < Math.min(3500, sr / 2.2); h++) {
+          const hz = h * v.f;
+          const a = (1 / h) * (1 + 3 * Math.exp(-(((hz - 260) / 130) ** 2))) / (1 + (hz / 900) ** 4);
+          for (let j = 0; j <= TABLE; j++) table[j] += a * Math.sin(TAU * h * j / TABLE);
+        }
+        /* Drift: a whole number of slow cycles, so the phase still
+           closes when the loop does. */
+        const k = 1 + ((rnd() * 2) | 0), dph = rnd() * TAU, depth = 0.003 * v.f * secs / (TAU * k);
+        const drift = ctl(t => -depth * Math.cos(TAU * k * t + dph));
+        const breath = ctl(t => {
+          const s = ((t * secs + v.off) % v.phrase), end = v.phrase - 0.7;   // 0.7 s to breathe in
+          if (s >= end) return 0;
+          return Math.min(1, s / 1.3) * Math.min(1, (end - s) / 1.6);
+        });
+        for (let i = 0; i < len; i++) {
+          let ph = (v.f * i / sr + drift(i)) % 1; if (ph < 0) ph += 1;
+          const x = ph * TABLE, j = x | 0;
+          out[i] += v.amp * breath(i) * (table[j] + (table[j + 1] - table[j]) * (x - j));
+        }
+      }
+      return out;
+    },
+    bowl() {
+      /* A struck metal bowl, three strikes a loop. Its partials are not
+         harmonic (≈ 1 : 2.7 : 5.2 : 8.3 : 12), and each is a close pair
+         that slowly warbles — kept under 0.7 Hz, well below the beat. The
+         fundamental sits an octave under the tone. */
+      const ratios = [1, 2.71, 5.15, 8.3, 12.1], amps = [1, 0.55, 0.3, 0.16, 0.08];
+      const taus = [9, 6, 3.8, 2.4, 1.4], splits = [8, 10, 13, 16, 20];   // ÷ secs → Hz
+      const strikes = [0, 1, 2].map(k => ({ at: (k + 0.1 + rnd() * 0.3) * secs / 3, amp: 0.75 + rnd() * 0.25 }));
+      const out = new Float32Array(len);
+      ratios.forEach((r, p) => {
+        const f = q(mid * r);
+        if (f > sr / 2.2) return;
+        const env = ctl(t => {
+          const s = t * secs; let e = 0;
+          for (const st of strikes) {
+            const dt = (((s - st.at) % secs) + secs) % secs;
+            e += st.amp * Math.min(1, dt / 0.004) * Math.exp(-dt / taus[p]);
+          }
+          return e;
+        });
+        addSine(out, f, amps[p], env);
+        addSine(out, f + splits[p] / secs, amps[p], env);
+      });
+      return out;
+    },
+    fan() {
+      /* The motor: a quiet hum on `low` and its next two partials. The
+         air (below) is noise, different in each ear. */
+      const out = new Float32Array(len);
+      [0.5, 0.3, 0.15].forEach((a, k) => addSine(out, q((k + 1) * low), a));
+      return out;
+    },
+  };
+
+  const shared = {};
+  let left, right;
+  if (id === 'brown' || id === 'pink' || id === 'white') {
+    const gen = { brown: noiseBrown, pink: noisePink, white }[id];
+    left = gen(); right = gen();
+  } else if (nature[id]) {
+    left = nature[id](0, shared); right = nature[id](1, shared);
+  } else if (id === 'fan') {
+    const motor = hums.fan();
+    const air = () => lowpass(noisePink(), 1600, 2);
+    const scaleTo = (x, rms) => { let s = 0; for (const v of x) s += v * v; const k = rms / Math.sqrt(s / x.length || 1); return x.map(v => v * k); };
+    const m = scaleTo(motor, 0.035);
+    left = scaleTo(air(), 0.2).map((v, i) => v + m[i]);
+    right = scaleTo(air(), 0.2).map((v, i) => v + m[i]);
+  } else {
+    left = hums[id](); right = left;
+  }
+
+  /* Much the same loudness for every sound. Levelled by RMS, then a soft
+     limiter rounds off the peaks — scaling everything down to its
+     loudest peak instead left a crackling fire or a breaking wave far
+     quieter than steady noise. The gain is capped so a spiky sound is
+     softened, not squashed. One gain for both ears, so a hum's two
+     channels stay identical. */
+  const level = (xs) => {
+    let sum = 0, peak = 0, n = 0;
+    for (const x of xs) for (let i = 0; i < x.length; i++) { const v = x[i]; sum += v * v; n++; if (Math.abs(v) > peak) peak = Math.abs(v); }
+    return Math.min(0.15 / Math.sqrt(sum / n || 1), 1.2 / (peak || 1));
+  };
+  const k = level(left === right ? [left] : [left, right]);
+  const shape = (x) => x.map(v => 0.6 * Math.tanh(v * k / 0.6));
+  const L = shape(left);
+  return { left: L, right: left === right ? L : shape(right), secs, sr };
+}
 const BEATS_STOP_AFTER = [0, 15, 30, 60, 90];
 
 const beatsNum = (v, lo, hi, dflt) => {
@@ -3275,7 +3653,7 @@ const sanitiseBeats = (v = {}) => ({
   beat:      Math.round(beatsNum(v.beat, BEAT_MIN, BEAT_MAX, 10) * 10) / 10,
   carrier:   Math.round(beatsNum(v.carrier, 100, 400, 200)),
   volume:    Math.round(beatsNum(v.volume, 0, 100, 35)),
-  noise:     NOISE_TYPES.some(n => n.id === v.noise) ? v.noise : 'brown',
+  noise:     BED_SOUNDS.some(n => n.id === v.noise) ? v.noise : 'brown',
   noiseVol:  Math.round(beatsNum(v.noiseVol, 0, 100, 30)),
   mode:      v.mode === 'lock' ? 'lock' : 'mix',
   stopAfter: BEATS_STOP_AFTER.includes(Number(v.stopAfter)) ? Number(v.stopAfter) : 0,
@@ -3297,8 +3675,8 @@ const Beats = (() => {
      happening in the bottom fifth. Deliberately quiet at the defaults: this
      is meant to sit beneath whatever else is playing, not compete with it. */
   const toneGain  = (v) => (v / 100) ** 2 * 0.35;
-  const noiseGain = (v) => (v / 100) ** 2 * 1.5;   // noise buffers are normalised to 0.2 RMS
-  const FADE_IN = 2, FADE_OUT = 8, NOISE_SECS = 10;
+  const noiseGain = (v) => (v / 100) ** 2 * 2;   // bed loops are levelled to ~0.15 RMS
+  const FADE_IN = 2, FADE_OUT = 8;
 
   let cfg = BeatsStore.read();
   let ctx = null;
@@ -3333,65 +3711,58 @@ const Beats = (() => {
     return ctx;
   };
 
-  /* One buffer per colour, made once and looped. The first `fade`
-     samples are crossfaded with the ones that would have followed the
-     last, so the wrap from end back to start is a continuation of the
-     noise rather than a jump — in brown noise a jump is an audible tick
-     every ten seconds. */
-  const noiseCache = {};
-  const noiseBuffer = (type) => {
-    const key = `${type}@${ctx.sampleRate}`;
-    if (noiseCache[key]) return noiseCache[key];
-    const sr = ctx.sampleRate, len = sr * NOISE_SECS, fade = Math.round(sr * 0.05);
-    const buf = ctx.createBuffer(2, len, sr);
-    for (let ch = 0; ch < 2; ch++) {
-      const raw = new Float32Array(len + fade);
-      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0, brown = 0;
-      for (let i = 0; i < raw.length; i++) {
-        const w = Math.random() * 2 - 1;
-        if (type === 'white') raw[i] = w;
-        else if (type === 'pink') {
-          /* Paul Kellet's refined pink filter */
-          b0 = 0.99886 * b0 + w * 0.0555179; b1 = 0.99332 * b1 + w * 0.0750759;
-          b2 = 0.96900 * b2 + w * 0.1538520; b3 = 0.86650 * b3 + w * 0.3104856;
-          b4 = 0.55000 * b4 + w * 0.5329522; b5 = -0.7616 * b5 - w * 0.0168980;
-          raw[i] = b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362; b6 = w * 0.115926;
-        } else {
-          brown = (brown + 0.02 * w) / 1.02; raw[i] = brown;
-        }
-      }
-      const d = buf.getChannelData(ch);
-      let sum = 0;
-      for (let i = 0; i < len; i++) {
-        const v = i < fade ? raw[i] * (i / fade) + raw[len + i] * (1 - i / fade) : raw[i];
-        d[i] = v; sum += v * v;
-      }
-      /* Same loudness whichever colour is picked, so switching doesn't
-         ambush anyone with white noise at brown noise's level. */
-      const scale = 0.2 / Math.sqrt(sum / len || 1);
-      for (let i = 0; i < len; i++) d[i] *= scale;
+  /* Rendered loops, kept for the few most recently used sounds: a 30 s
+     stereo loop is ~11 MB, and nobody needs all fourteen in memory. A
+     hum is keyed by the pitch it was tuned to. */
+  const bedCache = new Map();
+  const bedKey = (type) => `${type}@${ctx.sampleRate}${bedSound(type).tuned ? `@${cfg.carrier}` : ''}`;
+  const bedBuffer = (type) => {
+    const key = bedKey(type);
+    if (bedCache.has(key)) {
+      const hit = bedCache.get(key); bedCache.delete(key); bedCache.set(key, hit);
+      return hit;
     }
-    return (noiseCache[key] = buf);
+    const r = renderBed(type, ctx.sampleRate, cfg.carrier);
+    const buf = ctx.createBuffer(2, r.left.length, r.sr);
+    buf.getChannelData(0).set(r.left);
+    buf.getChannelData(1).set(r.right);
+    bedCache.set(key, buf);
+    while (bedCache.size > 3) bedCache.delete(bedCache.keys().next().value);
+    return buf;
   };
 
+  /* Swap the bed: the old one fades out as the new one fades in. */
   const setNoise = (r, type) => {
     const now = ctx.currentTime;
     if (r.noise) {
       const { src, g } = r.noise;
-      g.gain.setTargetAtTime(0, now, 0.05);
-      try { src.stop(now + 0.3); } catch {}
+      g.gain.setTargetAtTime(0, now, 0.12);
+      try { src.stop(now + 0.8); } catch {}
       r.noise = null;
     }
     if (type === 'none') return;
     const src = ctx.createBufferSource();
-    src.buffer = noiseBuffer(type);
+    src.buffer = bedBuffer(type);
     src.loop = true;
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, now);
-    g.gain.setTargetAtTime(1, now, 0.1);
+    g.gain.setTargetAtTime(1, now, 0.15);
     src.connect(g); g.connect(r.noiseGain);
     src.start();
-    r.noise = { src, g };
+    r.noise = { src, g, type, key: bedKey(type) };
+  };
+
+  /* Rendering a loop takes a moment of main-thread work — up to a few
+     hundred ms for a hum on a phone. Done just after the click rather
+     than inside it, so the button shows its new state first; and a pitch
+     drag retunes a hum once, when the drag pauses, not at every step. */
+  let bedTimer = null;
+  const queueBed = (delay = 0) => {
+    clearTimeout(bedTimer);
+    bedTimer = setTimeout(() => {
+      if (!rig) return;
+      if (cfg.noise === 'none' ? rig.noise : rig.noise?.key !== bedKey(cfg.noise)) setNoise(rig, cfg.noise);
+    }, delay);
   };
 
   const mediaSession = (on) => {
@@ -3511,6 +3882,7 @@ const Beats = (() => {
       if (!r) return;
       rig = null;
       clearTimeout(endTimer); endTimer = null;
+      clearTimeout(bedTimer);
       const g = r.master.gain, now = ctx.currentTime;
       g.cancelScheduledValues(now);
       g.setValueAtTime(g.value, now);
@@ -3545,7 +3917,8 @@ const Beats = (() => {
         rig.R.frequency.setTargetAtTime(cfg.carrier + cfg.beat, t, k);
         rig.tone.gain.setTargetAtTime(toneGain(cfg.volume), t, k);
         rig.noiseGain.gain.setTargetAtTime(noiseGain(cfg.noiseVol), t, k);
-        if (cfg.noise !== prev.noise) setNoise(rig, cfg.noise);
+        if (cfg.noise !== prev.noise) queueBed(0);
+        else if (cfg.carrier !== prev.carrier && bedSound(cfg.noise).tuned) queueBed(400);
         if (cfg.mode !== prev.mode) {
           audioSession(cfg.mode === 'lock' ? 'playback' : 'ambient');
           route(rig);
@@ -3566,6 +3939,7 @@ const Beats = (() => {
         left:  rig ? rig.L.frequency.value : null,
         right: rig ? rig.R.frequency.value : null,
         noise: rig ? (rig.noise ? 'on' : 'off') : null,
+        bed:   rig?.noise ? rig.noise.key : null,
         output: rig ? (rig.el ? 'media-element' : 'speakers') : null,
       };
     },
@@ -10273,18 +10647,34 @@ function BeatsView() {
 
           <div className="card p-5 space-y-4">
             <div>
-              <div className="text-[10px] font-mono tracking-widest text-strategy mb-0.5">NOISE</div>
+              <div className="text-[10px] font-mono tracking-widest text-strategy mb-0.5">SOUND BED</div>
               <div className="font-display text-xl text-bone-100 leading-tight">A bed underneath</div>
             </div>
-            <div className="seg" role="group" aria-label="Noise">
-              {NOISE_TYPES.map(n => (
-                <button key={n.id} onClick={() => set({ noise: n.id })} aria-pressed={cfg.noise === n.id}>{n.label}</button>
+            <div className="space-y-3" role="group" aria-label="Sound bed">
+              {BED_GROUPS.map(g => (
+                <div key={g.id}>
+                  <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1.5">{g.label.toUpperCase()}</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {BED_SOUNDS.filter(x => x.group === g.id).map(x => {
+                      const on = cfg.noise === x.id;
+                      return (
+                        <button key={x.id} onClick={() => set({ noise: x.id })} aria-pressed={on}
+                          className="btn px-3 py-1.5 rounded-full text-xs border"
+                          style={on
+                            ? { borderColor: `${band.color}88`, background: `${band.color}1f`, color: band.color }
+                            : { borderColor: 'var(--s3)', color: 'var(--f1, #c9c6b8)' }}>
+                          {x.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               ))}
             </div>
-            <BeatsSlider label="Noise volume" testId="beats-noise-volume" value={cfg.noiseVol} min={0} max={100} step={1}
+            <BeatsSlider label="Bed volume" testId="beats-noise-volume" value={cfg.noiseVol} min={0} max={100} step={1}
               display={`${cfg.noiseVol}%`} onChange={v => set({ noiseVol: v })} disabled={cfg.noise === 'none'}/>
             <p className="text-[10px] font-mono tracking-wider text-bone-400">
-              Softens the bare tone and masks the room. Brown is the deepest, white the brightest.
+              Softens the bare tone and masks the room. Hums are tuned to the tone's pitch and play the same in both ears, so they stay in tune with it and add no beat of their own.
             </p>
           </div>
 

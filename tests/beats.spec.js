@@ -81,7 +81,7 @@ test.describe('Binaural beats', () => {
     await expect.poll(near(page, 'left', 205)).toBe(true);
     await expect.poll(near(page, 'right', 245)).toBe(true);
 
-    await page.getByRole('group', { name: 'Noise' }).getByRole('button', { name: 'None' }).click();
+    await page.getByRole('group', { name: 'Sound bed' }).getByRole('button', { name: 'None' }).click();
     await expect.poll(async () => (await engine(page)).noise).toBe('off');
   });
 
@@ -123,14 +123,14 @@ test.describe('Binaural beats', () => {
 
   test('settings are remembered on this device, and kept out of the synced state', async ({ page }) => {
     await page.getByRole('group', { name: 'Presets' }).getByRole('button', { name: /^6 Hz/ }).click();
-    await page.getByRole('group', { name: 'Noise' }).getByRole('button', { name: 'Pink' }).click();
+    await page.getByRole('group', { name: 'Sound bed' }).getByRole('button', { name: 'Pink' }).click();
     await page.getByRole('group', { name: 'Stop after' }).getByRole('button', { name: '30m' }).click();
 
     await page.reload();
     await mounted(page);
     await goTab(page, 'Beats');
     await expect(page.getByTestId('beats-hz')).toHaveText('6 Hz');
-    await expect(page.getByRole('group', { name: 'Noise' }).getByRole('button', { name: 'Pink' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('group', { name: 'Sound bed' }).getByRole('button', { name: 'Pink' })).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByRole('group', { name: 'Stop after' }).getByRole('button', { name: '30m' })).toHaveAttribute('aria-pressed', 'true');
 
     const synced = await page.evaluate(() => JSON.parse(localStorage.getItem('madinah_v1') || '{}'));
@@ -151,5 +151,78 @@ test.describe('Beats sleep timer', () => {
     await page.clock.fastForward('15:01');
     await expect.poll(async () => (await engine(page)).playing).toBe(false);
     await expect(page.getByTestId('beats-status')).toHaveText('Headphones on, then press play');
+  });
+});
+
+/* The bed: noise, nature and hums, all synthesised. renderBed is pure, so
+   it is checked directly rather than through a speaker. */
+test.describe('Beats sound bed', () => {
+  test.beforeEach(async ({ page }) => { await boot(page); });
+
+  test('every sound is a finite, level-matched loop with no seam', async ({ page }) => {
+    const report = await page.evaluate(() => BED_SOUNDS.filter(s => s.secs).map(s => {
+      const r = renderBed(s.id, 16000, 200);
+      const stats = (x) => {
+        let sum = 0, peak = 0, step = 0, finite = true;
+        for (let i = 0; i < x.length; i++) {
+          if (!Number.isFinite(x[i])) finite = false;
+          sum += x[i] * x[i]; peak = Math.max(peak, Math.abs(x[i]));
+          if (i) step += Math.abs(x[i] - x[i - 1]);
+        }
+        /* The jump from the last sample back to the first, against the
+           typical sample-to-sample step. A cut shows up as a big ratio. */
+        const seam = Math.abs(x[0] - x[x.length - 1]) / (step / (x.length - 1));
+        return { rms: Math.sqrt(sum / x.length), peak, seam, finite, len: x.length };
+      };
+      return { id: s.id, secs: s.secs, same: r.left === r.right, L: stats(r.left), R: stats(r.right) };
+    }));
+    expect(report).toHaveLength(13);
+    for (const s of report) {
+      for (const c of [s.L, s.R]) {
+        expect(c.finite, s.id).toBe(true);
+        expect(c.len, s.id).toBe(s.secs * 16000);
+        expect(c.peak, s.id).toBeLessThanOrEqual(0.6001);
+        expect(c.rms, s.id).toBeGreaterThan(0.04);
+        expect(c.rms, s.id).toBeLessThanOrEqual(0.2001);
+        expect(c.seam, s.id).toBeLessThan(8);
+      }
+    }
+    /* Hums are the same in both ears; nature and noise are not. */
+    const same = Object.fromEntries(report.map(s => [s.id, s.same]));
+    expect(same).toMatchObject({ drone: true, voice: true, bowl: true, rain: false, ocean: false, brown: false });
+  });
+
+  test('a hum is tuned to the tone — its partial lands on the pitch, not beside it', async ({ page }) => {
+    /* Goertzel: the energy at one exact frequency. The drone is built two
+       octaves under the tone, so its 4th partial IS the tone. */
+    const power = await page.evaluate(() => {
+      const at = (x, f, sr) => {
+        const w = 2 * Math.PI * f / sr, c = 2 * Math.cos(w);
+        let s1 = 0, s2 = 0;
+        for (let i = 0; i < x.length; i++) { const s0 = x[i] + c * s1 - s2; s2 = s1; s1 = s0; }
+        return s1 * s1 + s2 * s2 - c * s1 * s2;
+      };
+      const out = {};
+      for (const carrier of [200, 250]) {
+        const x = renderBed('drone', 8000, carrier).left;
+        out[carrier] = { on: at(x, carrier, 8000), off: at(x, carrier + 7, 8000) };
+      }
+      return out;
+    });
+    for (const p of Object.values(power)) expect(p.on).toBeGreaterThan(p.off * 1000);
+  });
+
+  test('switching sound while playing swaps the bed; moving the pitch retunes a hum', async ({ page }) => {
+    await goTab(page, 'Beats');
+    await play(page);
+    const bed = page.getByRole('group', { name: 'Sound bed' });
+    await bed.getByRole('button', { name: 'Ocean' }).click();
+    await expect.poll(async () => (await engine(page)).bed).toMatch(/^ocean@/);
+
+    await bed.getByRole('button', { name: 'Deep drone' }).click();
+    await expect.poll(async () => (await engine(page)).bed).toMatch(/^drone@\d+@200$/);
+    await page.getByTestId('beats-carrier').focus();
+    await page.keyboard.press('ArrowRight');
+    await expect.poll(async () => (await engine(page)).bed).toMatch(/^drone@\d+@205$/);
   });
 });
