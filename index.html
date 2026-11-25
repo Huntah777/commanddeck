@@ -418,7 +418,15 @@ tailwind.config = {
   .glass-range:focus-visible { box-shadow: none; }
   .glass-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--accent-ring), 0 2px 10px rgba(0,0,0,.45); }
 
+  /* Beats: a slow breath while playing. Deliberately NOT pulsing at the
+     beat frequency — 10–40 Hz flicker is exactly the range that can
+     trigger photosensitive seizures, and the beat is for the ears. */
+  @keyframes beatsBreathe { 0%, 100% { transform: scale(.9); opacity: .45; } 50% { transform: scale(1); opacity: .9; } }
+  .beats-orb { animation: beatsBreathe 6s ease-in-out infinite; animation-play-state: paused; }
+  .beats-orb[data-on] { animation-play-state: running; }
+
   @media (prefers-reduced-motion: reduce) {
+    .beats-orb { animation: none; }
     .glass-nav[data-ready] > .lens { transition: none; }
     .sheet, .modal-scrim { animation: none; }
   }
@@ -708,7 +716,7 @@ const IDLE_SESSION = { phase: 0, endsAt: null, leftMs: null, running: false, don
    forever and resolved in one place rather than five. */
 const VIEW_ALIASES = { stats: 'admin' };
 const normaliseView = (v) => VIEW_ALIASES[v] || v;
-const VALID_VIEWS = ['today','habits','tasks','matrix','admin','stats','focus','goals','shorts'];
+const VALID_VIEWS = ['today','habits','tasks','matrix','admin','stats','focus','beats','goals','shorts'];
 
 const TimerStore = {
   read() {
@@ -882,6 +890,7 @@ const I = {
   mute:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H3v6h3l5 4z"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></svg>,
   flag:    (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>,
   shield:  (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M12 3l7 3v6c0 4.5-3 8-7 9-4-1-7-4.5-7-9V6l7-3z"/></svg>,
+  headphones: (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>,
   sliders: (p={}) => <svg {...p} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="6" r="2.2" fill="var(--s0,#0a0a0b)"/><circle cx="15" cy="12" r="2.2" fill="var(--s0,#0a0a0b)"/><circle cx="8" cy="18" r="2.2" fill="var(--s0,#0a0a0b)"/></svg>,
 };
 
@@ -3178,6 +3187,785 @@ function useCountdown(session, cfg) {
 
 const fmtClock = (s) => `${String(Math.floor(s / 60)).padStart(2,'0')}:${String(s % 60).padStart(2,'0')}`;
 
+/* ------------------------------------------------------------------
+   BINAURAL BEATS ENGINE
+   ------------------------------------------------------------------
+   Two sine tones, one per ear, a few hertz apart. The beat is the
+   difference between them, and it exists only in the head of whoever is
+   wearing headphones — through a speaker the two tones simply mix into a
+   hum.
+
+   Two things this has to do, and both decide where it lives.
+
+   Keep playing in the background. It is a plain module, not a component
+   and not app state: nothing React does — switching tabs, a remote pull
+   merging over the state, a re-render — can unmount it. The Beats view
+   and the header pill are only faces for it, the same arrangement as the
+   Pomodoro engine above.
+
+   Play underneath everything else. Web Audio sent straight to the
+   speakers is what browsers treat as ambient sound: it mixes with music,
+   recitation and video rather than taking the audio over, and on iOS it
+   is the "ambient" audio session, the one that does not pause other apps.
+   That is the default here. The cost is that a phone may silence it once
+   the screen locks. 'lock' mode routes the same graph through a media
+   element and registers lock-screen controls, which is what keeps audio
+   alive with the screen off — but a media element is "playback" audio,
+   and on a phone playback audio may pause whatever was playing in another
+   app. It is a choice rather than a default because the two wishes
+   genuinely pull against each other on a phone; on a desktop browser
+   both modes mix with everything.
+
+   The settings are device-local, like the timer session and the theme:
+   a comfortable volume belongs to the headphones in front of you, and a
+   slider drag is not worth a round-trip to D1.
+------------------------------------------------------------------- */
+const BEATS_KEY = 'madinah_beats_v1';
+
+/* The conventional EEG bands — `max` is how any beat frequency gets
+   named and coloured, preset or not. Descriptions here and on the presets
+   say what each is commonly used for, not what it will do to you. */
+const BEAT_BANDS = [
+  { id: 'delta', name: 'Delta', range: '0.5–4 Hz', max: 4,        use: 'Sleep · deep rest',               color: '#a78bfa' },
+  { id: 'theta', name: 'Theta', range: '4–8 Hz',   max: 8,        use: 'Meditation · dhikr · reflection', color: '#10b981' },
+  { id: 'alpha', name: 'Alpha', range: '8–13 Hz',  max: 13,       use: 'Calm focus · reading',            color: '#22d3ee' },
+  { id: 'beta',  name: 'Beta',  range: '13–30 Hz', max: 30,       use: 'Active work · problem-solving',   color: '#f59e0b' },
+  { id: 'gamma', name: 'Gamma', range: '30–50 Hz', max: Infinity, use: 'Intense concentration',           color: '#ef4444' },
+];
+const beatBand = (hz) => BEAT_BANDS.find(b => hz < b.max) || BEAT_BANDS[BEAT_BANDS.length - 1];
+
+/* Named spots within each band, three apiece. Anything in between is one
+   slider drag away; these are the ones people usually reach for. */
+const BEAT_PRESETS = [
+  { hz: 1,   name: 'Deep sleep' },
+  { hz: 2,   name: 'Sleep' },
+  { hz: 3,   name: 'Restorative rest' },
+  { hz: 4,   name: 'Deep meditation' },
+  { hz: 6,   name: 'Meditation · dhikr' },
+  { hz: 7.8, name: 'Schumann resonance' },
+  { hz: 8,   name: 'Relaxed calm' },
+  { hz: 10,  name: 'Calm focus' },
+  { hz: 12,  name: 'Alert calm' },
+  { hz: 14,  name: 'Calm alertness (SMR)' },
+  { hz: 18,  name: 'Active work' },
+  { hz: 25,  name: 'High energy' },
+  { hz: 30,  name: 'Sharp focus' },
+  { hz: 40,  name: 'Intense concentration' },
+  { hz: 50,  name: 'Upper gamma' },
+];
+const beatPreset = (hz) => BEAT_PRESETS.find(p => p.hz === hz) || null;
+const BEAT_MIN = 0.5, BEAT_MAX = 50;
+const fmtHz = (hz) => `${Number.isInteger(hz) ? hz : hz.toFixed(1)} Hz`;
+
+/* ── The bed: what plays underneath the tone ─────────────────────────
+   Noise, nature and hums. There are no recordings: every sound is
+   synthesised here, once, into a loop — so it works offline, costs
+   nothing to download, and nobody's sample library is being shipped.
+   (The setting is still called `noise` in storage; it predates the
+   other two groups.)
+
+   Three rules every sound follows.
+
+   It loops without a seam. Nothing is cut at the end of the buffer:
+   filters are run twice round the ring so the second lap starts from the
+   state the first lap ended in, events near the end spill over into the
+   start, slow movements complete a whole number of cycles per loop, and
+   every steady pitch completes a whole number of cycles too.
+
+   It has no rhythm of its own between 1 and 40 Hz. That is the range the
+   beat lives in, and a fan flutter at 8 Hz would be a second, competing
+   beat. Movement here is either slower than once a second (waves, gusts,
+   breath) or irregular (drops, crackles, bubbles).
+
+   Hums are the same in both ears and tuned to the tone. Anything tonal
+   that differed between the ears would make a binaural beat of its own;
+   and a hum is built on the tone's pitch an octave or two down, so where
+   its partials meet the tone they meet it in tune, not a few hertz off. ── */
+const BED_GROUPS = [
+  { id: 'noise',  label: 'Noise'  },
+  { id: 'nature', label: 'Nature' },
+  { id: 'hum',    label: 'Hum'    },
+];
+const BED_SOUNDS = [
+  { id: 'none',   group: 'noise',  label: 'None'  },
+  { id: 'brown',  group: 'noise',  label: 'Brown', secs: 10, rate: 24000 },
+  { id: 'pink',   group: 'noise',  label: 'Pink',  secs: 10, rate: 32000 },
+  { id: 'white',  group: 'noise',  label: 'White', secs: 10 },
+  { id: 'rain',   group: 'nature', label: 'Rain',   secs: 20, rate: 24000 },
+  { id: 'ocean',  group: 'nature', label: 'Ocean',  secs: 36, rate: 16000 },
+  { id: 'stream', group: 'nature', label: 'Stream', secs: 20, rate: 16000 },
+  { id: 'wind',   group: 'nature', label: 'Wind',   secs: 30, rate: 16000 },
+  { id: 'fire',   group: 'nature', label: 'Fire',   secs: 20, rate: 24000 },
+  { id: 'night',  group: 'nature', label: 'Night crickets', secs: 24, rate: 16000 },
+  { id: 'drone',  group: 'hum', label: 'Deep drone',    secs: 30, rate: 16000, tuned: true },
+  { id: 'voice',  group: 'hum', label: 'Voice hum',     secs: 30, rate: 16000, tuned: true },
+  { id: 'bowl',   group: 'hum', label: 'Resonant bowl', secs: 30, rate: 16000, tuned: true },
+  { id: 'fan',    group: 'hum', label: 'Fan',           secs: 12, rate: 16000, tuned: true },
+];
+const bedSound = (id) => BED_SOUNDS.find(s => s.id === id) || BED_SOUNDS[0];
+
+/* Render one bed loop: { left, right, sr, secs }. Pure — no AudioContext
+   — so it can be tested.
+
+   Rendered at the lowest rate the sound needs (`rate`), not the
+   context's: a drone has nothing above a couple of kHz, and rendering it
+   at 48 kHz would be three times the work for nothing. The buffer is
+   created at that rate and Web Audio resamples it on playback. Only
+   noise, which genuinely fills the spectrum, renders at full rate. */
+function renderBed(id, ctxRate, carrier = 200) {
+  const sound = bedSound(id);
+  if (!sound.secs) return null;
+  const sr = Math.min(ctxRate, sound.rate || ctxRate);
+  const TAU = Math.PI * 2, rnd = Math.random;
+  const secs = sound.secs, len = Math.round(sr * secs);
+  /* Snap a frequency to a whole number of cycles per loop. */
+  const q = (f) => Math.max(1, Math.round(f * secs)) / secs;
+  /* One-pole low-pass coefficient for a cutoff. */
+  const coef = (fc) => 1 - Math.exp(-TAU * Math.min(fc, sr * 0.45) / sr);
+  const white = () => { const w = new Float32Array(len); for (let i = 0; i < len; i++) w[i] = rnd() * 2 - 1; return w; };
+  /* Run a stateful per-sample step twice round the ring, keep lap two. */
+  const ring = (step) => {
+    const out = new Float32Array(len);
+    for (let lap = 0; lap < 2; lap++) for (let i = 0; i < len; i++) out[i] = step(i);
+    return out;
+  };
+  /* A slow control signal, evaluated every 64 samples and interpolated.
+     fn takes loop position 0..1 and must itself be periodic. */
+  const ctl = (fn) => {
+    const n = Math.ceil(len / 64) + 1, a = new Float32Array(n);
+    for (let j = 0; j < n; j++) a[j] = fn(((j * 64) % len) / len);
+    return (i) => { const j = i >> 6, f = (i & 63) / 64; return a[j] + (a[j + 1] - a[j]) * f; };
+  };
+  /* Smooth random wander in 0..1 that closes on itself: a few sines with
+     whole numbers of cycles per loop, random phases. */
+  const wander = (cycles) => {
+    const ph = cycles.map(() => rnd() * TAU), w = cycles.map(k => 1 / Math.sqrt(k));
+    const norm = w.reduce((a, b) => a + b, 0);
+    return (t) => 0.5 + 0.5 * cycles.reduce((s, k, m) => s + w[m] * Math.sin(TAU * k * t + ph[m]), 0) / norm;
+  };
+  /* Add a short event at `start`, wrapping past the end into the start. */
+  const event = (out, start, n, fn) => { for (let k = 0; k < n; k++) out[(start + k) % len] += fn(k); };
+  /* Add a steady sine into `out`, optionally shaped by env(i). A rotating
+     phasor rather than Math.sin per sample — far cheaper, and plenty
+     stable over a loop's length in doubles. */
+  const addSine = (out, f, amp, env) => {
+    const c = Math.cos(TAU * f / sr), s = Math.sin(TAU * f / sr), ph = rnd() * TAU;
+    let x = Math.cos(ph), y = Math.sin(ph);
+    for (let i = 0; i < len; i++) {
+      out[i] += y * amp * (env ? env(i) : 1);
+      const nx = x * c - y * s; y = x * s + y * c; x = nx;
+    }
+  };
+
+  const noiseBrown = () => { const w = white(); let b = 0; return ring(i => (b = (b + 0.02 * w[i]) / 1.02)); };
+  const noisePink = () => {
+    const w = white(); let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+    return ring(i => {
+      const x = w[i];
+      /* Paul Kellet's refined pink filter */
+      b0 = 0.99886 * b0 + x * 0.0555179; b1 = 0.99332 * b1 + x * 0.0750759;
+      b2 = 0.96900 * b2 + x * 0.1538520; b3 = 0.86650 * b3 + x * 0.3104856;
+      b4 = 0.55000 * b4 + x * 0.5329522; b5 = -0.7616 * b5 - x * 0.0168980;
+      const y = b0 + b1 + b2 + b3 + b4 + b5 + b6 + x * 0.5362; b6 = x * 0.115926;
+      return y;
+    });
+  };
+  const lowpass = (src, fc, poles = 1) => {
+    const a = coef(fc); const st = new Float64Array(poles);
+    return ring(i => { let x = src[i]; for (let p = 0; p < poles; p++) x = (st[p] += (x - st[p]) * a); return x; });
+  };
+
+  /* ── Nature ── one channel at a time, so the ears hear different
+     drops, waves and crackles: width, not a mono recording. `shared`
+     holds anything both channels must agree on. */
+  const nature = {
+    rain(ch, shared) {
+      /* The hiss of a lot of distant rain: noise with the rumble and the
+         top end taken off. */
+      const w = white(); let lo = 0, y = 0;
+      const aLo = coef(450), aHi = coef(6500);
+      const out = ring(i => { lo += (w[i] - lo) * aLo; y += ((w[i] - lo) - y) * aHi; return y * 0.4; });
+      /* Drops close by: tiny bright pings, mostly faint, a few not. */
+      const drops = Math.round(secs * 50);
+      for (let d = 0; d < drops; d++) {
+        const f = 1500 + rnd() * 4500, tau = (0.0015 + rnd() * 0.005) * sr, amp = 0.04 + rnd() ** 3 * 0.55;
+        const step = TAU * f / sr, decay = Math.exp(-1 / tau);
+        let env = amp;
+        event(out, (rnd() * len) | 0, Math.ceil(tau * 6), k => { const v = env * Math.sin(step * k); env *= decay; return v; });
+      }
+      return out;
+    },
+    ocean(ch, shared) {
+      /* Waves arrive every 7–11 s; both ears hear the same sea, the far
+         ear a moment later. Swell = raised-cosine rise, slow fall. */
+      if (!shared.waves) {
+        const n = 4;
+        shared.waves = Array.from({ length: n }, (_, k) => ({
+          at: (k + 0.15 + rnd() * 0.7) * secs / n,
+          rise: 2.2 + rnd() * 1.4, fall: 3.5 + rnd() * 2.5, size: 0.7 + rnd() * 0.3,
+        }));
+      }
+      const lag = ch ? 0.35 : 0;
+      const envAt = (t => {
+        const s = t * secs;
+        let e = 0.16;
+        for (const w of shared.waves) {
+          const dt = (((s - w.at - lag) % secs) + secs) % secs;
+          e += w.size * (dt < w.rise ? Math.sin(Math.PI / 2 * dt / w.rise) ** 2 : Math.exp(-(dt - w.rise) / w.fall));
+        }
+        return Math.min(1.2, e);
+      });
+      const env = ctl(envAt), cut = ctl(t => coef(220 + 1500 * envAt(t)));
+      const w = white(); let y1 = 0, y2 = 0, h = 0;
+      return ring(i => {
+        const e = env(i), a = cut(i);
+        y1 += (w[i] - y1) * a; y2 += (y1 - y2) * a;     // the body of the wave
+        h += (w[i] - h) * 0.35;                         // the foam: a brighter wash on the crest
+        return y2 * e * 3 + (w[i] - h) * e ** 3 * 0.05;
+      });
+    },
+    stream(ch) {
+      /* A shallow brook is mostly bubbles: tiny sine blips whose pitch
+         rises as they burst, over a brighter running hiss. */
+      const w = white(); let lo = 0, y = 0, flutter = 0.5;
+      const aLo = coef(900), aHi = coef(4000), aFl = coef(5);
+      const n2 = white();
+      const out = ring(i => {
+        lo += (w[i] - lo) * aLo; y += ((w[i] - lo) - y) * aHi;
+        flutter += (0.5 + n2[i] * 0.5 - flutter) * aFl;   // irregular, not a rhythm
+        return y * (0.25 + flutter * 0.5);
+      });
+      const bubbles = Math.round(secs * 70);
+      for (let b = 0; b < bubbles; b++) {
+        const f0 = 350 + rnd() ** 2 * 1400, n = Math.round((0.008 + rnd() * 0.025) * sr);
+        const amp = 0.03 + rnd() ** 2 * 0.25;
+        let ph = 0;
+        event(out, (rnd() * len) | 0, n, k => {
+          const p = k / n; ph += TAU * f0 * (1 + 0.9 * p) / sr;
+          return amp * Math.sin(ph) * Math.sin(Math.PI * p) * (1 - p);
+        });
+      }
+      return out;
+    },
+    wind(ch, shared) {
+      /* Gusts: band-passed noise whose centre and level wander slowly.
+         The gusts are shared so the ears hear one wind, not two. */
+      shared.gust = shared.gust || wander([1, 2, 3, 5, 8]);
+      shared.pitch = shared.pitch || wander([1, 3, 4, 7]);
+      const pitchAt = (t) => shared.pitch((t + (ch ? 0.01 : 0)) % 1);
+      const gust = ctl(shared.gust);
+      const svf = ctl(t => {
+        const fc = 160 + 750 * pitchAt(t) * (0.5 + shared.gust(t));
+        return 2 * Math.sin(Math.PI * Math.min(fc, sr / 6) / sr);
+      });
+      const w = white(); let low = 0, band = 0, rum = 0;
+      return ring(i => {
+        const g = gust(i), f = svf(i), qd = 0.45;   // state-variable band-pass
+        low += f * band; const high = w[i] - low - qd * band; band += f * high;
+        rum += (w[i] - rum) * 0.004;
+        return band * (0.2 + 0.8 * g ** 1.5) + rum * 2;
+      });
+    },
+    fire(ch) {
+      /* A low roar, then crackles: short clicks of noise, mostly tiny,
+         sometimes in quick clusters, and the odd deeper pop. */
+      const w = white(); let r1 = 0, r2 = 0;
+      const a = coef(320);
+      const out = ring(i => { r1 += (w[i] - r1) * a; r2 += (r1 - r2) * a; return r2 * 1.2; });
+      const clusters = Math.round(secs * 9);
+      for (let c = 0; c < clusters; c++) {
+        const at = (rnd() * len) | 0, count = rnd() < 0.25 ? 3 + ((rnd() * 6) | 0) : 1;
+        for (let k = 0; k < count; k++) {
+          const n = Math.round((0.0004 + rnd() * 0.0025) * sr), amp = 0.03 + rnd() ** 4 * 0.45;
+          let prev = 0;
+          event(out, at + ((rnd() * 0.09 * sr) | 0), n, j => {
+            const x = rnd() * 2 - 1, d = x - prev; prev = x;           // differentiated: a click, not a thud
+            return amp * d * Math.exp(-4 * j / n);
+          });
+        }
+      }
+      const pops = Math.round(secs * 0.6);
+      for (let p = 0; p < pops; p++) {
+        const f = 110 + rnd() * 200, tau = 0.012 * sr, amp = 0.15 + rnd() * 0.2;
+        event(out, (rnd() * len) | 0, Math.ceil(tau * 5), k => amp * Math.sin(TAU * f * k / sr) * Math.exp(-k / tau));
+      }
+      return out;
+    },
+    night(ch) {
+      /* Still night air, and crickets: each one a few short tone pulses
+         per chirp. Pulse spacing is jittered so no two chirps keep time
+         — a cricket's ~30 Hz pulse rate would otherwise sit right in the
+         gamma range. Each ear gets its own crickets. */
+      const out = lowpass(noisePink(), 900).map(v => v * 0.5);
+      const crickets = 2 + (rnd() < 0.5 ? 1 : 0);
+      for (let c = 0; c < crickets; c++) {
+        const f = 4100 + rnd() * 1100, chirps = Math.round(secs / (0.75 + rnd() * 0.5));
+        const amp = (0.08 + rnd() * 0.12) * (c === 0 ? 1 : 0.5);
+        for (let k = 0; k < chirps; k++) {
+          let at = Math.round(((k + rnd() * 0.15) * secs / chirps) * sr);
+          const pulses = 3 + ((rnd() * 2) | 0);
+          for (let p = 0; p < pulses; p++) {
+            const n = Math.round((0.011 + rnd() * 0.007) * sr), ph = rnd() * TAU;
+            event(out, at, n, j => amp * Math.sin(Math.PI * j / n) * Math.sin(ph + TAU * f * j / sr));
+            at += Math.round((0.019 + rnd() * 0.012) * sr);
+          }
+        }
+      }
+      return out;
+    },
+  };
+
+  /* ── Hums ── built on the tone's pitch: `low` is two octaves under
+     it, `mid` one. Rendered once, mono, into both ears. */
+  const low = carrier / 4, mid = carrier / 2;
+  const hums = {
+    drone() {
+      /* An organ-ish drone: ten partials of `low`, each a close pair
+         drifting through each other over tens of seconds — a shimmer far
+         too slow to be heard as a beat — with the brightness swelling
+         and settling twice a loop. */
+      const wf = wander([1, 2]);
+      const swell = ctl(t => 0.35 + 0.65 * wf(t));
+      const out = new Float32Array(len);
+      for (let n = 1; n <= 10; n++) {
+        const f = q(n * low), split = (1 + (n % 3)) / secs, amp = 1 / n ** 1.1;
+        if (f + split > sr / 2.2) break;
+        addSine(out, f, amp, n >= 3 ? swell : null);
+        addSine(out, f + split, amp, n >= 3 ? swell : null);
+      }
+      return out;
+    },
+    voice() {
+      /* Three hummed voices — the tone an octave down, a fifth above
+         that, and the tone's own pitch — mouths closed: a strong low
+         resonance near 260 Hz and little above 1 kHz. Each breathes in
+         its own phrases, staggered so the hum never stops all at once.
+         No vibrato: a 5 Hz wobble is a theta-range rhythm. The pitch
+         only drifts, a few cents, over the whole loop. */
+      const voices = [
+        { f: q(mid), amp: 1,    phrase: 10,  off: 0   },
+        { f: q(mid * 1.5), amp: 0.45, phrase: 7.5, off: 2.6 },
+        { f: q(mid * 2), amp: 0.3,  phrase: 15,  off: 6.1 },
+      ];
+      const TABLE = 4096;
+      const out = new Float32Array(len);
+      for (const v of voices) {
+        const table = new Float32Array(TABLE + 1);
+        for (let h = 1; h * v.f < Math.min(3500, sr / 2.2); h++) {
+          const hz = h * v.f;
+          const a = (1 / h) * (1 + 3 * Math.exp(-(((hz - 260) / 130) ** 2))) / (1 + (hz / 900) ** 4);
+          for (let j = 0; j <= TABLE; j++) table[j] += a * Math.sin(TAU * h * j / TABLE);
+        }
+        /* Drift: a whole number of slow cycles, so the phase still
+           closes when the loop does. */
+        const k = 1 + ((rnd() * 2) | 0), dph = rnd() * TAU, depth = 0.003 * v.f * secs / (TAU * k);
+        const drift = ctl(t => -depth * Math.cos(TAU * k * t + dph));
+        const breath = ctl(t => {
+          const s = ((t * secs + v.off) % v.phrase), end = v.phrase - 0.7;   // 0.7 s to breathe in
+          if (s >= end) return 0;
+          return Math.min(1, s / 1.3) * Math.min(1, (end - s) / 1.6);
+        });
+        for (let i = 0; i < len; i++) {
+          let ph = (v.f * i / sr + drift(i)) % 1; if (ph < 0) ph += 1;
+          const x = ph * TABLE, j = x | 0;
+          out[i] += v.amp * breath(i) * (table[j] + (table[j + 1] - table[j]) * (x - j));
+        }
+      }
+      return out;
+    },
+    bowl() {
+      /* A struck metal bowl, three strikes a loop. Its partials are not
+         harmonic (≈ 1 : 2.7 : 5.2 : 8.3 : 12), and each is a close pair
+         that slowly warbles — kept under 0.7 Hz, well below the beat. The
+         fundamental sits an octave under the tone. */
+      const ratios = [1, 2.71, 5.15, 8.3, 12.1], amps = [1, 0.55, 0.3, 0.16, 0.08];
+      const taus = [9, 6, 3.8, 2.4, 1.4], splits = [8, 10, 13, 16, 20];   // ÷ secs → Hz
+      const strikes = [0, 1, 2].map(k => ({ at: (k + 0.1 + rnd() * 0.3) * secs / 3, amp: 0.75 + rnd() * 0.25 }));
+      const out = new Float32Array(len);
+      ratios.forEach((r, p) => {
+        const f = q(mid * r);
+        if (f > sr / 2.2) return;
+        const env = ctl(t => {
+          const s = t * secs; let e = 0;
+          for (const st of strikes) {
+            const dt = (((s - st.at) % secs) + secs) % secs;
+            e += st.amp * Math.min(1, dt / 0.004) * Math.exp(-dt / taus[p]);
+          }
+          return e;
+        });
+        addSine(out, f, amps[p], env);
+        addSine(out, f + splits[p] / secs, amps[p], env);
+      });
+      return out;
+    },
+    fan() {
+      /* The motor: a quiet hum on `low` and its next two partials. The
+         air (below) is noise, different in each ear. */
+      const out = new Float32Array(len);
+      [0.5, 0.3, 0.15].forEach((a, k) => addSine(out, q((k + 1) * low), a));
+      return out;
+    },
+  };
+
+  const shared = {};
+  let left, right;
+  if (id === 'brown' || id === 'pink' || id === 'white') {
+    const gen = { brown: noiseBrown, pink: noisePink, white }[id];
+    left = gen(); right = gen();
+  } else if (nature[id]) {
+    left = nature[id](0, shared); right = nature[id](1, shared);
+  } else if (id === 'fan') {
+    const motor = hums.fan();
+    const air = () => lowpass(noisePink(), 1600, 2);
+    const scaleTo = (x, rms) => { let s = 0; for (const v of x) s += v * v; const k = rms / Math.sqrt(s / x.length || 1); return x.map(v => v * k); };
+    const m = scaleTo(motor, 0.035);
+    left = scaleTo(air(), 0.2).map((v, i) => v + m[i]);
+    right = scaleTo(air(), 0.2).map((v, i) => v + m[i]);
+  } else {
+    left = hums[id](); right = left;
+  }
+
+  /* Much the same loudness for every sound. Levelled by RMS, then a soft
+     limiter rounds off the peaks — scaling everything down to its
+     loudest peak instead left a crackling fire or a breaking wave far
+     quieter than steady noise. The gain is capped so a spiky sound is
+     softened, not squashed. One gain for both ears, so a hum's two
+     channels stay identical. */
+  const level = (xs) => {
+    let sum = 0, peak = 0, n = 0;
+    for (const x of xs) for (let i = 0; i < x.length; i++) { const v = x[i]; sum += v * v; n++; if (Math.abs(v) > peak) peak = Math.abs(v); }
+    return Math.min(0.15 / Math.sqrt(sum / n || 1), 1.2 / (peak || 1));
+  };
+  const k = level(left === right ? [left] : [left, right]);
+  const shape = (x) => x.map(v => 0.6 * Math.tanh(v * k / 0.6));
+  const L = shape(left);
+  return { left: L, right: left === right ? L : shape(right), secs, sr };
+}
+const BEATS_STOP_AFTER = [0, 15, 30, 60, 90];
+
+const beatsNum = (v, lo, hi, dflt) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : dflt;
+};
+/* Every way into the settings — localStorage, a slider, a preset — goes
+   through here, so the engine never sees a value it can't play. */
+const sanitiseBeats = (v = {}) => ({
+  beat:      Math.round(beatsNum(v.beat, BEAT_MIN, BEAT_MAX, 10) * 10) / 10,
+  carrier:   Math.round(beatsNum(v.carrier, 100, 400, 200)),
+  volume:    Math.round(beatsNum(v.volume, 0, 100, 35)),
+  noise:     BED_SOUNDS.some(n => n.id === v.noise) ? v.noise : 'brown',
+  noiseVol:  Math.round(beatsNum(v.noiseVol, 0, 100, 30)),
+  mode:      v.mode === 'lock' ? 'lock' : 'mix',
+  stopAfter: BEATS_STOP_AFTER.includes(Number(v.stopAfter)) ? Number(v.stopAfter) : 0,
+});
+
+const BeatsStore = {
+  read() {
+    try { return sanitiseBeats(JSON.parse(localStorage.getItem(BEATS_KEY) || '{}') || {}); }
+    catch { return sanitiseBeats(); }
+  },
+  write(cfg) {
+    try { localStorage.setItem(BEATS_KEY, JSON.stringify(cfg)); }
+    catch (e) { console.warn('beats write failed', e); }
+  },
+};
+
+const Beats = (() => {
+  /* Squared, so the slider's travel feels even to the ear rather than all
+     happening in the bottom fifth. Deliberately quiet at the defaults: this
+     is meant to sit beneath whatever else is playing, not compete with it. */
+  const toneGain  = (v) => (v / 100) ** 2 * 0.35;
+  const noiseGain = (v) => (v / 100) ** 2 * 2;   // bed loops are levelled to ~0.15 RMS
+  const FADE_IN = 2, FADE_OUT = 8;
+
+  let cfg = BeatsStore.read();
+  let ctx = null;
+  let rig = null;        // the live graph while playing, null otherwise
+  let endTimer = null;
+  let status = { playing: false, suspended: false, endsAt: null };
+  const subs = new Set();
+  const snapshot = () => ({ ...status, cfg });
+  const emit = (patch) => {
+    if (patch) status = { ...status, ...patch };
+    const s = snapshot();
+    subs.forEach(fn => fn(s));
+  };
+
+  /* navigator.audioSession is Safari's (16.4+); elsewhere this is a
+     no-op and the browser's own defaults already mix. 'auto' hands the
+     page back to Safari's usual judgement once nothing is playing, so the
+     Pomodoro chime and the adhan behave exactly as they did before. */
+  const audioSession = (type) => {
+    try { if (navigator.audioSession) navigator.audioSession.type = type; } catch {}
+  };
+
+  const ensureCtx = () => {
+    if (ctx && ctx.state !== 'closed') return ctx;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    try { ctx = new AC({ latencyHint: 'playback' }); } catch { ctx = new AC(); }
+    /* iOS reports an interruption (a call, Siri, another app grabbing the
+       audio) as 'interrupted'; everything else says 'suspended'. Either
+       way the view offers a tap to resume rather than pretending. */
+    ctx.onstatechange = () => emit({ suspended: !!rig && ctx.state !== 'running' });
+    return ctx;
+  };
+
+  /* Rendered loops, kept for the few most recently used sounds: a 30 s
+     stereo loop is ~11 MB, and nobody needs all fourteen in memory. A
+     hum is keyed by the pitch it was tuned to. */
+  const bedCache = new Map();
+  const bedKey = (type) => `${type}@${ctx.sampleRate}${bedSound(type).tuned ? `@${cfg.carrier}` : ''}`;
+  const bedBuffer = (type) => {
+    const key = bedKey(type);
+    if (bedCache.has(key)) {
+      const hit = bedCache.get(key); bedCache.delete(key); bedCache.set(key, hit);
+      return hit;
+    }
+    const r = renderBed(type, ctx.sampleRate, cfg.carrier);
+    const buf = ctx.createBuffer(2, r.left.length, r.sr);
+    buf.getChannelData(0).set(r.left);
+    buf.getChannelData(1).set(r.right);
+    bedCache.set(key, buf);
+    while (bedCache.size > 3) bedCache.delete(bedCache.keys().next().value);
+    return buf;
+  };
+
+  /* Swap the bed: the old one fades out as the new one fades in. */
+  const setNoise = (r, type) => {
+    const now = ctx.currentTime;
+    if (r.noise) {
+      const { src, g } = r.noise;
+      g.gain.setTargetAtTime(0, now, 0.12);
+      try { src.stop(now + 0.8); } catch {}
+      r.noise = null;
+    }
+    if (type === 'none') return;
+    const src = ctx.createBufferSource();
+    src.buffer = bedBuffer(type);
+    src.loop = true;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, now);
+    g.gain.setTargetAtTime(1, now, 0.15);
+    src.connect(g); g.connect(r.noiseGain);
+    src.start();
+    r.noise = { src, g, type, key: bedKey(type) };
+  };
+
+  /* Rendering a loop takes a moment of main-thread work — up to a few
+     hundred ms for a hum on a phone. Done just after the click rather
+     than inside it, so the button shows its new state first; and a pitch
+     drag retunes a hum once, when the drag pauses, not at every step. */
+  let bedTimer = null;
+  const queueBed = (delay = 0) => {
+    clearTimeout(bedTimer);
+    bedTimer = setTimeout(() => {
+      if (!rig) return;
+      if (cfg.noise === 'none' ? rig.noise : rig.noise?.key !== bedKey(cfg.noise)) setNoise(rig, cfg.noise);
+    }, delay);
+  };
+
+  const mediaSession = (on) => {
+    const ms = navigator.mediaSession;
+    if (!ms) return;
+    const handle = (action, fn) => { try { ms.setActionHandler(action, fn); } catch {} };
+    if (on) {
+      const band = beatBand(cfg.beat);
+      try {
+        ms.metadata = new MediaMetadata({
+          title: `${beatPreset(cfg.beat)?.name || band.name} · ${fmtHz(cfg.beat)} binaural beat`,
+          artist: 'Command Deck',
+          album: 'Beats',
+          artwork: [{ src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' }],
+        });
+      } catch {}
+      handle('play',  () => api.start());
+      handle('pause', () => api.stop());
+      handle('stop',  () => api.stop());
+      try { ms.playbackState = 'playing'; } catch {}
+    } else {
+      handle('play', null); handle('pause', null); handle('stop', null);
+      try { ms.metadata = null; ms.playbackState = 'none'; } catch {}
+    }
+  };
+
+  /* Where the sound leaves the graph — see the header for why there are
+     two ways out. Called synchronously from the click that starts playback
+     or changes the mode, because el.play() needs that click to count. */
+  const route = (r) => {
+    try { r.master.disconnect(); } catch {}
+    if (r.el) { r.el.pause(); r.el.srcObject = null; r.el = null; }
+    if (cfg.mode === 'lock' && ctx.createMediaStreamDestination) {
+      r.stream = r.stream || ctx.createMediaStreamDestination();
+      r.master.connect(r.stream);
+      const el = new Audio();
+      el.setAttribute('playsinline', '');
+      el.srcObject = r.stream.stream;
+      r.el = el;
+      el.play().catch(() => {
+        /* Refused — no user gesture within reach. Straight to the
+           speakers beats a page that says "playing" and is silent. */
+        if (rig !== r || r.el !== el) return;
+        r.el = null;
+        try { r.master.disconnect(); } catch {}
+        r.master.connect(ctx.destination);
+      });
+      mediaSession(true);
+    } else {
+      r.master.connect(ctx.destination);
+      mediaSession(false);
+    }
+  };
+
+  /* The fade-in, and the sleep timer's fade-out. The fade-out is drawn on
+     the audio clock, so it lands on time even while a backgrounded tab's
+     timers are being throttled; the timeout only tidies up afterwards. */
+  const arm = () => {
+    clearTimeout(endTimer); endTimer = null;
+    if (!rig) return;
+    const g = rig.master.gain, now = ctx.currentTime;
+    g.cancelScheduledValues(now);
+    g.setValueAtTime(g.value, now);
+    g.linearRampToValueAtTime(1, now + FADE_IN);
+    if (cfg.stopAfter > 0) {
+      const secs = cfg.stopAfter * 60;
+      g.setValueAtTime(1, now + secs - FADE_OUT);
+      g.linearRampToValueAtTime(0, now + secs);
+      endTimer = setTimeout(() => api.stop(), secs * 1000);
+      emit({ endsAt: Date.now() + secs * 1000 });
+    } else {
+      emit({ endsAt: null });
+    }
+  };
+
+  const api = {
+    get: snapshot,
+    subscribe(fn) { subs.add(fn); fn(snapshot()); return () => subs.delete(fn); },
+
+    start() {
+      if (rig) return;
+      const c = ensureCtx();
+      if (!c) return;
+      audioSession(cfg.mode === 'lock' ? 'playback' : 'ambient');
+      const master = c.createGain();
+      master.gain.value = 0;
+      const tone = c.createGain();
+      tone.gain.value = toneGain(cfg.volume);
+      const merger = c.createChannelMerger(2);
+      const L = c.createOscillator(), R = c.createOscillator();
+      L.type = R.type = 'sine';
+      L.frequency.value = cfg.carrier;
+      R.frequency.value = cfg.carrier + cfg.beat;
+      /* Hard left, hard right. Not a StereoPanner: the whole effect
+         depends on neither ear hearing any of the other's tone. */
+      L.connect(merger, 0, 0);
+      R.connect(merger, 0, 1);
+      merger.connect(tone);
+      tone.connect(master);
+      const ng = c.createGain();
+      ng.gain.value = noiseGain(cfg.noiseVol);
+      ng.connect(master);
+
+      rig = { master, tone, L, R, noiseGain: ng, noise: null, el: null, stream: null };
+      L.start(); R.start();
+      setNoise(rig, cfg.noise);
+      route(rig);
+      emit({ playing: true, suspended: false });
+      arm();
+      c.resume()
+        .then(() => emit({ suspended: !!rig && c.state !== 'running' }))
+        .catch(() => emit({ suspended: !!rig }));
+    },
+
+    stop() {
+      const r = rig;
+      if (!r) return;
+      rig = null;
+      clearTimeout(endTimer); endTimer = null;
+      clearTimeout(bedTimer);
+      const g = r.master.gain, now = ctx.currentTime;
+      g.cancelScheduledValues(now);
+      g.setValueAtTime(g.value, now);
+      g.linearRampToValueAtTime(0, now + 0.4);
+      emit({ playing: false, suspended: false, endsAt: null });
+      mediaSession(false);
+      setTimeout(() => {
+        [r.L, r.R, r.noise?.src].forEach(n => { try { n && n.stop(); } catch {} });
+        try { r.master.disconnect(); } catch {}
+        if (r.el) { r.el.pause(); r.el.srcObject = null; }
+        /* Unless play was pressed again during the fade */
+        if (!rig) { audioSession('auto'); ctx.suspend().catch(() => {}); }
+      }, 450);
+    },
+
+    toggle() { rig ? api.stop() : api.start(); },
+
+    /* After the system paused us (iOS interruption, a frozen tab). */
+    resume() {
+      if (!rig) return;
+      ctx.resume().catch(() => {});
+      if (rig.el) rig.el.play().catch(() => {});
+    },
+
+    set(patch) {
+      const prev = cfg;
+      cfg = sanitiseBeats({ ...cfg, ...patch });
+      BeatsStore.write(cfg);
+      if (rig) {
+        const t = ctx.currentTime, k = 0.05;
+        rig.L.frequency.setTargetAtTime(cfg.carrier, t, k);
+        rig.R.frequency.setTargetAtTime(cfg.carrier + cfg.beat, t, k);
+        rig.tone.gain.setTargetAtTime(toneGain(cfg.volume), t, k);
+        rig.noiseGain.gain.setTargetAtTime(noiseGain(cfg.noiseVol), t, k);
+        if (cfg.noise !== prev.noise) queueBed(0);
+        else if (cfg.carrier !== prev.carrier && bedSound(cfg.noise).tuned) queueBed(400);
+        if (cfg.mode !== prev.mode) {
+          audioSession(cfg.mode === 'lock' ? 'playback' : 'ambient');
+          route(rig);
+        } else if (cfg.mode === 'lock' && cfg.beat !== prev.beat) {
+          mediaSession(true);   // keep the lock-screen title honest
+        }
+        if (cfg.stopAfter !== prev.stopAfter) arm();
+      }
+      emit();
+    },
+
+    /* Read-only view of the live graph, for the tests and for anyone
+       debugging "is it actually playing?" from the console. */
+    inspect() {
+      return {
+        ctxState: ctx ? ctx.state : null,
+        playing: !!rig,
+        left:  rig ? rig.L.frequency.value : null,
+        right: rig ? rig.R.frequency.value : null,
+        noise: rig ? (rig.noise ? 'on' : 'off') : null,
+        bed:   rig?.noise ? rig.noise.key : null,
+        output: rig ? (rig.el ? 'media-element' : 'speakers') : null,
+      };
+    },
+
+    /* Coming back from the background: a sleep timer that should have
+       fired while timers were frozen has fired, and a context the browser
+       suspended behind our back is asked to carry on. */
+    wake() {
+      if (!rig) return;
+      if (status.endsAt && Date.now() >= status.endsAt) return api.stop();
+      if (ctx.state !== 'running') api.resume();
+    },
+  };
+
+  document.addEventListener('visibilitychange', () => api.wake());
+  window.addEventListener('pageshow', () => api.wake());
+  window.addEventListener('focus', () => api.wake());
+  return api;
+})();
+
+function useBeats() {
+  const [s, setS] = useState(Beats.get);
+  useEffect(() => Beats.subscribe(setS), []);
+  return s;
+}
+
 function App() {
   const [state, setState] = useState(null);
   const [loaded, setLoaded] = useState(false);
@@ -3643,6 +4431,7 @@ function App() {
             glass={glass} setGlass={setGlass}
             syncStatus={syncStatus} onConfigureSync={()=>setSetupOpen(true)} onDisconnect={disconnect}/>}
         {state.ui.view === 'focus'  && <PomodoroView state={state} setState={setState} pomo={pomo}/>}
+        {state.ui.view === 'beats'  && <BeatsView/>}
         {state.ui.view === 'goals'  && <GoalsView state={state} setState={setState}/>}
         {state.ui.view === 'shorts' && <ShortsView state={state} setState={setState} onExit={() => setView('today')}/>}
       </main>
@@ -3738,6 +4527,31 @@ function TimerPill({ pomo, onClick, active }) {
       {fmtClock(secsLeft)}
       <span className="hidden md:inline opacity-70">{targetLabel(session.target) || phase.label}</span>
     </button>
+  );
+}
+
+/* Proof the beats are still playing under whatever tab you are on, and a
+   way to stop them from there without going back to Beats. `compact` is
+   the phone row, where every pixel the pill takes comes out of the
+   section picker beside it. */
+function BeatsPill({ onOpen, active, compact }) {
+  const { playing, cfg } = useBeats();
+  if (!playing || active) return null;
+  const band = beatBand(cfg.beat);
+  return (
+    <span data-testid="beats-pill"
+      className="flex items-center h-8 rounded-full border font-mono text-xs tracking-wider shrink-0 overflow-hidden"
+      style={{ borderColor: `${band.color}55`, background: `${band.color}18`, color: band.color }}>
+      <button onClick={onOpen} title={`${band.name} binaural beat playing — open Beats`}
+        className="flex items-center gap-1.5 pl-3 pr-1.5 h-full">
+        <I.headphones className="w-3.5 h-3.5"/>{!compact && fmtHz(cfg.beat)}
+        {!compact && <span className="hidden md:inline opacity-70">{band.name}</span>}
+      </button>
+      <button onClick={() => Beats.stop()} aria-label="Stop binaural beats" title="Stop"
+        className="h-full pl-1 pr-2.5 opacity-70 hover:opacity-100">
+        <I.x className="w-3 h-3"/>
+      </button>
+    </span>
   );
 }
 
@@ -3872,6 +4686,13 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
       if (!on || !on.offsetWidth) return;
       nav.style.setProperty('--lens-x', `${on.offsetLeft}px`);
       nav.style.setProperty('--lens-w', `${on.offsetWidth}px`);
+      /* Between a phone and a wide laptop the tabs outgrow the bar, so it
+         scrolls inside itself rather than pushing the page sideways — and
+         the current tab is kept in view. scrollLeft, not scrollIntoView,
+         so nothing outside the strip ever moves. */
+      const l = on.offsetLeft, r = l + on.offsetWidth;
+      if (l < nav.scrollLeft) nav.scrollLeft = l - 8;
+      else if (r > nav.scrollLeft + nav.clientWidth) nav.scrollLeft = r - nav.clientWidth + 8;
       if (!nav.hasAttribute('data-ready')) requestAnimationFrame(() => nav.setAttribute('data-ready', ''));
     };
     place();
@@ -3888,6 +4709,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
     { id:'matrix', label:'Matrix',   icon:I.grid  },
     { id:'admin',  label:'Admin',    icon:I.sliders },
     { id:'focus',  label:'Focus',    icon:I.timer  },
+    { id:'beats',  label:'Beats',    icon:I.headphones },
     { id:'goals',  label:'Goals',    icon:I.target },
     { id:'shorts', label:'Motivation', icon:I.play },
   ];
@@ -3930,6 +4752,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
 
           <div className="hidden sm:flex items-center gap-3">
             {pomo && <TimerPill pomo={pomo} active={state.ui.view === 'focus'} onClick={()=>setView('focus')}/>}
+            <BeatsPill active={state.ui.view === 'beats'} onOpen={()=>setView('beats')}/>
             <SyncBadge status={syncStatus} onClick={onConfigureSync}/>
             {syncStatus !== 'local' && (
               <button onClick={onSyncNow} title="Sync now" aria-label="Sync now"
@@ -3967,7 +4790,7 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
                 glass sliding along it, rather than seven separate buttons —
                 a segmented control reads as "pick one of these". The lens is
                 a span, not a button: the tabs are found by their text. */}
-            <nav ref={navRef} className="glass-nav hidden sm:inline-flex items-center gap-1 p-1 rounded-full">
+            <nav ref={navRef} className="glass-nav hidden sm:inline-flex items-center gap-1 p-1 rounded-full max-w-full overflow-x-auto no-scrollbar">
               <span className="lens" aria-hidden="true"/>
               {tabs.map(t => {
                 const Icon = t.icon;
@@ -4018,6 +4841,9 @@ function Header({ state, setState, setView, setDate, syncStatus, onConfigureSync
             <span className="font-display text-xl text-bone-100 leading-none">{pct}<span className="text-sm text-bone-400">%</span></span>
             <span className="font-mono text-[10px] tracking-widest text-bone-400 uppercase">{dayName} done</span>
           </div>
+          {/* Here rather than in the row above, which is already full on a
+              phone — a pill there comes straight out of the section picker. */}
+          <span className="ml-auto"><BeatsPill compact active={state.ui.view === 'beats'} onOpen={()=>setView('beats')}/></span>
         </div>
       </div>
       <InstallBanner />
@@ -9662,6 +10488,217 @@ function PomodoroSettings({ cfg, onChange }) {
 ------------------------------------------------------------------- */
 const SHORTS_EMBED     = 'https://www.youtube-nocookie.com';
 const SHORTS_MAX_SECS  = 300;   /* also the length of one part of a long video */
+/* ------------------------------------------------------------------
+   BEATS VIEW  ─ the face of the Beats engine
+   ------------------------------------------------------------------
+   Holds no audio and no settings of its own: everything is read from and
+   written to the engine, so leaving this tab changes nothing about what
+   is playing.
+------------------------------------------------------------------- */
+function BeatsSlider({ label, value, min, max, step, display, onChange, disabled, testId }) {
+  const pct = ((value - min) / (max - min)) * 100;
+  return (
+    <div className={disabled ? 'opacity-40' : ''}>
+      <div className="flex items-baseline justify-between mb-1.5">
+        <span className="text-[10px] font-mono tracking-widest text-bone-400">{label.toUpperCase()}</span>
+        <span className="font-mono text-xs text-bone-100">{display}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value} disabled={disabled}
+        onChange={e => onChange(Number(e.target.value))}
+        aria-label={label} aria-valuetext={display} data-testid={testId}
+        className="glass-range" style={{ '--pct': `${pct}%` }}/>
+    </div>
+  );
+}
+
+function BeatsView() {
+  const { playing, suspended, endsAt, cfg } = useBeats();
+  const band = beatBand(cfg.beat);
+  const set = (patch) => Beats.set(patch);
+
+  /* The sleep timer's countdown, repainted here only. */
+  const [, repaint] = useState(0);
+  useEffect(() => {
+    if (!endsAt) return;
+    const id = setInterval(() => repaint(n => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [endsAt]);
+  const secsLeft = endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null;
+
+  const status = suspended
+    ? null
+    : playing
+      ? `Playing${secsLeft != null ? ` · stops in ${fmtClock(secsLeft)}` : ''}`
+      : 'Headphones on, then press play';
+
+  return (
+    <div className="max-w-4xl mx-auto pt-6 fadeUp">
+      <SectionHeading kicker="05 / Beats" title="Binaural beats"
+        sub="Headphones on · keeps playing on every tab and in the background · sits underneath your music, recitation or video"/>
+
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6 mt-2">
+
+        {/* ── Left: what's playing ─────────────────────────── */}
+        <div className="lg:col-span-3 space-y-4">
+          <div className="card flex flex-col items-center py-10 gap-6">
+            <div className="relative flex items-center justify-center" style={{ width: 220, height: 220 }}>
+              <div className="beats-orb absolute inset-0 rounded-full" data-on={playing ? '' : undefined}
+                style={{ background: `radial-gradient(circle, ${band.color}33 0%, ${band.color}11 55%, transparent 70%)`,
+                         boxShadow: `inset 0 0 0 1px ${band.color}44` }}/>
+              <div className="beats-orb absolute rounded-full" data-on={playing ? '' : undefined}
+                style={{ inset: 38, animationDelay: '-3s', boxShadow: `inset 0 0 0 1px ${band.color}55` }}/>
+              <div className="relative flex flex-col items-center gap-1">
+                <div data-testid="beats-hz" className="font-display text-5xl leading-none" style={{ color: band.color }}>
+                  {fmtHz(cfg.beat)}
+                </div>
+                <div className="text-[10px] font-mono tracking-[0.2em] text-bone-400 mt-1">{band.name.toUpperCase()}</div>
+                <div data-testid="beats-use" className="text-[11px] text-bone-300 text-center max-w-[160px]">
+                  {beatPreset(cfg.beat)?.name || band.use}
+                </div>
+                <div className="text-[10px] font-mono tracking-wider text-bone-400 mt-1">
+                  L {cfg.carrier} · R {fmtHz(cfg.carrier + cfg.beat)}
+                </div>
+              </div>
+            </div>
+
+            <button onClick={() => Beats.toggle()} aria-label={playing ? 'Stop beats' : 'Play beats'}
+              className="btn w-16 h-16 rounded-full flex items-center justify-center"
+              style={{ background: band.color, boxShadow: `0 0 ${playing ? 32 : 24}px ${band.color}${playing ? '55' : '44'}` }}>
+              {playing
+                ? <svg className="w-6 h-6" viewBox="0 0 24 24" fill="#0a0a0b"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+                : <svg className="w-7 h-7" viewBox="0 0 24 24" fill="#0a0a0b"><polygon points="7 4 20 12 7 20 7 4"/></svg>}
+            </button>
+
+            <div data-testid="beats-status" className="text-xs font-mono tracking-wider text-bone-400 min-h-[1rem] text-center px-4">
+              {suspended
+                ? <button onClick={() => Beats.resume()} className="text-strategy underline underline-offset-2">
+                    Paused by your device — tap to resume
+                  </button>
+                : status}
+            </div>
+
+            <div className="flex flex-col items-center gap-1.5">
+              <span className="text-[10px] font-mono tracking-widest text-bone-400">STOP AFTER</span>
+              <div className="seg" role="group" aria-label="Stop after">
+                {BEATS_STOP_AFTER.map(m => (
+                  <button key={m} onClick={() => set({ stopAfter: m })} aria-pressed={cfg.stopAfter === m}>
+                    {m ? `${m}m` : 'Off'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Presets, grouped by band */}
+          <div className="card p-4 space-y-3" role="group" aria-label="Presets">
+            {BEAT_BANDS.map(b => (
+              <div key={b.id}>
+                <div className="flex items-baseline gap-2 mb-1.5">
+                  <span className="font-display text-base" style={{ color: b.color }}>{b.name}</span>
+                  <span className="font-mono text-[10px] text-bone-400">{b.range}</span>
+                  <span className="text-[10px] text-bone-400 ml-auto text-right hidden sm:inline">{b.use}</span>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {BEAT_PRESETS.filter(p => beatBand(p.hz).id === b.id).map(p => {
+                    const on = cfg.beat === p.hz;
+                    return (
+                      <button key={p.hz} onClick={() => set({ beat: p.hz })} aria-pressed={on}
+                        className="btn px-3 py-1.5 rounded-full text-xs border flex items-baseline gap-1.5"
+                        style={on
+                          ? { borderColor: `${b.color}88`, background: `${b.color}1f`, color: b.color }
+                          : { borderColor: 'var(--s3)', color: 'var(--f1, #c9c6b8)' }}>
+                        <span className="font-mono">{fmtHz(p.hz)}</span>
+                        <span className="opacity-70">{p.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="card-soft p-4 flex gap-3 items-start">
+            <I.headphones className="w-5 h-5 text-bone-400 shrink-0 mt-0.5"/>
+            <p className="text-xs text-bone-400 leading-relaxed">
+              Binaural beats need headphones. Each ear gets its own tone, and the beat is the
+              difference between them, which only exists once your brain combines the two. Through a speaker
+              you'll just hear a hum.
+            </p>
+          </div>
+        </div>
+
+        {/* ── Right: tuning ────────────────────────────────── */}
+        <div className="lg:col-span-2 space-y-4">
+          <div className="card p-5 space-y-4">
+            <div>
+              <div className="text-[10px] font-mono tracking-widest text-strategy mb-0.5">TUNING</div>
+              <div className="font-display text-xl text-bone-100 leading-tight">Shape the tone</div>
+            </div>
+            <BeatsSlider label="Beat" testId="beats-beat" value={cfg.beat} min={BEAT_MIN} max={BEAT_MAX} step={0.1}
+              display={`${fmtHz(cfg.beat)} · ${band.name}`} onChange={v => set({ beat: v })}/>
+            <BeatsSlider label="Pitch" testId="beats-carrier" value={cfg.carrier} min={100} max={400} step={5}
+              display={`${cfg.carrier} Hz`} onChange={v => set({ carrier: v })}/>
+            <BeatsSlider label="Tone volume" testId="beats-volume" value={cfg.volume} min={0} max={100} step={1}
+              display={`${cfg.volume}%`} onChange={v => set({ volume: v })}/>
+            <p className="text-[10px] font-mono tracking-wider text-bone-400">
+              Lower pitches are softer and easier to leave running. The volume starts low on purpose, so it sits underneath whatever else is playing.
+            </p>
+          </div>
+
+          <div className="card p-5 space-y-4">
+            <div>
+              <div className="text-[10px] font-mono tracking-widest text-strategy mb-0.5">SOUND BED</div>
+              <div className="font-display text-xl text-bone-100 leading-tight">A bed underneath</div>
+            </div>
+            <div className="space-y-3" role="group" aria-label="Sound bed">
+              {BED_GROUPS.map(g => (
+                <div key={g.id}>
+                  <div className="text-[10px] font-mono tracking-widest text-bone-400 mb-1.5">{g.label.toUpperCase()}</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {BED_SOUNDS.filter(x => x.group === g.id).map(x => {
+                      const on = cfg.noise === x.id;
+                      return (
+                        <button key={x.id} onClick={() => set({ noise: x.id })} aria-pressed={on}
+                          className="btn px-3 py-1.5 rounded-full text-xs border"
+                          style={on
+                            ? { borderColor: `${band.color}88`, background: `${band.color}1f`, color: band.color }
+                            : { borderColor: 'var(--s3)', color: 'var(--f1, #c9c6b8)' }}>
+                          {x.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <BeatsSlider label="Bed volume" testId="beats-noise-volume" value={cfg.noiseVol} min={0} max={100} step={1}
+              display={`${cfg.noiseVol}%`} onChange={v => set({ noiseVol: v })} disabled={cfg.noise === 'none'}/>
+            <p className="text-[10px] font-mono tracking-wider text-bone-400">
+              Softens the bare tone and masks the room. Hums are tuned to the tone's pitch and play the same in both ears, so they stay in tune with it and add no beat of their own.
+            </p>
+          </div>
+
+          <div className="card p-5 space-y-3">
+            <div>
+              <div className="text-[10px] font-mono tracking-widest text-strategy mb-0.5">PLAYBACK</div>
+              <div className="font-display text-xl text-bone-100 leading-tight">Alongside other audio</div>
+            </div>
+            <div className="seg" role="group" aria-label="Playback mode">
+              <button onClick={() => set({ mode: 'mix' })} aria-pressed={cfg.mode === 'mix'}>Mix with other audio</button>
+              <button onClick={() => set({ mode: 'lock' })} aria-pressed={cfg.mode === 'lock'}>Lock screen</button>
+            </div>
+            <p data-testid="beats-mode-note" className="text-xs text-bone-400 leading-relaxed">
+              {cfg.mode === 'mix'
+                ? 'Plays alongside music, recitation and video without pausing them, and keeps going while you switch tabs here or work in other apps. On a phone, the system may pause it when the screen locks.'
+                : 'Plays as media with lock-screen controls, so it can keep going with the screen off. On a phone that makes it the main audio, so it may pause music playing in another app. On a computer it still mixes with everything.'}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const SHORTS_COUNTDOWN = 3;
 
 function ShortsView({ state, setState, onExit }) {
